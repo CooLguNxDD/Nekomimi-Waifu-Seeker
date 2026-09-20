@@ -69,7 +69,7 @@ def shortlist_with_online(
         return [], meta
 
     try:
-        from .web_search import attach_images, search_characters_multiround
+        from .web_search import attach_images, last_search_meta, search_characters_multiround
 
         remote, logs = search_characters_multiround(query, rounds=rounds, per_round=5)
         remote = attach_images(remote, query, limit=min(top_k, 8))
@@ -80,6 +80,11 @@ def shortlist_with_online(
     meta["online_used"] = True
     meta["online_count"] = len(remote)
     meta["rounds"] = logs
+    got = last_search_meta()
+    meta["backend"] = got.get("backend")
+    meta["enriched"] = got.get("enriched", 0)
+    meta["search_state"] = got.get("search_state")
+    meta["errors"] = got.get("errors") or []
 
     merged: dict[str, tuple[dict[str, Any], float]] = {}
     for c, s in local:

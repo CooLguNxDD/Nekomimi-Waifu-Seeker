@@ -1,6 +1,6 @@
 # Nekomimi-Waifu-Seeker
 
-An **Nekomimi character guesser** for **anime, manga, comics and games**, plus the original one-shot feature matcher. Both are decided by **[Laya](https://huggingface.co/convaiinnovations/laya)** — a non-autoregressive decision model that answers typed questions (`choice` / `score` / `noul`) with calibrated probabilities. Laya never generates text; it only decides. Candidates come from DuckDuckGo.
+An **Nekomimi character guesser** for **anime, manga, comics and games**, plus the original one-shot feature matcher. Both are decided by **[Laya](https://huggingface.co/convaiinnovations/laya)** — a non-autoregressive decision model that answers typed questions (`choice` / `score` / `noul`) with calibrated probabilities. Laya never generates text; it only decides. Candidates come from Playwright (headless Chromium) first, then DuckDuckGo fills remaining slots. The game is **Nekomimi** at `/nekomimi` and `/api/nekomimi/*`.
 
 ## Nekomimi mode
 
@@ -59,6 +59,9 @@ python -m venv .venv
 
 pip install -r requirements.txt
 pip install -e .
+# optional: headless Chromium search (falls back to DuckDuckGo if missing)
+pip install -e ".[playwright]"
+playwright install chromium
 ```
 
 First Laya load downloads ~800MB of weights from Hugging Face. For a quick demo without that:
@@ -101,7 +104,7 @@ pip install -e ".[dev]"
 python -m pytest tests -q
 ```
 
-Offline: Laya and DuckDuckGo are both stubbed.
+Offline: Laya, Playwright, and DuckDuckGo are stubbed. Tests never launch Chromium.
 
 
 ## Docker

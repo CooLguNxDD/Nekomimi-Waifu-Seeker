@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 laya = ["laya>=0.3.0"]
 dml = ["onnxruntime-directml", "onnx"]
+playwright = ["playwright>=1.49"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

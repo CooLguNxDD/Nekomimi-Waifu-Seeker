@@ -40,7 +40,9 @@ def format_result(result: dict) -> str:
         lines.append("")
         lines.append(
             f"Search: online={search.get('online_used')} "
-            f"ddg_hits={search.get('online_count')} "
+            f"backend={search.get('backend')} "
+            f"state={search.get('search_state')} "
+            f"hits={search.get('online_count')} "
             f"err={search.get('online_error')} "
             f"rounds={len(search.get('rounds') or [])}"
         )
@@ -58,9 +60,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true", help="Print raw JSON")
     p.add_argument("--fallback", action="store_true", help="Force keyword fallback (skip Laya)")
     p.add_argument("--top-k", type=int, default=8, help="Shortlist size before decision")
-    p.add_argument("--online", dest="online", action="store_true", default=None, help="Force DuckDuckGo enrichment")
-    p.add_argument("--no-online", dest="online", action="store_false", help="Disable DuckDuckGo")
-    p.add_argument("--rounds", type=int, default=3, help="DuckDuckGo search rounds (1-5)")
+    p.add_argument("--online", dest="online", action="store_true", default=None, help="Force online search")
+    p.add_argument("--no-online", dest="online", action="store_false", help="Disable online search")
+    p.add_argument("--rounds", type=int, default=3, help="Online search rounds (1-5)")
     args = p.parse_args(argv)
     query = " ".join(args.query).strip()
     if not query:
