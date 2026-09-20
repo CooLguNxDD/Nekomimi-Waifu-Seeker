@@ -49,7 +49,7 @@ def _offline(monkeypatch):
     # The engine now sources through AniList/Wikipedia; without this the suite
     # would quietly go to the network and pull in real characters.
     monkeypatch.setattr(engine.sources, "find_candidates", lambda *a, **k: list(POOL))
-    monkeypatch.setattr(engine, "load_catalog", lambda: [])
+    monkeypatch.setattr(engine, "ONLINE", True)
     yield
 
 
@@ -405,8 +405,7 @@ def test_full_round_with_900_candidates_and_model_judgments(monkeypatch):
          "tags": ["game", "female"], "popularity": 100000}
         for i in range(899)
     ] + [POOL[1]]
-    monkeypatch.setattr(engine, "load_catalog", lambda: catalog)
-    monkeypatch.setattr(engine, "ONLINE", False)
+    monkeypatch.setattr(engine.sources, "find_candidates", lambda *a, **k: catalog)
     target_tags = set(POOL[1]["tags"])
     by_instruction = {q["instructions"]: q for q in traits.QUESTION_BANK}
     evaluated = set()
@@ -432,6 +431,98 @@ def test_full_round_with_900_candidates_and_model_judgments(monkeypatch):
     assert state["guess"]["name"] == "Mario"
     assert state["guess_number"] == 1
     assert s.turn <= engine.MAX_TURNS
+
+
+def test_empty_search_continues_and_target_can_arrive_after_answer(monkeypatch):
+    calls = []
+
+    def search(terms, **kwargs):
+        calls.append((terms, kwargs.get("medium_hint")))
+        return [] if len(calls) == 1 else [POOL[1]]
+
+    monkeypatch.setattr(engine.sources, "find_candidates", search)
+    state = engine.start()
+    assert state["stage"] == "asking"
+    assert state["question"]["qid"] == "medium_game"
+    s = sess_mod.get_session(state["session_id"])
+    assert not s.candidates
+    state = engine.submit_answer(s, "yes")
+    assert len(calls) == 2
+    assert calls[-1][1] == "game"
+    assert s.by_id("c_mario") is not None
+    assert state["stage"] == "asking"
+
+
+def test_search_terms_preserve_seed_and_details_but_not_negative_keywords():
+    s = sess_mod.new_session("Nintendo")
+    s.asked = [
+        {"text": "Is your character female?", "answer": "no", "detail": None},
+        {"text": "Is your character male?", "answer": "yes", "detail": "Italian plumber"},
+    ]
+    assert engine._search_terms(s) == ["Nintendo", "Italian plumber", "male"]
+
+
+def test_a_single_unverified_search_result_is_not_enough_to_guess():
+    s = sess_mod.new_session()
+    s.add_candidates([POOL[1]])
+    s.turn = 6
+    assert s.posterior()[0][1] == 1.0
+    assert not engine._should_guess(s, {"ready_to_guess": {
+        "noul": 0.99, "action": {"act_probability": 0.99}}})
+
+
+def test_free_text_clues_are_evaluated_by_laya(monkeypatch):
+    seen = []
+    monkeypatch.setattr(laya_client, "ask", lambda state, questions:
+                        seen.append(state) or {"match": {"noul": 0.8}})
+    state = engine.start("Italian plumber")
+    s = sess_mod.get_session(state["session_id"])
+    assert "clue_seed" in s.evidence
+    assert any(x.get("clues") == "Italian plumber" for x in seen)
+
+
+def test_runtime_never_reads_local_catalog(monkeypatch):
+    from waifu_engine import catalog, decide
+
+    def forbidden():
+        pytest.fail("runtime must not read catalog.json")
+
+    monkeypatch.setattr(catalog, "load_catalog", forbidden)
+    assert engine.start()["stage"] == "asking"
+    assert decide.determine("Mario", online=False)["mode"] == "empty"
+
+
+def test_search_driven_round_discovers_target_from_later_detail(monkeypatch):
+    target_tags = set(POOL[1]["tags"])
+    queries = []
+
+    def search(terms, **kwargs):
+        queries.append(terms)
+        return [POOL[1]] if "Italian plumber" in terms else [POOL[0]]
+
+    def judge(state, questions):
+        if "match" not in questions:
+            return None
+        if state.get("clues"):
+            return {"match": {"noul": 0.95 if state["candidate"].startswith("Mario (") else 0.05}}
+        q = next(q for q in traits.QUESTION_BANK
+                 if q["instructions"] == questions["match"]["instructions"])
+        return {"match": {"noul": 0.95 if set(q["tags_true"]) & target_tags else 0.05}}
+
+    monkeypatch.setattr(engine.sources, "find_candidates", search)
+    monkeypatch.setattr(laya_client, "ask", judge)
+    state = engine.start()
+    s = sess_mod.get_session(state["session_id"])
+    assert s.by_id("c_mario") is None
+    state = engine.submit_answer(s, "yes")  # game; the first anime hit is removed
+    assert state["stage"] == "asking"
+    state = engine.submit_answer(s, "detail", "Italian plumber")
+    assert s.by_id("c_mario") is not None
+    while state["stage"] == "asking":
+        state = engine.submit_answer(s, _answer_as(target_tags, state["question"]["qid"]))
+    assert state["guess"]["name"] == "Mario"
+    assert state["guess_number"] == 1
+    assert len(queries) == 1 + sum(bool(a["answer"]) for a in s.asked)
 
 
 def test_nekomimi_page_and_api_paths():

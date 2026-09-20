@@ -47,18 +47,23 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
 | `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo fills remaining slots |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
-| `waifu_engine/search.py`, `catalog.py` | Keyword scoring, local 900-character seed catalog |
+| `waifu_engine/search.py`, `catalog.py` | Online shortlist ranking; catalog helpers remain for tooling but runtime never loads the catalog |
 
 ## The turn contract
 
-1. `_pick_question` chooses by mutual information (answer entropy minus
-   within-candidate uncertainty); Laya only answers `ready_to_guess`.
+1. Establish the medium, then `_pick_question` chooses by mutual information
+   (answer entropy minus within-candidate uncertainty); Laya only answers
+   `ready_to_guess`. Empty searches keep asking until the turn limit.
 2. `score_candidates` records evidence and evaluates **every eligible candidate**
    with an independent `match` noul call. Never gate evidence on `scoring_pool()`;
    that top-10 list is only a readiness summary.
 3. Successful probabilities are cached by candidate/question. Replay history for
    new search results, apply known medium constraints before inference, and
    rebuild scores from capped popularity priors plus answer log-likelihoods.
+4. Search again after **every answer**, replaying history before the next
+   question/guess. Use compact positive clues and shorter fallback queries;
+   negatives stay in model evidence. Preserve provider relevance before fame.
+   Never seed from `catalog.json`, including in the one-shot mode.
 
 The loop does not call `prune()`: soft evidence must remain recoverable. Only
 medium contradictions and rejected guesses eliminate candidates. Heuristic
@@ -67,12 +72,14 @@ candidate tags or feed noisy mined tags to Laya as confirmed identity facts.
 `posterior()` softmaxes these scores. Cost scales with eligible candidates per
 new trait; there is no longer a ten-forward-pass evidence budget.
 
-Answers are **`yes` / `no` / `detail`**. `detail` carries no evidence weight — it
-appends free text to `session.constraints`, which drives the next candidate
-refresh (Playwright then DuckDuckGo).
+Answers are **`yes` / `no` / `detail`**. `detail` does not answer the current
+yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and
+refines search. The initial seed is evaluated the same way.
 
 Guess when any of: top posterior ≥ 0.80 after ≥ 5 questions; `ready_to_guess.noul`
-≥ 0.75 with `act_probability` ≥ 0.6; or turn ≥ `MAX_TURNS`. Up to 3 guesses.
+≥ 0.75 with `act_probability` ≥ 0.6; or turn ≥ `MAX_TURNS`. Early guesses also
+require at least two model judgments with mean answer likelihood ≥ 0.6. A lone
+search hit is not sufficient evidence. Up to 3 guesses.
 
 **Every Laya path has a heuristic fallback** (`_tag_match`, `_split_quality`), so
 the loop plays with no weights installed — less sharply. Never let a Laya failure

@@ -22,6 +22,7 @@ import re
 import threading
 from functools import lru_cache
 from typing import Any
+from urllib.parse import urlparse
 
 from . import browser_search
 
@@ -347,6 +348,15 @@ def _extract_names(title: str, body: str) -> list[tuple[str, float]]:
 
 
 def _is_character_page(title: str, href: str, body: str) -> bool:
+    parsed = urlparse(href or "")
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    character_paths = {
+        "vndb.org": r"/c\d+/?$",
+        "myanimelist.net": r"/character/\d+(?:/|$)",
+        "anilist.co": r"/character/\d+(?:/|$)",
+    }
+    if host in character_paths and not re.match(character_paths[host], parsed.path):
+        return False
     if LISTICLE.search(title or ""):
         return False
     if any(d in (href or "").lower() for d in JUNK_DOMAINS):

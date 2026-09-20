@@ -159,10 +159,6 @@ def determine(
         force_fallback = True
     if online is None:
         online = os.getenv("WAIFU_ONLINE_SEARCH", "1").lower() in {"1", "true", "yes"}
-    # Empty catalog => always search online
-    from .catalog import load_catalog
-    if len(load_catalog()) == 0:
-        online = True
     rounds = int(os.getenv("WAIFU_SEARCH_ROUNDS", str(rounds)) or rounds)
     pairs, search_meta = shortlist_with_online(query, top_k=top_k, online=online, rounds=rounds)
     candidates = [c for c, _ in pairs]

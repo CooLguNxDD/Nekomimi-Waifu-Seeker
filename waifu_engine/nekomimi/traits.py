@@ -110,6 +110,14 @@ def _trait_block(
 
 MEDIUM_VALUES = ("anime", "manga", "comic", "game")
 
+
+def clue_question(qid: str, clues: str) -> dict[str, Any]:
+    """Evaluate a user's free-text search clue against one retrieved identity."""
+    question = _q(qid, "clue", "Does your character match these clues?",
+                  "Does `candidate` match the supplied `clues`?")
+    question["clues"] = clues
+    return question
+
 QUESTION_BANK: list[dict[str, Any]] = [
     # --- medium: highest information gain, asked first ---
     _q("medium_game", "medium", "Is your character from a video game?",

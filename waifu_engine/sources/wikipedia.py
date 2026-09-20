@@ -189,6 +189,7 @@ def search_characters(query: str, limit: int = 8) -> list[dict[str, Any]]:
             "prop": "extracts|pageimages|categories|pageviews",
             "exintro": "1",
             "explaintext": "1",
+            "exlimit": "max",
             "piprop": "thumbnail",
             "pithumbsize": "400",
             "clshow": "!hidden",
@@ -196,7 +197,7 @@ def search_characters(query: str, limit: int = 8) -> list[dict[str, Any]]:
         }
     )
     out = []
-    for p in pages:
+    for p in sorted(pages, key=lambda p: p.get("index", 0)):
         cand = _to_candidate(p)
         if cand:
             out.append(cand)

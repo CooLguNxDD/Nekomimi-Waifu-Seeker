@@ -8,6 +8,7 @@ filled up with trope pages.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from . import anilist, wikipedia
@@ -28,10 +29,24 @@ _MEDIUM_SUFFIX = {
 
 
 def _queries(constraints: list[str], medium_hint: str | None) -> list[str]:
-    facts = [c.strip() for c in constraints if c and c.strip()]
-    base = " ".join(facts[-5:])[:200].strip() or "popular character"
+    facts = []
+    for c in constraints:
+        c = (c or "").strip()
+        if not c or re.match(r"(?:not true:|the character is not\b)", c, re.I):
+            continue
+        c = re.sub(r"^(?:The character (?:is|does|has)|(?:Is|Does|Has|Did) your character)\s+",
+                   "", c, flags=re.I).rstrip("?")
+        if c and c not in facts:
+            facts.append(c[:80])
     suffix = _MEDIUM_SUFFIX.get(medium_hint or "", "character")
-    return [f"{base} {suffix}", base]
+    if not facts:
+        return [f"fictional {suffix}"]
+    # Retry narrower combinations when an overconstrained conjunction is empty.
+    # Keep the seed/first clue as an anchor and the newest clue in every query.
+    groups = [[facts[0], *facts[-3:]], [facts[0], facts[-1]], [facts[-1]]]
+    return list(dict.fromkeys(
+        f"{' '.join(dict.fromkeys(group))[:200]} {suffix}" for group in groups
+    ))
 
 
 def find_candidates(
@@ -67,8 +82,10 @@ def find_candidates(
             from .. import browser_search
 
             if browser_search.available():
-                q = queries[0] if queries else "popular character"
-                take(web_search._playwright_hits(q, medium_hint, limit))
+                for q in queries:
+                    if len(found) >= limit:
+                        break
+                    take(web_search._playwright_hits(q, medium_hint, min(50, limit + len(exclude_names))))
                 pw_ok = True
                 pw_empty = len(found) == before
             elif web_search.search_backend() == "playwright":
@@ -81,14 +98,20 @@ def find_candidates(
     for q in queries:
         if len(found) >= limit:
             break
-        take(wikipedia.search_characters(q, limit=limit))
+        try:
+            take(wikipedia.search_characters(q, limit=min(50, limit + len(exclude_names))))
+        except Exception as exc:  # noqa: BLE001
+            web_search._note_error(f"wikipedia: {exc}")
 
     # AniList adds gender, popularity and better anime/manga coverage.
     if medium_hint in (None, "anime", "manga") and len(found) < limit:
         for q in queries:
             if len(found) >= limit:
                 break
-            take(anilist.search_characters(q, limit=limit))
+            try:
+                take(anilist.search_characters(q, limit=limit))
+            except Exception as exc:  # noqa: BLE001
+                web_search._note_error(f"anilist: {exc}")
 
     need_ddg = use_ddg and web_search._want_ddg_fill(
         len(found), limit, pw_ok=pw_ok, pw_empty=pw_empty, pw_error=pw_error
@@ -97,16 +120,20 @@ def find_candidates(
         web_search._set_state("fill_ddg")
         web_search._TLS.nested_ddg = True
         try:
-            take(web_search.search_by_constraints(
-                constraints, medium_hint=medium_hint, limit=limit
-            ))
+            for q in queries:
+                if len(found) >= limit:
+                    break
+                take(web_search.search_by_constraints(
+                    [q], medium_hint=medium_hint,
+                    limit=min(50, limit + len(exclude_names)),
+                ))
         except Exception as exc:  # noqa: BLE001
             web_search._note_error(f"ddg: {exc}")
         finally:
             web_search._TLS.nested_ddg = False
 
-    ranked = sorted(found.values(), key=lambda c: c.get("popularity", 0), reverse=True)
-    out = ranked[:limit]
+    # Preserve provider relevance. Fame is only a capped prior after retrieval.
+    out = list(found.values())[:limit]
     if web_search._enrich_on() and out:
         web_search._set_state("enrich")
         try:

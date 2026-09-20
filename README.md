@@ -4,14 +4,16 @@ An **Nekomimi character guesser** for **anime, manga, comics and games**, plus t
 
 ## Nekomimi mode
 
-Think of a character. The engine asks **Yes / No** questions — or you can type a detail instead of answering — and narrows a live candidate pool until it guesses.
+Think of a character. The engine asks **Yes / No** questions — or you can type a detail instead of answering — and searches for matching characters after every answer. The runtime does not read `data/catalog.json`.
 
 ```bash
 python -m waifu_engine.web
 # open http://127.0.0.1:7860/nekomimi
 ```
 
-Question selection uses expected information gain. Laya evaluates each eligible
+The decision tree first establishes the medium, then selects questions by
+expected information gain over retrieved candidates. Empty searches lead to
+more questions, up to the turn limit. Laya evaluates each eligible
 character independently and also judges readiness:
 
 | Laya question | Type | Decides |
@@ -19,13 +21,19 @@ character independently and also judges readiness:
 | `ready_to_guess` | `noul` | whether the evidence is enough to name a character |
 | `match` | `noul` | whether one character satisfies the trait just asked |
 
+Search uses concise positive clues, with shorter query variants when a search
+is too restrictive. Negative answers remain in Laya's evidence instead of
+becoming misleading positive search keywords. New results are evaluated against
+the full answer history, including the seed and free-text details. An early
+guess needs model evidence; being the only search result is insufficient.
+
 Every eligible candidate is scored, regardless of its current rank. Successful
 model judgments are cached for the session; new arrivals receive the earlier
 questions too. Scores sum log-likelihoods with a capped popularity prior.
 Only confirmed medium contradictions and rejected guesses eliminate identities;
 uncertain scores can recover. Mined tags guide question selection but are not
 presented as facts to Laya. This costs one model call per eligible candidate per
-new trait, so large catalogs take longer than the former top-10 approximation.
+new trait, so large search result pools take longer than small ones.
 It guesses at 80% posterior, or
 after 20 questions, and gets up to 3 guesses. Questions live in
 `waifu_engine/nekomimi/traits.py` (~110 ACG traits) and are topped up with traits
@@ -45,7 +53,7 @@ Runs without weights too — every Laya decision has a tag/entropy fallback.
 ## One-shot pipeline
 
 1. **Input** — free-text features (`silver hair tsundere genius`)
-2. **Search** — keyword shortlist from `data/catalog.json`
+2. **Search** — online character discovery and relevance ranking
 3. **Decide** — Laya picks the best match among the shortlist (or keyword fallback)
 4. **Output** — winner + runners-up + confidence
 
@@ -92,13 +100,16 @@ python -m waifu_engine.web
 
 Open http://127.0.0.1:7860
 
-## Extend the catalog
+## Candidate discovery
 
-Edit `data/catalog.json` — add objects with `id`, `name`, `series`, `tags`, `blurb`. No code changes required.
+Both modes use online search. The historical catalog file is unused by the
+runtime. Disabling online search returns no candidates; it does not fall back
+to a fixed character list. In Nekomimi, supply a series, appearance, occupation,
+or another distinguishing detail to refine the next search.
 
 ## Notes
 
-- Catalog is SFW adult characters only. Scope covers anime, manga, comics and games.
+- Scope covers anime, manga, comics and games.
 - High-cardinality Laya choice sets are weaker; we shortlist first (~8) then decide.
 - Prefer `USE_TF=0` if Transformers hangs while probing TensorFlow.
 - CPU-only here (AMD RDNA2, no CUDA): ~26s one-time model load, ~1.2s per batch of 10 questions.

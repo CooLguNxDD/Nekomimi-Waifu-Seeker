@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .catalog import character_text, load_catalog
+from .catalog import character_text
 
 STOP = {
     "a", "an", "the", "and", "or", "with", "who", "has", "have", "is", "are",
@@ -38,13 +38,8 @@ def keyword_score(query: str, character: dict[str, Any]) -> float:
 
 
 def shortlist(query: str, top_k: int = 8) -> list[tuple[dict[str, Any], float]]:
-    catalog = load_catalog()
-    if not catalog:
-        return []
-    scored = [(c, keyword_score(query, c)) for c in catalog]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    positive = [x for x in scored if x[1] > 0]
-    return (positive or scored)[:top_k]
+    """Search-backed convenience API; never reads a local character catalog."""
+    return shortlist_with_online(query, top_k=top_k)[0]
 
 
 def shortlist_with_online(
@@ -58,14 +53,10 @@ def shortlist_with_online(
         "online_count": 0,
         "online_error": None,
         "rounds": [],
-        "catalog_size": len(load_catalog()),
+        "catalog_size": 0,
     }
-    local = shortlist(query, top_k=top_k)
-    # Online-only when catalog empty, or when online enabled
-    if not online and local:
-        return local, meta
-    if not online and not local:
-        meta["online_error"] = "catalog empty and online search disabled"
+    if not online:
+        meta["online_error"] = "online search disabled"
         return [], meta
 
     try:
@@ -75,7 +66,7 @@ def shortlist_with_online(
         remote = attach_images(remote, query, limit=min(top_k, 8))
     except Exception as e:  # noqa: BLE001
         meta["online_error"] = str(e)
-        return local, meta
+        return [], meta
 
     meta["online_used"] = True
     meta["online_count"] = len(remote)
@@ -87,8 +78,6 @@ def shortlist_with_online(
     meta["errors"] = got.get("errors") or []
 
     merged: dict[str, tuple[dict[str, Any], float]] = {}
-    for c, s in local:
-        merged[c["id"]] = (c, s)
     for c in remote:
         s = keyword_score(query, c) + 0.35
         toks = tokenize(query)

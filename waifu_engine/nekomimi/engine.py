@@ -24,7 +24,6 @@ import threading
 from typing import Any
 
 from .. import sources, web_search
-from ..catalog import load_catalog
 from . import laya_client
 from .session import (
     MAX_GUESSES,
@@ -38,6 +37,7 @@ from .traits import (
     ANSWER_WEIGHT,
     QUESTION_BANK,
     QUESTIONS_BY_ID,
+    clue_question,
     make_dynamic,
     noul_criteria,
 )
@@ -58,8 +58,6 @@ MIN_QUESTIONS_BEFORE_GUESS = int(os.getenv("WAIFU_NEKOMINI_MIN_QUESTIONS", "5"))
 # Laya saying "ready" is not enough on its own -- with a flat posterior it
 # would guess a random candidate. Require a leader as well.
 READY_MIN_POSTERIOR = float(os.getenv("WAIFU_NEKOMINI_READY_POSTERIOR", "0.45"))
-REFRESH_EVERY = 3
-REFRESH_WHEN_BELOW = 4
 ONLINE = os.getenv("WAIFU_ONLINE_SEARCH", "1").lower() in {"1", "true", "yes"}
 
 _SESSION_LOCKS: dict[str, threading.Lock] = {}
@@ -88,23 +86,18 @@ def _medium_hint(sess: GuessSession) -> str | None:
 
 
 def _search_terms(sess: GuessSession) -> list[str]:
-    terms = list(sess.constraints)
+    # Search engines often ignore negation: "not female" retrieves female
+    # characters. Negative answers remain in the model evidence, not keywords.
+    terms = []
     if sess.seed:
-        terms.insert(0, sess.seed)
-    return terms or ["popular anime game comic character"]
-
-
-def seed_from_catalog(sess: GuessSession) -> int:
-    """Start warm from the prebuilt catalog instead of a cold web search."""
-    try:
-        entries = load_catalog()
-    except Exception as exc:  # noqa: BLE001 - a broken catalog must not end the round
-        sess.notes.append(f"catalog unavailable: {exc}")
-        return 0
-    if not entries:
-        return 0
-    with _session_lock(sess):
-        return sess.add_candidates(entries)
+        terms.append(sess.seed)
+    for a in sess.asked:
+        if a.get("detail"):
+            terms.append(a["detail"])
+        if a.get("answer") == "yes":
+            text = re.sub(r"^(?:Is|Does|Has|Did) your character\s+", "", a["text"])
+            terms.append(text.rstrip("?"))
+    return list(dict.fromkeys(terms)) or ["fictional character"]
 
 
 def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = False) -> int:
@@ -232,6 +225,10 @@ def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
     ]
     if not pool:
         pool = [q for q in QUESTION_BANK if q["id"] not in asked]
+    # Establish a search domain before ranking a small, biased result set.
+    domains = [q for q in pool if q["id"] in _MEDIUM_QUESTIONS]
+    if _medium_hint(sess) is None and domains:
+        return domains[:CHOICE_WIDTH]
     pool.sort(key=lambda q: _split_quality(q, weighted), reverse=True)
     return pool[:CHOICE_WIDTH]
 
@@ -309,8 +306,11 @@ def _match_probabilities(
     # holds" -- the model is scoring against a restatement of the real claim.
     criteria = question.get("criteria") or noul_criteria(question["instructions"])
     for c in pool:
+        state = {"candidate": c.profile()}
+        if question.get("clues"):
+            state["clues"] = question["clues"]
         answers = laya_client.ask(
-            {"candidate": c.profile()},
+            state,
             {
                 "match": {
                     "type": "noul",
@@ -418,7 +418,7 @@ def _guess_payload(sess: GuessSession) -> dict[str, Any]:
             "session_id": sess.id,
             "stage": "done",
             "guess": None,
-            "message": "Out of candidates -- no character matches those answers.",
+            "message": "Search did not find a matching character. Try another round with a specific clue.",
             "top": [],
         }
     cand, prob = ranked[0]
@@ -439,13 +439,22 @@ def _guess_payload(sess: GuessSession) -> dict[str, Any]:
 def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bool:
     ranked = sess.posterior()
     if not ranked:
+        return sess.turn >= MAX_TURNS
+    if sess.turn >= MAX_TURNS:
         return True
-    if len(ranked) == 1 and sess.turn >= 3:
-        return True
+    # The posterior is conditional on what search happened to find. A lone hit
+    # has probability 1 even when it contradicts every clue. Require independent
+    # model support before turning relative rank into an early guess.
+    leader = ranked[0][0]
+    support = []
+    for qid, (_, answer) in sess.evidence.items():
+        p = sess.match_cache.get((leader.id, qid))
+        if p is not None:
+            support.append(p if answer == "yes" else 1.0 - p)
+    if len(support) < 2 or sum(support) / len(support) < 0.6:
+        return False
     top_p = ranked[0][1]
     if top_p >= GUESS_CONFIDENCE and sess.turn >= MIN_QUESTIONS_BEFORE_GUESS:
-        return True
-    if sess.turn >= MAX_TURNS:
         return True
     if laya_answers and sess.turn >= MIN_QUESTIONS_BEFORE_GUESS and top_p >= READY_MIN_POSTERIOR:
         ready = laya_answers.get("ready_to_guess") or {}
@@ -457,8 +466,6 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
 
 def _advance(sess: GuessSession) -> dict[str, Any]:
     """Emit the next question, or a guess when the evidence is strong enough."""
-    if len(sess.alive_candidates()) < REFRESH_WHEN_BELOW:
-        refresh_candidates(sess)
     question, laya_answers = _pick_question(sess)
     if _should_guess(sess, laya_answers) or not question:
         return _guess_payload(sess)
@@ -491,9 +498,7 @@ def start(seed: str = "") -> dict[str, Any]:
     sess = new_session(seed)
     if seed:
         sess.constraints.append(seed)
-    seeded = seed_from_catalog(sess)
-    if seeded:
-        sess.notes.append(f"catalog seeded {seeded} candidates")
+        score_candidates(sess, clue_question("clue_seed", seed), "yes")
     refresh_candidates(sess, limit=16, initial=True)
     payload = _advance(sess)
     payload["seed"] = sess.seed
@@ -533,12 +538,12 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
         sess.constraints.append(current["detail"])
 
     score_candidates(sess, question, answer)
+    if current["detail"]:
+        score_candidates(sess, clue_question(f"clue_{sess.turn}", current["detail"]), "yes")
 
-    answered = sum(1 for a in sess.asked if a.get("answer"))
-    if current["detail"] or answered % REFRESH_EVERY == 0:
-        # Finish history replay before selecting a question or guess. A worker
-        # publishing half-scored arrivals races the posterior used by _advance.
-        refresh_candidates(sess)
+    # Every answer opens a new search branch. Discover and replay evidence
+    # before choosing the next question or declaring a winner.
+    refresh_candidates(sess)
 
     sess.touch()
     return _advance(sess)
