@@ -1,0 +1,34 @@
+services:
+  waifu-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: waifu-determination-engine:slim
+    ports:
+      - "7860:7860"
+    environment:
+      WAIFU_FORCE_FALLBACK: "0"
+      WAIFU_ONLINE_SEARCH: "1"
+      WAIFU_SEARCH_ROUNDS: "3"
+    restart: unless-stopped
+
+  waifu-engine-laya:
+    profiles: ["laya"]
+    build:
+      context: .
+      dockerfile: Dockerfile.laya
+    image: waifu-determination-engine:laya
+    ports:
+      - "7860:7860"
+    environment:
+      WAIFU_FORCE_FALLBACK: "0"
+      WAIFU_ONLINE_SEARCH: "1"
+      WAIFU_SEARCH_ROUNDS: "3"
+      USE_TF: "0"
+      HF_HOME: /data/hf
+    volumes:
+      - laya-hf-cache:/data/hf
+    restart: unless-stopped
+
+volumes:
+  laya-hf-cache:

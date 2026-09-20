@@ -1,0 +1,130 @@
+# Nekomimi-Waifu-Seeker — ACG Character Guesser
+
+Python + FastAPI. Two modes over the same candidate machinery:
+
+1. **Determine** (`/`, CLI) — one-shot: free-text features → online shortlist → Laya picks a winner.
+2. **Nekomimi** (`/nekomimi`) — interactive: engine asks yes/no questions, narrows a live candidate pool, guesses.
+
+Scope is **ACG**: Anime, Manga, Comics, Games (including visual novels and gacha). Not anime-only.
+
+## The one constraint that shapes everything
+
+**Laya is not a generator.** `convaiinnovations/laya` is a non-autoregressive
+ModernBERT-large decision head (421M). `agent.predict(state, questions)` returns
+typed answers only:
+
+| type | field | use here |
+|---|---|---|
+| `choice` | `choice` + `probabilities` + `confidence` | which question to ask; which candidate wins |
+| `noul` | `noul` ∈ [0,1] + `confidence` | does this candidate satisfy this fact; ready to guess |
+| `score` | `score` (expected ordinal) + `probabilities` | one-shot fit strength |
+
+Every answer also carries `action.act_probability`.
+
+Consequences, in order of how often they get forgotten:
+
+- **Question text never comes from the model.** All questions live in
+  `waifu_engine/nekomimi/traits.py`. Do not put question wording in prompt
+  strings scattered through the code, and do not add a generative model to
+  write them.
+- `criteria` keys are the option labels; `choice` returns one of those keys.
+- The result key is **`probabilities`**, not `probs`.
+- Option strings are packed into the decision head. If a `choice` has many long
+  options, `system_one` raises `ValueError("question ... options exceed
+  head_max_len")`. `laya_client` raises the budget to 480; keep `choice` sets
+  narrow anyway (~8) — Laya is weak on wide choice sets.
+
+## Module map
+
+| Path | Role |
+|---|---|
+| `waifu_engine/nekomimi/laya_client.py` | Process-wide `Agent` singleton. `ask(state, questions)` → answers or `None`. Never raises. |
+| `waifu_engine/nekomimi/traits.py` | ~110 ACG trait questions + `ANSWER_WEIGHT` + `make_dynamic()` for mined traits |
+| `waifu_engine/nekomimi/session.py` | `Candidate`, `GuessSession`, log-odds pool, in-process store + TTL |
+| `waifu_engine/nekomimi/engine.py` | The turn loop: `start`, `submit_answer`, `submit_guess_result`, `state_payload` |
+| `waifu_engine/nekomimi_page.py` | Static HTML/JS for `/nekomimi` |
+| `waifu_engine/web_search.py` | DuckDuckGo. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
+| `waifu_engine/sources/` | AniList + Wikipedia first; DuckDuckGo is the long-tail fallback |
+| `waifu_engine/decide.py` | One-shot `determine()` pipeline |
+| `waifu_engine/search.py`, `catalog.py` | Keyword scoring, local catalog (ships empty → always online) |
+
+## The turn contract
+
+One turn = **two** batched Laya calls, each a single forward pass:
+
+1. `_pick_question` — `next_question` (`choice` over ~8 entropy-prefiltered bank
+   questions) + `ready_to_guess` (`noul`).
+2. `score_candidates` — `match_<i>` (`noul`) for each of ≤10 candidates, folded in as
+   `logodds += ANSWER_WEIGHT[answer] * logit(noul)`.
+
+Then `prune()` drops anything more than `ELIMINATION_MARGIN` (4.0) log-odds behind
+the leader, and `posterior()` softmaxes the survivors.
+
+Answers are **`yes` / `no` / `detail`**. `detail` carries no evidence weight — it
+appends free text to `session.constraints`, which drives the next DuckDuckGo
+refresh.
+
+Guess when any of: top posterior ≥ 0.80 after ≥ 5 questions; `ready_to_guess.noul`
+≥ 0.75 with `act_probability` ≥ 0.6; or turn ≥ `MAX_TURNS`. Up to 3 guesses.
+
+**Every Laya path has a heuristic fallback** (`_tag_match`, `_split_quality`), so
+the loop plays with no weights installed — less sharply. Never let a Laya failure
+raise out of a request.
+
+## Session store
+
+Plain `dict` in `session.py`, 30-minute TTL, guarded by a lock. **Single process
+only.** Running uvicorn with more than one worker splits sessions across workers;
+swap in Redis/SQLite before doing that.
+
+## Hardware
+
+CPU-only. Development machine is AMD RDNA2 on Windows: no CUDA, and neither
+`torch-directml` nor ROCm has a wheel for `torch 2.14` / Python 3.14. Measured on
+this box: **~26 s one-time load, ~0.3 s for one question, ~1.2 s for a batch of
+10.** That is why the agent is a singleton and why a turn is two batched calls
+rather than one call per candidate. A future ONNX Runtime + DirectML export is
+the plausible GPU path; not built.
+
+## Safety notes
+
+Candidate names, blurbs and image URLs are **scraped web content**. Never
+interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
+`/nekomimi` page builds DOM nodes with `textContent` only.
+
+## Env vars
+
+| Var | Default | Effect |
+|---|---|---|
+| `WAIFU_FORCE_FALLBACK` | `0` | Skip Laya entirely (heuristics only) |
+| `WAIFU_ONLINE_SEARCH` | `1` | Allow DuckDuckGo |
+| `WAIFU_SEARCH_ROUNDS` | `3` | Rounds for one-shot determine |
+| `WAIFU_NEKOMINI_MAX_TURNS` | `20` | Hard question cap |
+| `WAIFU_NEKOMINI_MAX_GUESSES` | `3` | Guesses before giving up |
+| `WAIFU_NEKOMINI_TTL` | `1800` | Session lifetime, seconds |
+| `WAIFU_NEKOMINI_CHOICE_WIDTH` | `8` | Questions offered to Laya per turn |
+| `WAIFU_NEKOMINI_GUESS_CONFIDENCE` | `0.80` | Posterior needed to guess |
+| `WAIFU_LAYA_HEAD_MAX_LEN` | `480` | Option-token budget |
+| `USE_TF` | — | Set `0`; Transformers hangs probing TensorFlow |
+| `HF_HOME` | — | Weight cache (`/data/hf` in Docker) |
+
+## Dev
+
+```bash
+python -m pytest tests -q          # 22 offline tests, no weights, no network
+python -m waifu_engine.web         # http://127.0.0.1:7860  (+ /nekomimi)
+python -m waifu_engine "silver hair mage" --fallback
+```
+
+Tests stub `laya_client.ask` and `web_search.search_by_constraints`. Keep them
+offline — do not add a test that downloads weights or hits DuckDuckGo.
+
+## Rules
+
+1. New questions go in `traits.py`, nowhere else.
+2. Tag slugs in `traits.py` and `web_search.TRAIT_PATTERNS` share one vocabulary
+   — add to both or evidence and questions stop lining up.
+3. Trait matching is whole-word regex. Plain substring matching once made `"he"`
+   fire on `"the"` and tagged every character male.
+4. Laya calls go through `laya_client.ask`. Do not construct `Router` or call
+   `laya.load` anywhere else.
