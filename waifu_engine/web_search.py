@@ -1,19 +1,29 @@
-"""DuckDuckGo character search across Anime, Comics and Games (ACG).
+"""Character search across Anime, Comics and Games (ACG).
 
-Two entry points:
+Playwright (headless Chromium) is the primary HTML-index backend. DuckDuckGo
+(``ddgs``) fills remaining slots when Playwright is missing, empty, or errors.
+
+Two entry points (signatures unchanged):
 
 * ``search_characters_multiround`` - the original free-text, seed-then-mine
   crawl used by the one-shot ``determine`` pipeline.
 * ``search_by_constraints`` - used by the Nekomimi loop: builds queries out of
   the facts confirmed so far and returns fresh candidates for the pool.
+
+State machine per call: idle → playwright_search → fill_ddg → enrich → done.
+Any step can skip to the next; nothing here raises out of a request.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import threading
 from functools import lru_cache
 from typing import Any
+
+from . import browser_search
 
 LISTICLE = re.compile(
     r"(top\s*\d+|\d+\s*best|best\s+\d+|ranked|list of|tier list|husbando material|certified|pinterest)",
@@ -75,6 +85,91 @@ STOP = {
     "certified","husbando","waifu","crush","crushes","ranked","review","guide","watch",
     "online","download","episode","movie","film","official","discover","pinterest",
 }
+
+
+SEARCH_STATES = ("idle", "playwright_search", "fill_ddg", "enrich", "done")
+_YES = {"1", "true", "yes"}
+_TLS = threading.local()
+_LAST_SEARCH: dict[str, Any] = {
+    "backend": "auto",
+    "search_state": "idle",
+    "enriched": 0,
+    "errors": [],
+}
+
+
+def search_backend() -> str:
+    v = os.getenv("WAIFU_SEARCH_BACKEND", "auto").strip().lower()
+    return v if v in {"auto", "playwright", "ddg"} else "auto"
+
+
+def last_search_meta() -> dict[str, Any]:
+    """Copy of the most recent search meta (backend, search_state, enriched, errors)."""
+    return {
+        "backend": _LAST_SEARCH.get("backend"),
+        "search_state": _LAST_SEARCH.get("search_state"),
+        "enriched": _LAST_SEARCH.get("enriched", 0),
+        "errors": list(_LAST_SEARCH.get("errors") or []),
+    }
+
+
+def _begin_search() -> dict[str, Any]:
+    _LAST_SEARCH["backend"] = search_backend()
+    _LAST_SEARCH["search_state"] = "idle"
+    _LAST_SEARCH["enriched"] = 0
+    _LAST_SEARCH["errors"] = []
+    return _LAST_SEARCH
+
+
+def _set_state(state: str) -> None:
+    if state in SEARCH_STATES:
+        _LAST_SEARCH["search_state"] = state
+
+
+def _note_error(msg: str) -> None:
+    errors = _LAST_SEARCH.setdefault("errors", [])
+    if msg and msg not in errors:
+        errors.append(msg)
+
+
+def _want_playwright() -> bool:
+    return search_backend() in {"auto", "playwright"}
+
+
+def _enrich_on() -> bool:
+    return os.getenv("WAIFU_PLAYWRIGHT_ENRICH", "1").strip().lower() in _YES
+
+
+def _enrich_limit() -> int:
+    try:
+        return max(0, int(os.getenv("WAIFU_PLAYWRIGHT_ENRICH_LIMIT", "8")))
+    except ValueError:
+        return 8
+
+
+def _name_key(name: str) -> str:
+    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
+
+
+def _want_ddg_fill(
+    got: int,
+    limit: int,
+    *,
+    pw_ok: bool,
+    pw_empty: bool,
+    pw_error: bool,
+) -> bool:
+    """Whether DuckDuckGo should fill remaining slots.
+
+    * ``auto`` / ``ddg`` — fill until ``limit``.
+    * ``playwright`` — skip unless Playwright was unavailable, empty, or errored.
+    """
+    if got >= limit:
+        return False
+    backend = search_backend()
+    if backend == "playwright":
+        return (not pw_ok) or pw_empty or pw_error
+    return True
 
 
 def _ddgs():
@@ -286,14 +381,20 @@ def _is_character_page(title: str, href: str, body: str) -> bool:
     )
 
 
-def _to_candidate(item: dict[str, Any], round_idx: int) -> dict[str, Any] | None:
+def _to_candidate(
+    item: dict[str, Any],
+    round_idx: int,
+    source: str = "duckduckgo",
+) -> dict[str, Any] | None:
     title = (item.get("title") or "").strip()
     body = (item.get("body") or item.get("snippet") or "").strip()
     href = (item.get("href") or item.get("link") or "").strip()
     if not title or not _is_character_page(title, href, body):
         return None
     name = _clean_name(title)
-    cid = "ddg_" + hashlib.sha1((href or name).encode()).hexdigest()[:10]
+    src = "playwright" if source == "playwright" else "duckduckgo"
+    prefix = "pw_" if src == "playwright" else "ddg_"
+    cid = prefix + hashlib.sha1((href or name).encode()).hexdigest()[:10]
     medium = _guess_medium(title, href, body)
     blurb = (body or title)[:320]
     return {
@@ -301,15 +402,61 @@ def _to_candidate(item: dict[str, Any], round_idx: int) -> dict[str, Any] | None
         "name": name,
         "series": _guess_series(f"{title} {body}"),
         "medium": medium,
-        "tags": ["online", "duckduckgo", f"round{round_idx}"]
+        "tags": ["online", src, f"round{round_idx}"]
         + ([medium] if medium != "unknown" else [])
         + mine_trait_slugs(f"{title} {body}"),
         "blurb": blurb,
         "source_url": href,
-        "source": "duckduckgo",
+        "source": src,
         "round": round_idx,
         "rounds_seen": [round_idx],
     }
+
+
+def _playwright_hits(
+    query: str,
+    medium_hint: str | None,
+    limit: int,
+    round_idx: int = 1,
+) -> list[dict[str, Any]]:
+    """Run Playwright search and convert hits. Never raises."""
+    try:
+        if not browser_search.available():
+            if search_backend() == "playwright":
+                _note_error("playwright unavailable; filling with ddg")
+            return []
+        raw = browser_search.search(query, medium_hint=medium_hint, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        _note_error(f"playwright: {exc}")
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        cand = _to_candidate(item, round_idx, source="playwright")
+        if cand:
+            out.append(cand)
+    return out
+
+
+def enrich_candidates(candidates: list[dict[str, Any]], limit: int | None = None) -> int:
+    """Enrich the top of a shortlist via Playwright. Never raises."""
+    if not candidates or not _enrich_on():
+        return 0
+    try:
+        if not browser_search.available():
+            return 0
+    except Exception as exc:  # noqa: BLE001
+        _note_error(f"enrich: {exc}")
+        return 0
+    cap = _enrich_limit() if limit is None else max(0, int(limit))
+    n = 0
+    for cand in candidates[:cap]:
+        try:
+            if browser_search.enrich(cand) is not None:
+                n += 1
+        except Exception as exc:  # noqa: BLE001
+            _note_error(f"enrich: {exc}")
+    _LAST_SEARCH["enriched"] = n
+    return n
 
 
 # Trait vocabulary mined out of snippets. Slugs line up with
@@ -406,6 +553,51 @@ def _constraint_queries(constraints: list[str], medium_hint: str | None = None) 
     return queries
 
 
+def _constraint_query_text(constraints: list[str]) -> str:
+    facts = [c.strip() for c in constraints if c and c.strip()][-6:]
+    return " ".join(facts)[:180].strip() or "popular character"
+
+
+def _take_candidate(
+    found: dict[str, dict[str, Any]],
+    seen_names: set[str],
+    cand: dict[str, Any] | None,
+    exclude_ids: set[str],
+    limit: int,
+) -> bool:
+    if not cand or cand["id"] in exclude_ids or cand["id"] in found:
+        return False
+    key = _name_key(cand.get("name", ""))
+    if not key or key in seen_names:
+        return False
+    found[cand["id"]] = cand
+    seen_names.add(key)
+    return len(found) >= limit
+
+
+def _ddg_constraint_hits(
+    constraints: list[str],
+    found: dict[str, dict[str, Any]],
+    seen_names: set[str],
+    exclude_ids: set[str],
+    medium_hint: str | None,
+    limit: int,
+    per_query: int,
+) -> None:
+    """DuckDuckGo leaf used by the fill_ddg step. ``_search_once`` stays the DDG client."""
+    for idx, q in enumerate(_constraint_queries(constraints, medium_hint), start=1):
+        if len(found) >= limit:
+            break
+        try:
+            raw = _search_once(q, max_results=per_query)
+        except Exception as exc:  # noqa: BLE001 - a dead round must not kill the turn
+            _note_error(f"ddg: {exc}")
+            continue
+        for item in raw:
+            if _take_candidate(found, seen_names, _to_candidate(item, idx), exclude_ids, limit):
+                break
+
+
 def search_by_constraints(
     constraints: list[str],
     exclude_ids: set[str] | None = None,
@@ -416,21 +608,51 @@ def search_by_constraints(
     """Fetch fresh candidates matching the facts a guessing session has confirmed."""
     exclude_ids = exclude_ids or set()
     found: dict[str, dict[str, Any]] = {}
-    for idx, q in enumerate(_constraint_queries(constraints, medium_hint), start=1):
-        if len(found) >= limit:
-            break
+    seen_names: set[str] = set()
+    nested = bool(getattr(_TLS, "nested_ddg", False))
+    if not nested:
+        _begin_search()
+
+    pw_ok = False
+    pw_empty = True
+    pw_error = False
+    if not nested and _want_playwright():
+        _set_state("playwright_search")
+        before = len(found)
         try:
-            raw = _search_once(q, max_results=per_query)
-        except Exception:  # noqa: BLE001 - a dead round must not kill the turn
-            continue
-        for item in raw:
-            cand = _to_candidate(item, idx)
-            if not cand or cand["id"] in exclude_ids or cand["id"] in found:
-                continue
-            found[cand["id"]] = cand
-            if len(found) >= limit:
-                break
-    return list(found.values())
+            if browser_search.available():
+                for cand in _playwright_hits(
+                    _constraint_query_text(constraints), medium_hint, limit
+                ):
+                    _take_candidate(found, seen_names, cand, exclude_ids, limit)
+                pw_ok = True
+                pw_empty = len(found) == before
+            else:
+                if search_backend() == "playwright":
+                    _note_error("playwright unavailable; filling with ddg")
+        except Exception as exc:  # noqa: BLE001
+            pw_error = True
+            _note_error(f"playwright: {exc}")
+
+    do_ddg = True if nested else _want_ddg_fill(
+        len(found), limit, pw_ok=pw_ok, pw_empty=pw_empty, pw_error=pw_error
+    )
+    if do_ddg and len(found) < limit:
+        _set_state("fill_ddg")
+        _ddg_constraint_hits(
+            constraints, found, seen_names, exclude_ids, medium_hint, limit, per_query
+        )
+
+    out = list(found.values())[:limit]
+    if not nested:
+        if _enrich_on() and out:
+            _set_state("enrich")
+            try:
+                enrich_candidates(out)
+            except Exception as exc:  # noqa: BLE001
+                _note_error(f"enrich: {exc}")
+        _set_state("done")
+    return out
 
 
 def search_characters_multiround(
@@ -444,67 +666,159 @@ def search_characters_multiround(
     mined: list[str] = []
     used: set[str] = set()
     seeds = _feature_seed_queries(query)
+    _begin_search()
 
-    for ridx in range(1, rounds + 1):
-        if mined and ridx >= 2:
-            name = mined.pop(0)
-            q = f'"{name}" site:myanimelist.net/character OR site:fandom.com/wiki'
-        elif seeds:
-            q = seeds.pop(0)
-        else:
-            q = f"{query.strip()} anime character wiki"
-        if q.lower() in used:
-            q = f"{query.strip()} character {ridx}"
-        used.add(q.lower())
+    def _stamp(log: dict[str, Any]) -> dict[str, Any]:
+        log["search_state"] = _LAST_SEARCH.get("search_state")
+        log["backend"] = _LAST_SEARCH.get("backend")
+        log["enriched"] = _LAST_SEARCH.get("enriched", 0)
+        log["errors"] = list(_LAST_SEARCH.get("errors") or [])
+        return log
 
-        try:
-            raw = _search_once(q, max_results=per_round)
-            err = None
-        except Exception as e:  # noqa: BLE001
-            raw, err = [], str(e)
-
-        # Mine names with scores
-        scored_names: list[tuple[str, float]] = []
-        for item in raw:
-            scored_names.extend(
-                _extract_names(item.get("title") or "", item.get("body") or item.get("snippet") or "")
-            )
-        scored_names.sort(key=lambda x: x[1], reverse=True)
-        for name, _score in scored_names:
-            if name.lower() in {m.lower() for m in mined}:
-                continue
-            if name.lower() in {c["name"].lower() for c in merged.values()}:
-                continue
-            mined.append(name)
-
+    pw_ok = False
+    pw_empty = True
+    pw_error = False
+    if _want_playwright():
+        _set_state("playwright_search")
+        err = None
+        raw: list[dict[str, Any]] = []
         added = 0
+        try:
+            if browser_search.available():
+                raw = browser_search.search(query, limit=per_round)
+                pw_ok = True
+            elif search_backend() == "playwright":
+                _note_error("playwright unavailable; filling with ddg")
+        except Exception as exc:  # noqa: BLE001
+            err = str(exc)
+            pw_error = True
+            _note_error(f"playwright: {exc}")
         for item in raw:
-            cand = _to_candidate(item, ridx)
+            scored = _extract_names(
+                item.get("title") or "", item.get("body") or item.get("snippet") or ""
+            )
+            for name, _score in scored:
+                if name.lower() in {m.lower() for m in mined}:
+                    continue
+                if name.lower() in {c["name"].lower() for c in merged.values()}:
+                    continue
+                mined.append(name)
+            cand = _to_candidate(item, 1, source="playwright")
             if not cand:
                 continue
-            prev = merged.get(cand["id"])
-            if prev is None:
+            if cand["id"] not in merged:
                 merged[cand["id"]] = cand
                 added += 1
-            else:
-                if len(cand.get("blurb") or "") > len(prev.get("blurb") or ""):
-                    prev["blurb"] = cand["blurb"]
-                rs = prev.setdefault("rounds_seen", [prev.get("round", 1)])
-                if ridx not in rs:
-                    rs.append(ridx)
-
+        pw_empty = not merged
         logs.append(
-            {
-                "round": ridx,
-                "query": q,
-                "raw_hits": len(raw),
-                "new_candidates": added,
-                "mined_names": mined[:10],
-                "error": err,
-            }
+            _stamp(
+                {
+                    "round": 0,
+                    "query": query,
+                    "raw_hits": len(raw),
+                    "new_candidates": added,
+                    "mined_names": mined[:10],
+                    "error": err,
+                    "source": "playwright",
+                }
+            )
         )
 
-    return list(merged.values()), logs
+    do_ddg = _want_ddg_fill(
+        len(merged), per_round * rounds, pw_ok=pw_ok, pw_empty=pw_empty, pw_error=pw_error
+    )
+    if do_ddg:
+        _set_state("fill_ddg")
+        for ridx in range(1, rounds + 1):
+            if mined and ridx >= 2:
+                name = mined.pop(0)
+                q = f'"{name}" site:myanimelist.net/character OR site:fandom.com/wiki'
+            elif seeds:
+                q = seeds.pop(0)
+            else:
+                q = f"{query.strip()} anime character wiki"
+            if q.lower() in used:
+                q = f"{query.strip()} character {ridx}"
+            used.add(q.lower())
+
+            try:
+                raw = _search_once(q, max_results=per_round)
+                err = None
+            except Exception as e:  # noqa: BLE001
+                raw, err = [], str(e)
+                _note_error(f"ddg: {e}")
+
+            scored_names: list[tuple[str, float]] = []
+            for item in raw:
+                scored_names.extend(
+                    _extract_names(
+                        item.get("title") or "", item.get("body") or item.get("snippet") or ""
+                    )
+                )
+            scored_names.sort(key=lambda x: x[1], reverse=True)
+            for name, _score in scored_names:
+                if name.lower() in {m.lower() for m in mined}:
+                    continue
+                if name.lower() in {c["name"].lower() for c in merged.values()}:
+                    continue
+                mined.append(name)
+
+            added = 0
+            for item in raw:
+                cand = _to_candidate(item, ridx)
+                if not cand:
+                    continue
+                prev = merged.get(cand["id"])
+                if prev is None:
+                    # Name already taken by a Playwright hit — keep the first source.
+                    if _name_key(cand["name"]) in {_name_key(c["name"]) for c in merged.values()}:
+                        continue
+                    merged[cand["id"]] = cand
+                    added += 1
+                else:
+                    if len(cand.get("blurb") or "") > len(prev.get("blurb") or ""):
+                        prev["blurb"] = cand["blurb"]
+                    rs = prev.setdefault("rounds_seen", [prev.get("round", 1)])
+                    if ridx not in rs:
+                        rs.append(ridx)
+
+            logs.append(
+                _stamp(
+                    {
+                        "round": ridx,
+                        "query": q,
+                        "raw_hits": len(raw),
+                        "new_candidates": added,
+                        "mined_names": mined[:10],
+                        "error": err,
+                    }
+                )
+            )
+
+    out = list(merged.values())
+    if _enrich_on() and out:
+        _set_state("enrich")
+        try:
+            enrich_candidates(out)
+        except Exception as exc:  # noqa: BLE001
+            _note_error(f"enrich: {exc}")
+    _set_state("done")
+    if logs:
+        logs[-1] = _stamp(logs[-1])
+    else:
+        logs.append(
+            _stamp(
+                {
+                    "round": 0,
+                    "query": query,
+                    "raw_hits": 0,
+                    "new_candidates": 0,
+                    "mined_names": [],
+                    "error": None,
+                }
+            )
+        )
+    return out, logs
 
 
 def fetch_image_url(query: str) -> str | None:

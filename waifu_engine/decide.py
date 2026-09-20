@@ -43,7 +43,7 @@ def _fallback_decide(query: str, candidates: list[dict[str, Any]]) -> dict[str, 
             "source_url": winner.get("source_url"),
         },
         "runners_up": runners,
-        "notes": "Used keyword ranking over DuckDuckGo candidates (Laya skipped or unavailable).",
+        "notes": "Used keyword ranking over online candidates (Laya skipped or unavailable).",
     }
 
 
@@ -180,7 +180,7 @@ def determine(
         if decided is not None:
             decided["search"] = search_meta
             if search_meta.get("online_used"):
-                decided["notes"] = ((decided.get("notes") or "") + " | DuckDuckGo multi-round shortlist.").strip(" |")
+                decided["notes"] = ((decided.get("notes") or "") + " | online multi-round shortlist.").strip(" |")
             return decided
         laya_miss = True
     else:
@@ -193,7 +193,7 @@ def determine(
     elif laya_miss:
         reasons.append("Laya could not load/run in this container")
     if search_meta.get("online_used"):
-        reasons.append("DuckDuckGo multi-round shortlist")
+        reasons.append("online multi-round shortlist")
     if search_meta.get("online_error"):
         reasons.append(f"DDG error: {search_meta['online_error']}")
     if reasons:

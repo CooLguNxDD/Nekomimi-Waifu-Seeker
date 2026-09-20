@@ -109,8 +109,9 @@ def seed_from_catalog(sess: GuessSession) -> int:
 def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = False) -> int:
     """Pull fresh candidates for the current constraints.
 
-    AniList and Wikipedia first (structured, with real prose and a popularity
-    number); DuckDuckGo only as the long-tail fallback inside ``find_candidates``.
+    Playwright HTML indexes first, then AniList and Wikipedia (structured, with
+    real prose and a popularity number); DuckDuckGo fills remaining slots
+    inside ``find_candidates``.
     """
     if not ONLINE:
         return 0

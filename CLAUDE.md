@@ -43,8 +43,9 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/nekomimi/session.py` | `Candidate`, `GuessSession`, log-odds pool, in-process store + TTL |
 | `waifu_engine/nekomimi/engine.py` | The turn loop: `start`, `submit_answer`, `submit_guess_result`, `state_payload` |
 | `waifu_engine/nekomimi_page.py` | Static HTML/JS for `/nekomimi` |
-| `waifu_engine/web_search.py` | DuckDuckGo. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
-| `waifu_engine/sources/` | AniList + Wikipedia first; DuckDuckGo is the long-tail fallback |
+| `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
+| `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
+| `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo fills remaining slots |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
 | `waifu_engine/search.py`, `catalog.py` | Keyword scoring, local catalog (ships empty → always online) |
 
@@ -61,8 +62,8 @@ Then `prune()` drops anything more than `ELIMINATION_MARGIN` (4.0) log-odds behi
 the leader, and `posterior()` softmaxes the survivors.
 
 Answers are **`yes` / `no` / `detail`**. `detail` carries no evidence weight — it
-appends free text to `session.constraints`, which drives the next DuckDuckGo
-refresh.
+appends free text to `session.constraints`, which drives the next candidate
+refresh (Playwright then DuckDuckGo).
 
 Guess when any of: top posterior ≥ 0.80 after ≥ 5 questions; `ready_to_guess.noul`
 ≥ 0.75 with `act_probability` ≥ 0.6; or turn ≥ `MAX_TURNS`. Up to 3 guesses.
@@ -97,7 +98,10 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | Var | Default | Effect |
 |---|---|---|
 | `WAIFU_FORCE_FALLBACK` | `0` | Skip Laya entirely (heuristics only) |
-| `WAIFU_ONLINE_SEARCH` | `1` | Allow DuckDuckGo |
+| `WAIFU_ONLINE_SEARCH` | `1` | Allow online search (Playwright + DuckDuckGo) |
+| `WAIFU_SEARCH_BACKEND` | `auto` | `auto` (Playwright then DDG), `playwright`, or `ddg` |
+| `WAIFU_PLAYWRIGHT_ENRICH` | `1` | Visit character pages to fill blurb/tags/image |
+| `WAIFU_PLAYWRIGHT_ENRICH_LIMIT` | `8` | Max candidates to enrich per search |
 | `WAIFU_SEARCH_ROUNDS` | `3` | Rounds for one-shot determine |
 | `WAIFU_NEKOMINI_MAX_TURNS` | `20` | Hard question cap |
 | `WAIFU_NEKOMINI_MAX_GUESSES` | `3` | Guesses before giving up |
@@ -111,13 +115,14 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 ## Dev
 
 ```bash
-python -m pytest tests -q          # 22 offline tests, no weights, no network
+python -m pytest tests -q          # offline tests, no weights, no network, no Chromium
 python -m waifu_engine.web         # http://127.0.0.1:7860  (+ /nekomimi)
 python -m waifu_engine "silver hair mage" --fallback
 ```
 
 Tests stub `laya_client.ask` and `web_search.search_by_constraints`. Keep them
-offline — do not add a test that downloads weights or hits DuckDuckGo.
+offline — do not add a test that downloads weights, launches Chromium, or hits
+DuckDuckGo.
 
 ## Rules
 
