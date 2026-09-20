@@ -11,16 +11,22 @@ python -m waifu_engine.web
 # open http://127.0.0.1:7860/nekomimi
 ```
 
-Each turn is two batched Laya forward passes:
+Question selection uses expected information gain. Laya evaluates each eligible
+character independently and also judges readiness:
 
 | Laya question | Type | Decides |
 |---|---|---|
-| `next_question` | `choice` | which trait to ask, from ~8 entropy-prefiltered candidates |
 | `ready_to_guess` | `noul` | whether the evidence is enough to name a character |
-| `match_<i>` | `noul` | whether candidate *i* satisfies the answer just given |
+| `match` | `noul` | whether one character satisfies the trait just asked |
 
-Evidence accumulates as log-odds (`logodds += weight * logit(noul)`); candidates
-4.0 log-odds behind the leader are eliminated. It guesses at 80% posterior, or
+Every eligible candidate is scored, regardless of its current rank. Successful
+model judgments are cached for the session; new arrivals receive the earlier
+questions too. Scores sum log-likelihoods with a capped popularity prior.
+Only confirmed medium contradictions and rejected guesses eliminate identities;
+uncertain scores can recover. Mined tags guide question selection but are not
+presented as facts to Laya. This costs one model call per eligible candidate per
+new trait, so large catalogs take longer than the former top-10 approximation.
+It guesses at 80% posterior, or
 after 20 questions, and gets up to 3 guesses. Questions live in
 `waifu_engine/nekomimi/traits.py` (~110 ACG traits) and are topped up with traits
 mined from the search snippets of the current pool.

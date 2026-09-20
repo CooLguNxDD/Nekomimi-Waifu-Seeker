@@ -21,8 +21,8 @@ MAX_GUESSES = int(os.getenv("WAIFU_NEKOMINI_MAX_GUESSES", "3"))
 
 # A candidate this far below the leader in log-odds is out of the running.
 ELIMINATION_MARGIN = 4.0
-# How many candidates get a Laya call per turn. The rest are scored by tags,
-# so a several-hundred-entry catalog stays affordable.
+# Limit the readiness summary only. Evidence scoring evaluates every eligible
+# candidate, independently of its current rank.
 MAX_SCORED_CANDIDATES = int(os.getenv("WAIFU_NEKOMINI_SCORED", "10"))
 # Famous characters are a real prior -- but a weak one, or a popular
 # character would outrank a perfectly matching obscure one.
@@ -79,13 +79,13 @@ class Candidate:
 
         ``laya.common.build_sequence`` lays the input out as
         ``[CLS] <type> instructions [SEP] [MASK] opts [SEP] state [SEP]`` -- the
-        state goes last and is the first thing truncated, so identity and tags
-        lead and the prose description is what gets cut.
+        state goes last and is the first thing truncated, so identity leads
+        and the prose description is what gets cut.
         """
         head = f"{self.name} ({self.series}) [{self.medium}]"
-        tags = ", ".join(self.tags[:12])
-        if tags:
-            head = f"{head} tags: {tags}"
+        # Mined tags can describe other people mentioned in the prose (Mario's
+        # description mentions Princess Peach and Bowser). Do not present them
+        # to the model as confirmed facts about this identity.
         room = max(0, budget - len(head) - 2)
         blurb = self.blurb[:room].strip()
         return f"{head}. {blurb}".strip()
@@ -123,6 +123,8 @@ class GuessSession:
     winner: str | None = None
     notes: list[str] = field(default_factory=list)
     laya_used: bool = False
+    evidence: dict[str, tuple[dict[str, Any], str]] = field(default_factory=dict)
+    match_cache: dict[tuple[str, str], float] = field(default_factory=dict)
 
     # -- candidate pool ------------------------------------------------
     def alive_candidates(self) -> list[Candidate]:
@@ -140,6 +142,8 @@ class GuessSession:
         # and duplicates split their own posterior mass.
         seen_names = {_name_key(c.name) for c in self.candidates}
         added = 0
+        live = self.alive_candidates()
+        base = sorted(c.logodds for c in live)[len(live) // 2] if live else 0.0
         for raw in raws:
             if not raw.get("id") or raw["id"] in known or raw["id"] in self.rejected:
                 continue
@@ -151,8 +155,6 @@ class GuessSession:
             # New arrivals start at the median of the live pool so they are not
             # instantly eliminated by evidence they were never scored against,
             # plus a small bonus for fame.
-            live = self.alive_candidates()
-            base = sorted(c.logodds for c in live)[len(live) // 2] if live else 0.0
             cand.logodds = base + popularity_prior(cand.popularity)
             self.candidates.append(cand)
             known.add(cand.id)
@@ -160,7 +162,7 @@ class GuessSession:
         return added
 
     def scoring_pool(self) -> list[Candidate]:
-        """Top candidates worth spending a Laya forward pass on this turn."""
+        """Compact leader summary for the readiness call, never an evidence gate."""
         live = sorted(self.alive_candidates(), key=lambda c: c.logodds, reverse=True)
         return live[:MAX_SCORED_CANDIDATES]
 

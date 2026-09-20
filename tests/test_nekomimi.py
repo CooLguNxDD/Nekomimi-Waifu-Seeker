@@ -112,6 +112,13 @@ def test_new_candidates_start_at_pool_median():
     assert s.by_id("c_new").logodds == 2.0
 
 
+def test_catalog_popularity_prior_does_not_compound_with_insertion_order():
+    s = sess_mod.new_session()
+    s.add_candidates([{"id": str(i), "name": f"Character {i}", "popularity": 10000}
+                      for i in range(900)])
+    assert {c.logodds for c in s.candidates} == {sess_mod.popularity_prior(10000)}
+
+
 def test_ttl_purge(monkeypatch):
     s = sess_mod.new_session()
     s.updated = time.time() - sess_mod.SESSION_TTL_SECONDS - 1
@@ -300,6 +307,131 @@ def test_laya_client_returns_none_without_model(monkeypatch):
     laya_client.reset()
     assert laya_client.get_agent() is None
     assert laya_client.available() is False
+
+
+def test_model_scores_target_beyond_top_ten_in_900_candidates(monkeypatch):
+    s = sess_mod.new_session()
+    s.add_candidates([
+        {"id": f"d{i}", "name": f"Decoy {i}", "medium": "game",
+         "tags": ["female"], "popularity": 100000}
+        for i in range(899)
+    ] + [POOL[1]])
+    mario = s.by_id("c_mario")
+    mario.logodds = -100
+    assert mario not in s.scoring_pool()
+    calls = []
+
+    def fake_ask(state, questions):
+        calls.append(state["candidate"])
+        return {"match": {"noul": 0.05 if "Mario (" in state["candidate"] else 0.95}}
+
+    monkeypatch.setattr(laya_client, "ask", fake_ask)
+    q = traits.QUESTIONS_BY_ID["gender_female"]
+    engine.score_candidates(s, q, "no")
+    assert len(calls) == 900
+    assert s.posterior()[0][0] is mario
+    assert mario.alive
+    before = [c.logodds for c in s.candidates]
+    engine.score_candidates(s, q, "no")
+    assert len(calls) == 900  # replay uses cache, not another model pass
+    assert [c.logodds for c in s.candidates] == before
+
+
+def test_refresh_replays_history_and_filters_medium_before_model(monkeypatch):
+    s = _fresh_session()
+    calls = []
+
+    def fake_ask(state, questions):
+        calls.append(state["candidate"])
+        return {"match": {"noul": 0.8}}
+
+    monkeypatch.setattr(laya_client, "ask", fake_ask)
+    engine.score_candidates(s, traits.QUESTIONS_BY_ID["medium_game"], "yes")
+    engine.score_candidates(s, traits.QUESTIONS_BY_ID["gender_female"], "yes")
+    assert len(calls) == 2
+    monkeypatch.setattr(engine, "ONLINE", True)
+    monkeypatch.setattr(engine.sources, "find_candidates", lambda *a, **k: [
+        {"id": "new_game", "name": "New Game", "medium": "game"},
+        {"id": "new_anime", "name": "New Anime", "medium": "anime"},
+    ])
+    engine.refresh_candidates(s)
+    assert not s.by_id("new_anime").alive
+    assert len(calls) == 3
+    assert s.by_id("new_game").logodds == pytest.approx(s.by_id("c_miku").logodds)
+
+
+def test_weak_model_evidence_is_recoverable_and_does_not_rewrite_tags(monkeypatch):
+    s = _fresh_session()
+    tags = {c.id: list(c.tags) for c in s.candidates}
+    monkeypatch.setattr(laya_client, "ask", lambda state, questions: {
+        "match": {"noul": 0.02 if "Mario (" in state["candidate"] else 0.98}
+    })
+    engine.score_candidates(s, traits.QUESTIONS_BY_ID["gender_female"], "yes")
+    assert s.by_id("c_mario").alive
+    assert {c.id: c.tags for c in s.candidates} == tags
+
+
+def test_unknown_traits_do_not_match_substrings():
+    q = {"tags_true": ["male"], "tags_false": []}
+    assert engine._tag_match(q, Candidate(id="x", name="A female character")) == 0.5
+
+
+def test_model_profile_does_not_promote_mined_tags_to_facts():
+    mario = Candidate(id="m", name="Mario", tags=["royalty", "antagonist"],
+                      blurb="A plumber who rescues Princess Peach from Bowser.")
+    assert "royalty" not in mario.profile()
+    assert "antagonist" not in mario.profile()
+    assert "plumber" in mario.profile()
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -0.2, 1.2, None])
+def test_invalid_model_probabilities_fall_back_without_poisoning_posterior(monkeypatch, invalid):
+    s = _fresh_session()
+    monkeypatch.setattr(laya_client, "ask", lambda *a: {"match": {"noul": invalid}})
+    engine.score_candidates(s, traits.QUESTIONS_BY_ID["gender_female"], "yes")
+    assert not s.match_cache
+    assert sum(p for _, p in s.posterior()) == pytest.approx(1.0)
+
+
+def test_unknown_question_has_zero_information_gain():
+    s = _fresh_session()
+    q = dict(traits.QUESTIONS_BY_ID["gender_female"], tags_true=["absent"], tags_false=[])
+    assert engine._split_quality(q, s.posterior()) == pytest.approx(0.0)
+
+
+def test_full_round_with_900_candidates_and_model_judgments(monkeypatch):
+    catalog = [
+        {"id": f"d{i}", "name": f"Decoy {i}", "medium": "game",
+         "tags": ["game", "female"], "popularity": 100000}
+        for i in range(899)
+    ] + [POOL[1]]
+    monkeypatch.setattr(engine, "load_catalog", lambda: catalog)
+    monkeypatch.setattr(engine, "ONLINE", False)
+    target_tags = set(POOL[1]["tags"])
+    by_instruction = {q["instructions"]: q for q in traits.QUESTION_BANK}
+    evaluated = set()
+
+    def fake_ask(state, questions):
+        if "match" not in questions:
+            return None
+        q = by_instruction[questions["match"]["instructions"]]
+        is_mario = state["candidate"].startswith("Mario (")
+        if is_mario:
+            evaluated.add(q["id"])
+        candidate_tags = target_tags if is_mario else {"game", "female"}
+        p = 0.95 if set(q["tags_true"]) & candidate_tags else 0.05
+        return {"match": {"noul": p}}
+
+    monkeypatch.setattr(laya_client, "ask", fake_ask)
+    state = engine.start()
+    s = sess_mod.get_session(state["session_id"])
+    while state["stage"] == "asking":
+        state = engine.submit_answer(s, _answer_as(target_tags, state["question"]["qid"]))
+    assert evaluated
+    assert state["stage"] == "guessing"
+    assert state["guess"]["name"] == "Mario"
+    assert state["guess_number"] == 1
+    assert s.turn <= engine.MAX_TURNS
 
 
 def test_nekomimi_page_and_api_paths():

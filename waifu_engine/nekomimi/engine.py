@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import threading
 from typing import Any
 
@@ -30,8 +31,8 @@ from .session import (
     MAX_TURNS,
     Candidate,
     GuessSession,
-    logit,
     new_session,
+    popularity_prior,
 )
 from .traits import (
     ANSWER_WEIGHT,
@@ -130,11 +131,9 @@ def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = Fals
             return 0
     with _session_lock(sess):
         added = sess.add_candidates(raws)
+        if added and sess.evidence:
+            _rescore_candidates(sess)
     return added
-
-
-def _refresh_async(sess: GuessSession) -> None:
-    threading.Thread(target=refresh_candidates, args=(sess,), daemon=True).start()
 
 
 # --- question selection ---------------------------------------------
@@ -179,11 +178,29 @@ def _p_yes(question: dict[str, Any], candidates: Any) -> float:
 
 
 def _split_quality(question: dict[str, Any], candidates: Any) -> float:
-    """Expected information gain in bits: 1.0 halves the pool, 0.0 says nothing."""
-    p = _p_yes(question, candidates)
-    if p <= 0.0 or p >= 1.0:
+    """Mutual information: answer entropy minus within-candidate uncertainty.
+
+    A trait unknown for every candidate is a coin flip, not a useful split.
+    """
+    if not candidates:
         return 0.0
-    return -(p * math.log2(p) + (1.0 - p) * math.log2(1.0 - p))
+    pairs = ([(c, 1.0) for c in candidates]
+             if isinstance(candidates[0], Candidate) else list(candidates))
+    total = sum(w for _, w in pairs) or 1.0
+
+    def entropy(p: float) -> float:
+        if p <= 0.0 or p >= 1.0:
+            return 0.0
+        return -p * math.log2(p) - (1.0 - p) * math.log2(1.0 - p)
+
+    media = _MEDIUM_QUESTIONS.get(question["id"])
+    predictions = [
+        (float(c.medium in media) if media and c.medium not in ("", "unknown")
+         else _tag_match(question, c), w / total)
+        for c, w in pairs
+    ]
+    p_yes = sum(p * w for p, w in predictions)
+    return max(0.0, entropy(p_yes) - sum(w * entropy(p) for p, w in predictions))
 
 
 def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
@@ -270,7 +287,8 @@ def _tag_match(question: dict[str, Any], cand: Candidate) -> float:
     if set(question["tags_false"]) & tags:
         return 0.15
     blurb = f"{cand.name} {cand.series} {cand.blurb}".lower()
-    if any(t.replace("-", " ") in blurb for t in question["tags_true"]):
+    if any(re.search(r"\b" + re.escape(t.replace("-", " ")) + r"\b", blurb)
+           for t in question["tags_true"]):
         return 0.7
     return 0.5
 
@@ -302,8 +320,12 @@ def _match_probabilities(
             },
         )
         got = (answers or {}).get("match") or {}
-        if "noul" in got:
-            probs[c.id] = float(got["noul"])
+        try:
+            p = float(got["noul"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(p) and 0.0 <= p <= 1.0:
+            probs[c.id] = p
     return probs
 
 
@@ -324,37 +346,51 @@ def _eliminate_by_medium(sess: GuessSession, question: dict[str, Any], answer: s
         matches = cand.medium in medium
         if (answer == "yes" and not matches) or (answer == "no" and matches):
             cand.alive = False
+            cand.logodds = -math.inf
             dropped += 1
     return dropped
 
 
 def score_candidates(sess: GuessSession, question: dict[str, Any], answer: str) -> None:
-    """Fold the answer into every live candidate's log-odds."""
-    weight = ANSWER_WEIGHT.get(answer, 0.0)
-    if weight == 0.0:
+    """Evaluate every eligible identity; posterior rank never gates model access."""
+    if not ANSWER_WEIGHT.get(answer, 0.0):
         return
+    with _session_lock(sess):
+        sess.evidence[question["id"]] = (dict(question), answer)
+        _rescore_candidates(sess)
+
+
+def _rescore_candidates(sess: GuessSession) -> None:
+    """Replay evidence for new arrivals, reusing successful model judgments.
+
+    The caller holds the session lock. Only known medium contradictions and
+    rejected guesses remove identities; uncertain evidence must be recoverable.
+    """
+    for question, answer in sess.evidence.values():
+        _eliminate_by_medium(sess, question, answer)
     live = sess.alive_candidates()
     if not live:
         return
-
-    # Laya judges the leaders; the rest are scored from their tags, so a
-    # several-hundred-entry catalog costs the same per turn as ten candidates.
-    pool = sess.scoring_pool()
-    probs = _match_probabilities(pool, question)
-    if probs:
-        sess.laya_used = True
     for c in live:
-        p = probs.get(c.id)
-        if p is None:
-            p = _tag_match(question, c)
-        c.logodds += weight * logit(p)
-        # Record what the pool now looks like so mined tags stay useful.
-        if weight > 0 and p > 0.6:
-            for tag in question["tags_true"]:
-                if tag not in c.tags:
-                    c.tags.append(tag)
-    _eliminate_by_medium(sess, question, answer)
-    sess.prune()
+        c.logodds = popularity_prior(c.popularity)
+    for qid, (question, answer) in sess.evidence.items():
+        media = _MEDIUM_QUESTIONS.get(qid)
+        missing = [c for c in live if (c.id, qid) not in sess.match_cache
+                   and not (media and c.medium not in ("", "unknown"))]
+        probs = _match_probabilities(missing, question)
+        if probs:
+            sess.laya_used = True
+            sess.match_cache.update({(cid, qid): p for cid, p in probs.items()})
+        for c in live:
+            if media and c.medium not in ("", "unknown"):
+                continue  # known medium already applied as a hard constraint
+            p = sess.match_cache.get((c.id, qid))
+            if p is None:
+                # A failed model call must not make noisy tags stronger evidence
+                # than the model's typically modest confidence.
+                p = min(0.6, max(0.4, _tag_match(question, c)))
+            likelihood = p if answer == "yes" else 1.0 - p
+            c.logodds += math.log(min(0.98, max(0.02, likelihood)))
 
 
 # --- public API -------------------------------------------------------
@@ -500,7 +536,9 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
 
     answered = sum(1 for a in sess.asked if a.get("answer"))
     if current["detail"] or answered % REFRESH_EVERY == 0:
-        _refresh_async(sess)
+        # Finish history replay before selecting a question or guess. A worker
+        # publishing half-scored arrivals races the posterior used by _advance.
+        refresh_candidates(sess)
 
     sess.touch()
     return _advance(sess)

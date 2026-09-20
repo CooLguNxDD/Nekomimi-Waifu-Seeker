@@ -47,19 +47,25 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
 | `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo fills remaining slots |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
-| `waifu_engine/search.py`, `catalog.py` | Keyword scoring, local catalog (ships empty → always online) |
+| `waifu_engine/search.py`, `catalog.py` | Keyword scoring, local 900-character seed catalog |
 
 ## The turn contract
 
-One turn = **two** batched Laya calls, each a single forward pass:
+1. `_pick_question` chooses by mutual information (answer entropy minus
+   within-candidate uncertainty); Laya only answers `ready_to_guess`.
+2. `score_candidates` records evidence and evaluates **every eligible candidate**
+   with an independent `match` noul call. Never gate evidence on `scoring_pool()`;
+   that top-10 list is only a readiness summary.
+3. Successful probabilities are cached by candidate/question. Replay history for
+   new search results, apply known medium constraints before inference, and
+   rebuild scores from capped popularity priors plus answer log-likelihoods.
 
-1. `_pick_question` — `next_question` (`choice` over ~8 entropy-prefiltered bank
-   questions) + `ready_to_guess` (`noul`).
-2. `score_candidates` — `match_<i>` (`noul`) for each of ≤10 candidates, folded in as
-   `logodds += ANSWER_WEIGHT[answer] * logit(noul)`.
-
-Then `prune()` drops anything more than `ELIMINATION_MARGIN` (4.0) log-odds behind
-the leader, and `posterior()` softmaxes the survivors.
+The loop does not call `prune()`: soft evidence must remain recoverable. Only
+medium contradictions and rejected guesses eliminate candidates. Heuristic
+fallback probabilities are capped to [0.4, 0.6]; never write predictions into
+candidate tags or feed noisy mined tags to Laya as confirmed identity facts.
+`posterior()` softmaxes these scores. Cost scales with eligible candidates per
+new trait; there is no longer a ten-forward-pass evidence budget.
 
 Answers are **`yes` / `no` / `detail`**. `detail` carries no evidence weight — it
 appends free text to `session.constraints`, which drives the next candidate
