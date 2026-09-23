@@ -202,3 +202,9 @@ DuckDuckGo.
    it scraped names or blurbs. Tests stub its HTTP; never call a real endpoint.
 6. The query LLM must never block a turn by default, and must not be called
    per answer: only for new typed text, and only when Laya says search is stuck.
+7. Every function you add or change gets a docstring, including private
+   helpers: one line saying what it returns or does, plus the non-obvious
+   *why* (a measured failure, a constraint) when there is one. CodeRabbit's
+   pre-merge check requires 80% docstring coverage over the functions a PR
+   touches. Tests are exempt. Don't restate the signature; `"""Return x."""`
+   on `def x()` adds nothing.
