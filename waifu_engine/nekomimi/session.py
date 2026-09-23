@@ -98,10 +98,12 @@ class Candidate:
         return f"{head}. {blurb}".strip()
 
     def public(self, probability: float | None = None) -> dict[str, Any]:
+        """The candidate as sent to the page (scraped fields; the page escapes them)."""
         out = {
             "id": self.id,
             "name": self.name,
-            "series": self.series,
+            # "Web result" is a source's placeholder for "series unknown".
+            "series": "" if self.series == "Web result" else self.series,
             "medium": self.medium,
             "blurb": self.blurb,
             "image_url": self.image_url,

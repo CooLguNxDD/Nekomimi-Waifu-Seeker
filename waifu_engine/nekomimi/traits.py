@@ -93,13 +93,15 @@ def _choice(
     text: str,
     instructions: str,
     options: list[tuple[str, str, str, list[str], str, float]],
+    criteria_prefix: str = "the character has",
 ) -> dict[str, Any]:
     """A multiple-choice question, scored with one Laya ``choice`` per candidate.
 
     options: (key, user-facing label, Laya option text, candidate tags that
-    imply this option, search keyword fact or "" for none, prior). Keep it to
-    eight options at most: Laya is weak on wide choice sets and every option
-    string counts against ``head_max_len``.
+    imply this option, search keyword fact or "" for none, prior). The Laya
+    option text reads "<criteria_prefix> <text>". Keep it to eight options at
+    most: Laya is weak on wide choice sets and every option string counts
+    against ``head_max_len``.
     """
     assert 2 <= len(options) <= 8, qid
     return {
@@ -108,7 +110,7 @@ def _choice(
         "category": category,
         "text": text,
         "instructions": instructions,
-        "criteria": {key: f"the character has {crit}" for key, _, crit, _, _, _ in options},
+        "criteria": {key: f"{criteria_prefix} {crit}" for key, _, crit, _, _, _ in options},
         "options": {
             key: {"label": label, "tags": list(tags), "fact": fact, "prior": prior}
             for key, label, _, tags, fact, prior in options
@@ -159,7 +161,44 @@ def _trait_block(
     return out
 
 
-MEDIUM_VALUES = ("anime", "manga", "comic", "game")
+MEDIUM_VALUES = ("anime", "manga", "comic", "game", "movie", "tv")
+
+# Which candidate media each option of the "medium" question accepts. A pick
+# is a hard fact: candidates of a known, non-accepted medium are removed.
+# Movie and TV accept each other because franchises cross between them (Star
+# Wars); only soft evidence separates those two. "other" accepts no known medium.
+MEDIUM_ACCEPTS: dict[str, frozenset[str]] = {
+    "anime": frozenset({"anime", "manga"}),
+    "game": frozenset({"game"}),
+    "comic": frozenset({"comic"}),
+    "movie": frozenset({"movie", "tv"}),
+    "tv": frozenset({"tv", "movie"}),
+    "other": frozenset(),
+}
+
+MAX_SERIES_OPTIONS = 6
+
+
+def series_question(qid: str, series: list[tuple[str, str]]) -> dict[str, Any]:
+    """"Which series is your character from?" over the given series.
+
+    ``series``: (series_key, display label) for up to ``MAX_SERIES_OPTIONS``
+    series taken from the live candidates; "Another series" is appended. The
+    wording is fixed here -- only the option labels come from search data, and
+    the caller has already sanitised them.
+    """
+    # Prior 0.0: a confirmed series is as distinctive a search fact as a
+    # typed detail, so it leads the search query.
+    opts = [(f"s{i}", label, f"from {label}", [], label, 0.0)
+            for i, (_, label) in enumerate(series[:MAX_SERIES_OPTIONS], start=1)]
+    opts.append(("other", "Another series", "from a different series than these", [], "", 0.3))
+    question = _choice(qid, "series", "Which series is your character from?",
+                       "Which series is the character in `candidate` from?", opts,
+                       criteria_prefix="the character is")
+    for (key, _), opt_key in zip(series, question["options"]):
+        question["options"][opt_key]["series_key"] = key
+    question["series_question"] = True
+    return question
 
 
 def clue_question(qid: str, clues: str) -> dict[str, Any]:
@@ -171,18 +210,18 @@ def clue_question(qid: str, clues: str) -> dict[str, Any]:
 
 QUESTION_BANK: list[dict[str, Any]] = [
     # --- medium: highest information gain, asked first ---
-    _q("medium_game", "medium", "Is your character from a video game?",
-       "Is the character in `candidate` from a video game?", criteria_detail="from a video game, visual novel or gacha game -- not anime, manga or comics",
-       tags_true=["game", "vn", "rpg", "gacha", "fighting-game"],
-       tags_false=["anime", "manga", "comic"], prior=0.35),
-    _q("medium_anime", "medium", "Is your character from an anime or manga?",
-       "Is the character in `candidate` from anime or manga?", criteria_detail="from Japanese anime, manga or a light novel",
-       tags_true=["anime", "manga", "light-novel"],
-       tags_false=["comic", "game"], prior=0.45),
-    _q("medium_comic", "medium", "Is your character from a Western comic?",
-       "Is the character in `candidate` from a Western comic?", criteria_detail="from a Western comic book, graphic novel or webtoon such as Marvel or DC",
-       tags_true=["comic", "marvel", "dc", "webtoon"],
-       tags_false=["anime", "manga", "game"], prior=0.2),
+    _choice("medium", "medium_kind", "Where is your character from?",
+            "Where is the character in `candidate` from?", [
+        ("anime", "Anime or manga", "from Japanese anime, manga or a light novel",
+         ["anime", "manga", "light-novel"], "", 0.4),
+        ("game", "Video game", "from a video game, visual novel or gacha game",
+         ["game", "vn", "rpg", "gacha", "fighting-game"], "", 0.3),
+        ("comic", "Western comic", "from a Western comic book, graphic novel or webtoon",
+         ["comic", "marvel", "dc", "webtoon"], "", 0.12),
+        ("movie", "Movie", "from a live-action or animated film", ["movie", "film"], "", 0.08),
+        ("tv", "TV series", "from a Western TV series or cartoon", ["tv", "television"], "", 0.07),
+        ("other", "Something else", "from some other kind of work", [], "", 0.03),
+    ], criteria_prefix="the character is"),
     _q("medium_vn", "medium", "Is your character from a visual novel or dating sim?",
        "Is the character in `candidate` from a visual novel?", criteria_detail="from a visual novel, dating sim or otome game",
        tags_true=["vn", "otome", "dating-sim"], prior=0.1),

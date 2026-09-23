@@ -87,9 +87,12 @@ def test_a_real_turn_reports_its_bottleneck(monkeypatch, lines):
     state = engine.start("")
     assert state["timing"]["step"] == "start"
     s = sess_mod.get_session(state["session_id"])
-    state = engine.submit_answer(s, "yes")  # medium: settled by tags, no model calls
-    q = state["question"]
-    state = engine.submit_answer(s, "other" if q.get("kind") == "choice" else "yes")
+    state = engine.submit_answer(s, "game")  # medium: settled by known media, no model calls
+    # Choice questions over known data (series) need no model calls either;
+    # answer through them to the first yes/no question.
+    while state["question"].get("kind") == "choice":
+        state = engine.submit_answer(s, "other")
+    state = engine.submit_answer(s, "yes")
     t = state["timing"]
     spans = t["spans"]
     for name in ("score", "search", "search.fetch", "pick", "laya.ready_to_guess"):

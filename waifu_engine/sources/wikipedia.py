@@ -44,6 +44,10 @@ MEDIUM_CATEGORY_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
               "square enix", "playstation", "visual novel", "fighting game")),
     ("anime", ("anime and manga characters", "anime", "shōnen", "shonen")),
     ("manga", ("manga characters", "manga")),
+    # After the ACG hints, so an anime TV adaptation stays "anime".
+    ("movie", ("film characters", "characters in film", "film series characters")),
+    ("tv", ("television characters", "characters in television", "television series characters",
+            "sitcom characters", "animated television")),
 )
 
 MEDIUM_TEXT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -53,6 +57,8 @@ MEDIUM_TEXT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
                "dc comics", "graphic novel", "webtoon")),
     ("manga", ("manga series", "manga", "light novel")),
     ("anime", ("anime series", "anime", "japanese animated")),
+    ("movie", ("film", "movie")),
+    ("tv", ("television series", "tv series", "sitcom")),
 )
 
 # Disambiguation, list and franchise pages that survive the category check.

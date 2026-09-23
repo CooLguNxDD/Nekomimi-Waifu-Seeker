@@ -34,3 +34,40 @@ def name_keys(name: str) -> frozenset[str]:
 def same_character(a: str, b: str) -> bool:
     """Whether two names are spellings of one character (see ``name_keys``)."""
     return bool(name_keys(a) & name_keys(b))
+
+
+# Placeholders sources use when they could not tell the series.
+_NO_SERIES = {"", "webresult", "unknown", "none"}
+
+
+def series_key(series: str) -> str:
+    """Comparable form of a series name, or "" when the series is unknown.
+
+    Letters and digits only, lower-cased, with a trailing parenthetical and a
+    leading "The" dropped: "Blue Archive (video game)" and "blue archive"
+    both give "bluearchive".
+    """
+    s = re.sub(r"\s*\([^)]*\)\s*$", "", series or "").strip()
+    s = re.sub(r"^the\s+", "", s, flags=re.I)
+    key = "".join(ch for ch in s.lower() if ch.isalnum())
+    return "" if key in _NO_SERIES else key
+
+
+def same_series(a: str, b: str) -> bool:
+    """Whether two series names are the same work.
+
+    Equal keys match, and so does a key that starts the other when it is at
+    least 5 letters long -- "Re:Zero" vs "Re:Zero - Starting Life in Another
+    World". Unknown series never match anything.
+    """
+    return same_series_key(series_key(a), series_key(b))
+
+
+def same_series_key(ka: str, kb: str) -> bool:
+    """``same_series`` on keys already made by ``series_key``."""
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    short, long_ = sorted((ka, kb), key=len)
+    return len(short) >= 5 and long_.startswith(short)

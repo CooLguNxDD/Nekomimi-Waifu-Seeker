@@ -1,10 +1,10 @@
 # Nekomimi-Waifu-Seeker
 
-An **Nekomimi character guesser** for **anime, manga, comics and games**, plus the original one-shot feature matcher. Both are decided by **[Laya](https://huggingface.co/convaiinnovations/laya)** — a non-autoregressive decision model that answers typed questions (`choice` / `score` / `noul`) with calibrated probabilities. Laya never generates text; it only decides. Candidates come from Playwright (headless Chromium) first, then DuckDuckGo fills remaining slots. The game is **Nekomimi** at `/nekomimi` and `/api/nekomimi/*`.
+An **Nekomimi character guesser** for **anime, manga, comics, games, movies and TV series**, plus the original one-shot feature matcher. Both are decided by **[Laya](https://huggingface.co/convaiinnovations/laya)** — a non-autoregressive decision model that answers typed questions (`choice` / `score` / `noul`) with calibrated probabilities. Laya never generates text; it only decides. Candidates come from Playwright (headless Chromium) first, then DuckDuckGo fills remaining slots. The game is **Nekomimi** at `/nekomimi` and `/api/nekomimi/*`.
 
 ## Nekomimi mode
 
-Think of a character. The engine asks **Yes / No** and **multiple-choice** questions (hair colour, eye colour) — or you can type a detail instead of answering — and searches for matching characters after every answer. The runtime does not read `data/catalog.json`.
+Think of a character. The engine first asks **where it's from** (anime/manga, game, comic, movie, TV series), then **Yes / No** and **multiple-choice** questions (hair colour, eye colour, and **which series**, built from the leading candidates) — or you can type a detail instead of answering — and searches for matching characters after every answer. The runtime does not read `data/catalog.json`.
 
 ```bash
 python -m waifu_engine.web
@@ -250,7 +250,8 @@ The same numbers come back in each API response as `timing`. Set
 
 ## Notes
 
-- Scope covers anime, manga, comics and games.
+- Scope covers anime, manga, comics, games, movies and TV series. Film and TV
+  coverage is thinner (no AniList; Wikipedia categories and Gemini search).
 - High-cardinality Laya choice sets are weaker; we shortlist first (~8) then decide.
 - Prefer `USE_TF=0` if Transformers hangs while probing TensorFlow.
 - CPU-only here (AMD RDNA2, no CUDA): ~26s one-time model load, ~1.2s per batch of 10 questions.

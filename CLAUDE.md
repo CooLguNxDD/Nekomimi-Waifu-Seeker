@@ -5,7 +5,9 @@ Python + FastAPI. Two modes over the same candidate machinery:
 1. **Determine** (`/`, CLI) — one-shot: free-text features → online shortlist → Laya picks a winner.
 2. **Nekomimi** (`/nekomimi`) — interactive: engine asks yes/no questions, narrows a live candidate pool, guesses.
 
-Scope is **ACG**: Anime, Manga, Comics, Games (including visual novels and gacha). Not anime-only.
+Scope is **ACG plus film and TV**: Anime, Manga, Comics, Games (including visual
+novels and gacha), Movies and TV series. Not anime-only. Media values are
+`traits.MEDIUM_VALUES` (`anime`, `manga`, `comic`, `game`, `movie`, `tv`).
 
 ## The one constraint that shapes everything
 
@@ -56,7 +58,11 @@ Consequences, in order of how often they get forgotten:
 
 ## The turn contract
 
-1. Establish the medium, then `_pick_question` chooses by mutual information
+1. Establish the medium first with the one `medium` choice question ("Where is
+   your character from?": anime/manga, game, comic, movie, TV, something
+   else). Its pick is a hard filter (`traits.MEDIUM_ACCEPTS`; movie and TV
+   accept each other, "other" accepts no known medium; unknown media are never
+   removed). Then `_pick_question` chooses by mutual information
    (answer entropy minus within-candidate uncertainty); Laya only answers
    `ready_to_guess`. Empty searches keep asking until the turn limit.
 2. `score_candidates` records evidence and evaluates **every eligible candidate**
@@ -82,6 +88,15 @@ options including `other`) are answered with an option key. Each candidate gets
 its own Laya `choice` call; `probabilities[picked]` is the likelihood (cached in
 `choice_cache`). Heuristic fallback weights a tag hit at most 1.5× uniform.
 Early-guess support for choice evidence is `p_pick / (p_pick + best_other)`.
+
+"Which series?" (`engine._series_question`, wording in `traits.series_question`)
+is a dynamic choice over the leading candidates' series (`names.series_key`,
+up to 6 plus "Another series"), ranked by information gain like any question,
+asked at most twice (the second time only after "Another series"). Known
+medium/series are scored from data (`_known_choice`), no model call; only
+candidates without them go to Laya. A picked series is a search fact that sets
+`specific=True`. Option labels are scraped text: `_series_label` sanitises
+them, and the page renders them with `textContent`.
 
 Before each search, one Laya `choice` call (`focus`) ranks the positive facts;
 the top three lead the query. A near-uniform answer (< 1.5/n) is ignored in
@@ -229,7 +244,9 @@ DuckDuckGo.
 8. Gemini (`sources/gemini.py`) is a **candidate source only**: it lists
    characters, never writes question text, never makes decisions. Its reply is
    untrusted web content (parse defensively, render with `textContent`). Its
-   prompt holds player facts only, never scraped names or blurbs. Tests use a
+   prompt holds player facts only, never scraped names or blurbs -- the one
+   exception is a series label the player confirmed, after `_series_label`
+   sanitising. Tests use a
    fake client; never call the real API.
 9. Every function you add or change gets a docstring, including private
    helpers: one line saying what it returns or does, plus the non-obvious

@@ -65,6 +65,7 @@ MEDIUM_DOMAIN_HINTS: tuple[tuple[str, str], ...] = (
     ("dc.fandom.com", "comic"),
     ("marvel.com", "comic"),
     ("dc.com", "comic"),
+    ("imdb.com", "movie"),
 )
 
 MEDIUM_TEXT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -73,7 +74,10 @@ MEDIUM_TEXT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("comic", ("comic book", "marvel", "dc comics", "superhero", "graphic novel",
                "webtoon", "issue #")),
     ("manga", ("manga", "light novel", "shonen", "shoujo", "seinen")),
-    ("anime", ("anime", "seiyuu", "voice actor", "studio ghibli", "tv series")),
+    ("anime", ("anime", "seiyuu", "voice actor", "studio ghibli")),
+    # After the ACG hints: an anime TV series stays "anime".
+    ("movie", ("film", "movie", "box office", "pixar", "disney animated")),
+    ("tv", ("tv series", "television series", "sitcom", "netflix series", "hbo")),
 )
 
 STOP = {

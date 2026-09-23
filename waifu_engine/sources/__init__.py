@@ -33,6 +33,8 @@ _MEDIUM_SUFFIX = {
     "manga": "manga character",
     "game": "video game character",
     "comic": "comic book character",
+    "movie": "film character",
+    "tv": "TV series character",
 }
 
 
@@ -227,6 +229,9 @@ POPULAR_CATEGORIES = {
     "game": ("Category:Female characters in video games",
              "Category:Male characters in video games"),
     "comic": ("Category:Marvel Comics superheroes", "Category:DC Comics superheroes"),
+    "movie": ("Category:Female characters in film", "Category:Male characters in film"),
+    "tv": ("Category:Female characters in television",
+           "Category:Male characters in television"),
 }
 
 
@@ -259,12 +264,14 @@ def popular_characters(medium_hint: str | None, n: int) -> list[dict[str, Any]]:
     if medium_hint in POPULAR_CATEGORIES:
         return _popular_from_wikipedia(medium_hint, n)
     # Medium unknown: mostly anime/manga (AniList ranks by favourites), plus a
-    # slice of games and comics so the first medium question has a real split.
-    share = max(1, n // 4)
-    head = n - 2 * share
-    return (anilist.top_characters(per_page=min(50, head))[:head]
-            + _popular_from_wikipedia("game", share)
-            + _popular_from_wikipedia("comic", share))
+    # slice of every other medium so the first medium question has a real split.
+    others = [m for m in POPULAR_CATEGORIES]
+    share = max(1, n // (2 * len(others)))
+    head = max(0, n - share * len(others))
+    out = anilist.top_characters(per_page=min(50, head))[:head] if head else []
+    for medium in others:
+        out += _popular_from_wikipedia(medium, share)
+    return out
 
 
 def find_candidates(

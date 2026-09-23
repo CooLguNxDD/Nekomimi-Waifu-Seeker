@@ -29,14 +29,19 @@ from typing import Any
 from .. import google_config
 
 DEFAULT_MODEL = google_config.DEFAULT_MODEL
-MEDIA = ("anime", "manga", "comic", "game")
+MEDIA = ("anime", "manga", "comic", "game", "movie", "tv")
+# Media a hint accepts, matching the engine's medium filter: anime and manga
+# are one bucket, and film and TV franchises cross over.
+_ACCEPTS = {"anime": {"anime", "manga"}, "manga": {"anime", "manga"},
+            "movie": {"movie", "tv"}, "tv": {"tv", "movie"}}
 
 PROMPT = (
-    "Use Google Search to find fictional characters from anime, manga, comics or "
-    "video games (including visual novels and gacha games) who match ALL of these "
+    "Use Google Search to find fictional characters from anime, manga, comics, "
+    "video games (including visual novels and gacha games), movies or TV series who "
+    "match ALL of these "
     "facts about one character:\n{facts}\n\n"
     "Reply with ONLY a JSON array of up to {n} objects, best match first, each "
-    '{{"name": ..., "series": ..., "medium": "anime"|"manga"|"comic"|"game", '
+    '{{"name": ..., "series": ..., "medium": "anime"|"manga"|"comic"|"game"|"movie"|"tv", '
     '"description": one sentence on appearance and role}}. No other text.'
 )
 
@@ -187,7 +192,7 @@ def search_characters(
             errors.append(msg)
         return []
     if medium_hint in MEDIA:
-        allowed = {"anime", "manga"} if medium_hint in ("anime", "manga") else {medium_hint}
+        allowed = _ACCEPTS.get(medium_hint, {medium_hint})
         items = [i for i in items if i["medium"] in allowed | {"unknown"}]
     out = [_to_candidate(i, sources) for i in items]
     if searched:
