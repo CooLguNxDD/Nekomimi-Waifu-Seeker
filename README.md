@@ -131,6 +131,30 @@ llama-server --model Qwen3.6-35B-A3B-Q4_K_M.gguf --port 8000
 WAIFU_QUERY_LLM=1 python -m waifu_engine.web
 ```
 
+**Laya keeps the game fast; the LLM is called rarely and never waited on.**
+
+- It only ever sees what the player *typed* (the seed and details). Button
+  answers already have fixed search wording, so a round played only with
+  buttons makes **zero** LLM calls.
+- It is called only when Laya says search is stuck. One fast `pool_fits` noul
+  (~0.3 s) asks whether any current leader fits the facts. If one does, the
+  LLM stays idle.
+- Each distinct set of typed text is rewritten at most once, on one background
+  worker. Turns never wait: the queries are used by the next search once they
+  land, usually one answer later. The first search of a round always uses the
+  templates.
+- Set `WAIFU_QUERY_LLM_WAIT=1.5` to let a turn wait up to that many seconds for
+  a fast (GPU) server. The default `0` never waits.
+
+A typical round makes 0–2 LLM calls instead of one per answer. `/healthz`
+reports `query_llm.calls`, `last_ms` and `inflight`.
+
+For the unsloth GGUF on CPU, turn thinking off (it dominates latency):
+
+```bash
+llama-server -hf unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M --jinja --reasoning-budget 0 -c 2048 --port 8000
+```
+
 To use OpenAI, set `WAIFU_QUERY_LLM_BASE_URL=https://api.openai.com/v1`,
 `WAIFU_QUERY_LLM_MODEL=<model>` and `OPENAI_API_KEY`. The last queries used are
 listed under `queries` in `web_search.last_search_meta()`.

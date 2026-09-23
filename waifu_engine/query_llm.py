@@ -14,8 +14,9 @@ The default target is a local vLLM / llama.cpp server hosting
 ``Qwen/Qwen3.6-35B-A3B``. Point ``WAIFU_QUERY_LLM_BASE_URL`` at
 ``https://api.openai.com/v1`` (and pick an OpenAI model) to use OpenAI.
 
-Stdlib HTTP only; ``rewrite`` never raises and returns ``None`` on any failure,
-in which case the template queries are used unchanged.
+The game loop never waits for it: ``prefetch`` runs the call on one background
+worker and ``peek`` picks the result up on a later search. Stdlib HTTP only;
+nothing here raises, and on failure the template queries are used unchanged.
 """
 
 from __future__ import annotations
@@ -23,8 +24,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
 import urllib.request
-from functools import lru_cache
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any
 
 _YES = {"1", "true", "yes"}
 DEFAULT_MODEL = "Qwen/Qwen3.6-35B-A3B"
@@ -73,7 +77,8 @@ def _request_body(facts: tuple[str, ...], medium_hint: str | None, n: int) -> di
     body = {
         "model": model(),
         "temperature": 0,
-        "max_tokens": 200,
+        # Three short queries fit easily; a low cap bounds CPU decode time.
+        "max_tokens": 96,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT.format(n=n)},
             {"role": "user", "content": "Facts:\n" + "\n".join(lines)},
@@ -110,35 +115,168 @@ def parse_queries(text: str, n: int = 3) -> list[str] | None:
     return out or None
 
 
-@lru_cache(maxsize=256)
-def _rewrite_cached(facts: tuple[str, ...], medium_hint: str | None, n: int,
-                    url: str, model_id: str) -> tuple[str, ...] | None:
+def _call(facts: tuple[str, ...], medium_hint: str | None, n: int,
+          url: str, model_id: str) -> tuple[str, ...] | None:
+    """One blocking HTTP round trip. Raises on transport errors."""
     headers = {"Content-Type": "application/json"}
     key = os.getenv("WAIFU_QUERY_LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    body = _request_body(facts, medium_hint, n)
+    body["model"] = model_id
     req = urllib.request.Request(
         f"{url}/chat/completions",
-        data=json.dumps(_request_body(facts, medium_hint, n)).encode("utf-8"),
+        data=json.dumps(body).encode("utf-8"),
         headers=headers,
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=_timeout()) as resp:  # noqa: S310 - configured URL
-        payload = json.loads(resp.read().decode("utf-8"))
+    t0 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=_timeout()) as resp:  # noqa: S310 - configured URL
+            payload = json.loads(resp.read().decode("utf-8"))
+    finally:
+        _STATS["calls"] += 1
+        _STATS["last_ms"] = round((time.perf_counter() - t0) * 1000)
     content = payload["choices"][0]["message"]["content"]
     queries = parse_queries(content, n)
     return tuple(queries) if queries else None
 
 
-def rewrite(facts: list[str], medium_hint: str | None = None, n: int = 3) -> list[str] | None:
-    """Up to ``n`` search queries for these player facts, or ``None``. Never raises."""
-    if not enabled():
-        return None
+# --- result store --------------------------------------------------------
+#
+# Finished rewrites are kept by request key. A request that raised is not
+# stored, so it may be tried again; one that returned nothing usable is stored
+# as None and not retried.
+
+_LOCK = threading.Lock()
+_RESULTS: dict[tuple, tuple[str, ...] | None] = {}
+_FUTURES: dict[tuple, Future] = {}
+_EXECUTOR: ThreadPoolExecutor | None = None
+_STATS: dict[str, Any] = {"calls": 0, "last_ms": None}
+_MAX_RESULTS = 256
+
+
+def _key(facts: list[str], medium_hint: str | None, n: int) -> tuple | None:
     clean = tuple(dict.fromkeys(" ".join(f.split())[:200] for f in facts if f and f.strip()))
     if not clean:
         return None
+    return (clean, medium_hint, n, base_url(), model())
+
+
+def _run(key: tuple) -> tuple[str, ...] | None:
     try:
-        got = _rewrite_cached(clean, medium_hint, n, base_url(), model())
+        got = _call(*key)
     except Exception:  # noqa: BLE001 - a dead endpoint must not kill the turn
+        with _LOCK:
+            _FUTURES.pop(key, None)
         return None
+    with _LOCK:
+        if len(_RESULTS) >= _MAX_RESULTS:
+            _RESULTS.pop(next(iter(_RESULTS)))
+        _RESULTS[key] = got
+        _FUTURES.pop(key, None)
+    return got
+
+
+def _executor() -> ThreadPoolExecutor:
+    # One worker: a CPU-bound local model gains nothing from parallel calls.
+    global _EXECUTOR
+    if _EXECUTOR is None:
+        _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="query-llm")
+    return _EXECUTOR
+
+
+def rewrite(facts: list[str], medium_hint: str | None = None, n: int = 3) -> list[str] | None:
+    """Blocking: up to ``n`` search queries for these facts, or ``None``. Never raises.
+
+    The game loop does not use this -- it uses ``prefetch`` / ``peek`` so a
+    slow model never holds up a turn.
+    """
+    if not enabled():
+        return None
+    key = _key(facts, medium_hint, n)
+    if key is None:
+        return None
+    with _LOCK:
+        if key in _RESULTS:
+            got = _RESULTS[key]
+            return list(got) if got else None
+    got = _run(key)
     return list(got) if got else None
+
+
+def known(facts: list[str], medium_hint: str | None = None, n: int = 3) -> bool:
+    """True when this request already finished or is in flight."""
+    key = _key(facts, medium_hint, n)
+    with _LOCK:
+        return key is not None and (key in _RESULTS or key in _FUTURES)
+
+
+def prefetch(facts: list[str], medium_hint: str | None = None, n: int = 3) -> bool:
+    """Start a background rewrite unless it is known already. Never blocks or raises."""
+    if not enabled():
+        return False
+    key = _key(facts, medium_hint, n)
+    if key is None:
+        return False
+    with _LOCK:
+        if key in _RESULTS or key in _FUTURES:
+            return False
+        try:
+            _FUTURES[key] = _executor().submit(_run, key)
+        except Exception:  # noqa: BLE001 - e.g. interpreter shutting down
+            return False
+    return True
+
+
+def peek(facts: list[str], medium_hint: str | None = None, n: int = 3) -> list[str] | None:
+    """Finished queries for this request, or ``None`` if pending/failed. Never blocks."""
+    if not enabled():
+        return None
+    key = _key(facts, medium_hint, n)
+    with _LOCK:
+        got = _RESULTS.get(key) if key is not None else None
+    return list(got) if got else None
+
+
+def wait(facts: list[str], medium_hint: str | None = None, n: int = 3,
+         timeout: float = 0.0) -> list[str] | None:
+    """Wait up to ``timeout`` seconds for an in-flight request."""
+    key = _key(facts, medium_hint, n)
+    with _LOCK:
+        fut = _FUTURES.get(key) if key is not None else None
+    if fut is not None and timeout > 0:
+        try:
+            fut.result(timeout=timeout)
+        except Exception:  # noqa: BLE001 - timeout or failure: carry on without it
+            pass
+    return peek(facts, medium_hint, n)
+
+
+def wait_seconds() -> float:
+    """``WAIFU_QUERY_LLM_WAIT``: how long a turn may wait for the LLM (default 0)."""
+    try:
+        return max(0.0, float(os.getenv("WAIFU_QUERY_LLM_WAIT", "0")))
+    except ValueError:
+        return 0.0
+
+
+def status() -> dict[str, Any]:
+    with _LOCK:
+        inflight = len(_FUTURES)
+    return {
+        "enabled": enabled(),
+        "model": model(),
+        "base_url": base_url(),
+        "calls": _STATS["calls"],
+        "last_ms": _STATS["last_ms"],
+        "inflight": inflight,
+    }
+
+
+def clear() -> None:
+    """Forget cached results and counters (tests)."""
+    with _LOCK:
+        _RESULTS.clear()
+        _FUTURES.clear()
+        _STATS.update(calls=0, last_ms=None)

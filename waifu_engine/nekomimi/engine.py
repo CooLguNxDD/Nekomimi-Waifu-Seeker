@@ -15,7 +15,11 @@ Laya never writes text; it decides. Per turn:
   search queries lead with them rather than with "female" or "anime".
 
 Search query *text* is never Laya's: templates build it, optionally with an
-OpenAI-compatible LLM rewriting the player's facts (``query_llm``).
+OpenAI-compatible LLM rewriting the player's own typed text (``query_llm``).
+The LLM is slow and Laya is fast, so Laya gates it: the LLM is only asked when
+there is free text it has not seen and a ``pool_fits`` noul says the current
+candidates do not fit the facts. Even then it runs in the background and the
+queries are used from a later search; a turn never waits for it.
 
 When Laya is unavailable the same decisions fall back to tag overlap and
 entropy heuristics, so the loop still plays (less sharply) with no model.
@@ -172,6 +176,79 @@ def _focus_facts(sess: GuessSession, entries: list[tuple[str, float]]) -> list[s
     return [text for text, _ in ranked_text[:FOCUS_TAKE]]
 
 
+def _free_text(sess: GuessSession) -> list[str]:
+    """What the player typed: the seed and every detail. The only LLM input.
+
+    Bank answers already have fixed search wording, so they never need the LLM.
+    """
+    texts = [sess.seed, *(a.get("detail") for a in sess.asked)]
+    return [t.strip() for t in dict.fromkeys(texts) if t and t.strip()]
+
+
+# Laya decides whether search needs help. Asked over the current leaders only.
+POOL_FITS_CANDIDATES = 5
+_POOL_FITS = {
+    "pool_fits": {
+        "type": "noul",
+        "instructions": "Does any character in `characters` fit every one of `confirmed_facts`?",
+        "criteria": {
+            "true": "yes, at least one listed character fits all the confirmed facts",
+            "false": "no, none of the listed characters fits all the confirmed facts",
+        },
+    }
+}
+
+
+def _search_stuck(sess: GuessSession) -> bool:
+    """Does the pool look like it is missing the answer? One fast Laya call.
+
+    Without Laya: stuck when nothing is found, or when no candidate leads
+    after a few questions.
+    """
+    ranked = sess.posterior()
+    if not ranked:
+        return True
+    answers = laya_client.ask(
+        _laya_state(sess, sess.scoring_pool()[:POOL_FITS_CANDIDATES]), _POOL_FITS)
+    got = (answers or {}).get("pool_fits") or {}
+    try:
+        p = float(got["noul"])
+    except (KeyError, TypeError, ValueError):
+        p = math.nan
+    if math.isfinite(p) and 0.0 <= p <= 1.0:
+        sess.laya_used = True
+        return p < 0.5
+    support = _leader_support(sess, ranked[0][0])
+    if len(support) >= 2:
+        return sum(support) / len(support) < 0.6
+    return sess.turn >= 3 and ranked[0][1] < 0.3
+
+
+def _llm_queries(sess: GuessSession, medium: str | None) -> list[str] | None:
+    """Rewritten queries for this search, without ever waiting by default.
+
+    Calls happen at most once per distinct set of typed text, and only when
+    Laya says the pool is stuck. Until a result lands, the last good queries
+    (one detail stale) are reused.
+    """
+    free = _free_text(sess)
+    if not free or not query_llm.enabled():
+        return sess.llm_queries or None
+    ready = query_llm.peek(free, medium)
+    if ready:
+        sess.llm_queries = ready
+        return ready
+    if not query_llm.known(free, medium) and _search_stuck(sess):
+        query_llm.prefetch(free, medium)
+        budget = query_llm.wait_seconds()
+        if budget > 0:
+            got = query_llm.wait(free, medium, timeout=budget)
+            if got:
+                sess.llm_queries = got
+                return got
+    return sess.llm_queries or None
+
+
 def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = False) -> int:
     """Pull fresh candidates for the current constraints.
 
@@ -187,8 +264,7 @@ def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = Fals
         entries = _fact_entries(sess)
         medium = _medium_hint(sess)
         focus = _focus_facts(sess, entries)
-        # Player facts only -- never scraped names or blurbs.
-        rewritten = query_llm.rewrite([text for text, _ in entries], medium)
+        rewritten = None if initial else _llm_queries(sess, medium)
         raws = sources.find_candidates(
             _search_terms(sess),
             medium_hint=medium,
@@ -612,16 +688,8 @@ def _guess_payload(sess: GuessSession) -> dict[str, Any]:
     }
 
 
-def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bool:
-    ranked = sess.posterior()
-    if not ranked:
-        return sess.turn >= MAX_TURNS
-    if sess.turn >= MAX_TURNS:
-        return True
-    # The posterior is conditional on what search happened to find. A lone hit
-    # has probability 1 even when it contradicts every clue. Require independent
-    # model support before turning relative rank into an early guess.
-    leader = ranked[0][0]
+def _leader_support(sess: GuessSession, leader: Candidate) -> list[float]:
+    """How well each model judgment of ``leader`` agrees with the answers given."""
     support = []
     for qid, (question, answer) in sess.evidence.items():
         if is_choice(question):
@@ -636,6 +704,19 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
         p = sess.match_cache.get((leader.id, qid))
         if p is not None:
             support.append(p if answer == "yes" else 1.0 - p)
+    return support
+
+
+def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bool:
+    ranked = sess.posterior()
+    if not ranked:
+        return sess.turn >= MAX_TURNS
+    if sess.turn >= MAX_TURNS:
+        return True
+    # The posterior is conditional on what search happened to find. A lone hit
+    # has probability 1 even when it contradicts every clue. Require independent
+    # model support before turning relative rank into an early guess.
+    support = _leader_support(sess, ranked[0][0])
     if len(support) < 2 or sum(support) / len(support) < 0.6:
         return False
     top_p = ranked[0][1]

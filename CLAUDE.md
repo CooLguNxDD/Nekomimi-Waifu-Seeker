@@ -46,7 +46,7 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
 | `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo fills remaining slots |
-| `waifu_engine/query_llm.py` | Optional OpenAI-compatible query rewriter (default local `Qwen/Qwen3.6-35B-A3B`). `rewrite(facts, medium)` → queries or `None`. Never raises. Off unless `WAIFU_QUERY_LLM=1` |
+| `waifu_engine/query_llm.py` | Optional OpenAI-compatible query rewriter (default local `Qwen/Qwen3.6-35B-A3B`). `prefetch` (one background worker) / `peek` (non-blocking) / `rewrite` (blocking, tooling only). Never raises. Off unless `WAIFU_QUERY_LLM=1` |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
 | `waifu_engine/search.py`, `catalog.py` | Online shortlist ranking; catalog helpers remain for tooling but runtime never loads the catalog |
 
@@ -82,6 +82,12 @@ Early-guess support for choice evidence is `p_pick / (p_pick + best_other)`.
 Before each search, one Laya `choice` call (`focus`) ranks the positive facts;
 the top three lead the query. A near-uniform answer (< 1.5/n) is ignored in
 favour of rarity order (details first, broad medium/gender facts last).
+
+The query LLM is gated by Laya: `_llm_queries` sends only the player's typed
+text (`_free_text`: seed + details), at most once per distinct text, and only
+when `_search_stuck` says so (one `pool_fits` noul over the top five; heuristic
+without Laya). It runs in the background; searches reuse the last good rewrite
+until a newer one lands. The first search of a round never uses it.
 
 Answers to yes/no questions are **`yes` / `no` / `detail`**. `detail` does not answer the current
 yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and
@@ -139,6 +145,7 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_QUERY_LLM_MODEL` | `Qwen/Qwen3.6-35B-A3B` | Model name sent to that endpoint |
 | `WAIFU_QUERY_LLM_API_KEY` | — | Bearer key; falls back to `OPENAI_API_KEY`; blank for local |
 | `WAIFU_QUERY_LLM_TIMEOUT` | `20` | Seconds per rewrite call |
+| `WAIFU_QUERY_LLM_WAIT` | `0` | Seconds a turn may wait for the LLM (`0` = never block) |
 | `WAIFU_LAYA_PRELOAD` | `1` | Load Laya at app startup (`0` = on first request) |
 | `WAIFU_LAYA_REQUIRED` | `0` | Fail startup if Laya does not load (set in the Laya Docker image) |
 | `USE_TF` | — | Set `0`; Transformers hangs probing TensorFlow |
@@ -169,3 +176,5 @@ DuckDuckGo.
 5. The query LLM (`query_llm.py`) writes **search strings only** — never
    question text, never decisions. Its input is player facts only; never send
    it scraped names or blurbs. Tests stub its HTTP; never call a real endpoint.
+6. The query LLM must never block a turn by default, and must not be called
+   per answer: only for new typed text, and only when Laya says search is stuck.

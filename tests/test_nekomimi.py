@@ -702,16 +702,134 @@ def test_focus_falls_back_to_rarity_when_laya_is_flat(monkeypatch):
     assert "female" not in focus
 
 
-def test_refresh_passes_focus_and_llm_queries_to_search(monkeypatch):
+def test_focus_facts_reach_the_search(monkeypatch):
     s = _facts_session()
     calls = []
-    monkeypatch.setattr(engine.query_llm, "rewrite",
-                        lambda facts, medium: calls.append(("llm", facts)) or ["tsundere mage nintendo"])
     monkeypatch.setattr(engine.sources, "find_candidates",
-                        lambda terms, **k: calls.append(("search", k)) or [])
+                        lambda terms, **k: calls.append(k) or [])
     engine.refresh_candidates(s)
-    llm = next(c[1] for c in calls if c[0] == "llm")
-    search = next(c[1] for c in calls if c[0] == "search")
-    assert "female" in llm and not any("Not true" in f for f in llm)
-    assert search["rewritten"] == ["tsundere mage nintendo"]
-    assert search["focus"][0] == "Nintendo"
+    assert calls[0]["focus"][0] == "Nintendo"
+    assert calls[0]["rewritten"] is None  # query LLM is off by default
+
+
+# --- query LLM: typed text only, gated by Laya, never blocking -----------
+
+
+import io
+import json
+import threading
+
+from waifu_engine import query_llm
+
+
+@pytest.fixture
+def llm(monkeypatch):
+    """Real query_llm with a stubbed endpoint; ``gate`` holds replies back."""
+    monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
+    monkeypatch.delenv("WAIFU_QUERY_LLM_WAIT", raising=False)
+    query_llm.clear()
+    state = {"sent": [], "gate": threading.Event()}
+    state["gate"].set()
+
+    def urlopen(req, timeout):
+        body = json.loads(req.data)
+        state["sent"].append(body["messages"][1]["content"])
+        state["gate"].wait(5)
+        reply = json.dumps(["mech pilot desert war character"])
+        return io.BytesIO(json.dumps({"choices": [{"message": {"content": reply}}]}).encode())
+
+    monkeypatch.setattr(query_llm.urllib.request, "urlopen", urlopen)
+    yield state
+    state["gate"].set()
+    query_llm.clear()
+
+
+def _pool_fits(p):
+    def ask(state, questions):
+        if "pool_fits" in questions:
+            return {"pool_fits": {"noul": p}}
+        return None
+    return ask
+
+
+def _typed_session() -> GuessSession:
+    s = _facts_session()
+    s.asked[-1]["detail"] = "pilots a mech in a desert war"
+    s.add_candidates(POOL)
+    return s
+
+
+def _drain():
+    query_llm._executor().submit(lambda: None).result(timeout=5)
+
+
+def test_llm_waits_for_laya_to_say_search_is_stuck(monkeypatch, llm):
+    s = _typed_session()
+    monkeypatch.setattr(laya_client, "ask", _pool_fits(0.9))  # pool looks fine
+    engine.refresh_candidates(s)
+    _drain()
+    assert llm["sent"] == []
+
+
+def test_llm_sees_only_typed_text_and_never_blocks_the_turn(monkeypatch, llm):
+    import time as _time
+
+    s = _typed_session()
+    monkeypatch.setattr(laya_client, "ask", _pool_fits(0.1))  # stuck
+    searches = []
+    monkeypatch.setattr(engine.sources, "find_candidates",
+                        lambda terms, **k: searches.append(k["rewritten"]) or [])
+    llm["gate"].clear()  # the model is slow
+    t0 = _time.perf_counter()
+    engine.refresh_candidates(s)
+    assert _time.perf_counter() - t0 < 1.0
+    assert searches == [None]
+    llm["gate"].set()
+    _drain()
+    sent = llm["sent"][0]
+    assert "pilots a mech in a desert war" in sent and "Nintendo" in sent
+    assert "female" not in sent and "mage" not in sent  # bank answers stay out
+    engine.refresh_candidates(s)
+    assert searches[-1] == ["mech pilot desert war character"]
+    for _ in range(3):  # same typed text: no more calls
+        engine.refresh_candidates(s)
+    _drain()
+    assert len(llm["sent"]) == 1
+
+
+def test_button_only_rounds_never_call_the_llm(monkeypatch, llm):
+    s = _fresh_session()
+    s.seed = ""
+    s.asked = [{"qid": "gender_female", "text": "Is your character female?",
+                "category": "gender", "prior": 0.5, "answer": "yes", "detail": None}]
+    monkeypatch.setattr(laya_client, "ask", _pool_fits(0.0))
+    engine.refresh_candidates(s)
+    _drain()
+    assert llm["sent"] == []
+
+
+def test_first_search_uses_templates_only(monkeypatch, llm):
+    state = engine.start("pilots a mech")
+    _drain()
+    assert state["stage"] == "asking"
+    assert llm["sent"] == []
+
+
+def test_wait_budget_uses_the_answer_in_the_same_turn(monkeypatch, llm):
+    monkeypatch.setenv("WAIFU_QUERY_LLM_WAIT", "2")
+    s = _typed_session()
+    monkeypatch.setattr(laya_client, "ask", _pool_fits(0.1))
+    searches = []
+    monkeypatch.setattr(engine.sources, "find_candidates",
+                        lambda terms, **k: searches.append(k["rewritten"]) or [])
+    engine.refresh_candidates(s)
+    assert searches == [["mech pilot desert war character"]]
+
+
+def test_stuck_heuristics_without_laya():
+    empty = sess_mod.new_session()
+    assert engine._search_stuck(empty) is True
+    s = _fresh_session()
+    assert engine._search_stuck(s) is False  # turn 0: too early to judge
+    s.turn = 4
+    assert engine._search_stuck(s) is True  # four-way tie, nobody leads

@@ -15,9 +15,9 @@ def _clean(monkeypatch):
     for var in ("WAIFU_QUERY_LLM", "WAIFU_QUERY_LLM_BASE_URL", "WAIFU_QUERY_LLM_MODEL",
                 "WAIFU_QUERY_LLM_API_KEY", "OPENAI_API_KEY", "WAIFU_ONLINE_SEARCH"):
         monkeypatch.delenv(var, raising=False)
-    query_llm._rewrite_cached.cache_clear()
+    query_llm.clear()
     yield
-    query_llm._rewrite_cached.cache_clear()
+    query_llm.clear()
 
 
 def _serve(monkeypatch, content, sent=None):
@@ -55,6 +55,7 @@ def test_parses_capped_queries_and_strips_thinking(monkeypatch):
     assert body["model"] == "Qwen/Qwen3.6-35B-A3B"
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
     assert "silver hair" in body["messages"][1]["content"]
+    assert body["max_tokens"] <= 96
     # Cached: the same facts do not hit the endpoint twice.
     query_llm.rewrite(["silver hair", "mage"], "game")
     assert len(sent) == 1
@@ -97,3 +98,44 @@ def test_rewritten_and_focus_queries_lead_the_templates():
     assert queries[0] == "mario nintendo plumber"
     assert queries[1] == "Italian plumber Nintendo video game character"
     assert len(queries) <= sources.MAX_QUERIES
+
+
+def test_prefetch_runs_in_background_and_peek_never_blocks(monkeypatch):
+    import threading
+
+    monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
+    gate = threading.Event()
+    sent = []
+
+    def urlopen(req, timeout):
+        sent.append(1)
+        gate.wait(5)
+        body = {"choices": [{"message": {"content": '["q1"]'}}]}
+        return io.BytesIO(json.dumps(body).encode())
+
+    monkeypatch.setattr(query_llm.urllib.request, "urlopen", urlopen)
+    assert query_llm.prefetch(["mech pilot"]) is True
+    assert query_llm.prefetch(["mech pilot"]) is False  # already in flight
+    assert query_llm.known(["mech pilot"])
+    assert query_llm.peek(["mech pilot"]) is None
+    assert query_llm.status()["inflight"] == 1
+    gate.set()
+    assert query_llm.wait(["mech pilot"], timeout=5) == ["q1"]
+    assert query_llm.peek(["mech pilot"]) == ["q1"]
+    assert len(sent) == 1
+    assert query_llm.status()["calls"] == 1
+
+
+def test_failed_call_can_be_retried(monkeypatch):
+    monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
+    _serve(monkeypatch, OSError("down"))
+    query_llm.prefetch(["x"])
+    assert query_llm.wait(["x"], timeout=5) is None
+    assert not query_llm.known(["x"])
+    _serve(monkeypatch, '["ok"]')
+    assert query_llm.rewrite(["x"]) == ["ok"]
+
+
+def test_prefetch_is_a_no_op_when_disabled():
+    assert query_llm.prefetch(["x"]) is False
+    assert query_llm.peek(["x"]) is None

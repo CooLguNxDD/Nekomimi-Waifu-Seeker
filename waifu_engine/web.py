@@ -12,6 +12,7 @@ from .nekomimi import engine as nekomimi_engine
 from .nekomimi import laya_client
 from .nekomimi import session as nekomimi_session
 from .nekomimi_page import NEKOMIMI_PAGE
+from . import query_llm
 from .decide import determine
 
 _YES = {"1", "true", "yes"}
@@ -187,7 +188,7 @@ def decide_form(
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "laya": laya_client.status()}
+    return {"status": "ok", "laya": laya_client.status(), "query_llm": query_llm.status()}
 
 
 @app.get("/nekomimi", response_class=HTMLResponse)

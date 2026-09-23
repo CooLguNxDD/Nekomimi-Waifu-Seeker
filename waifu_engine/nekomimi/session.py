@@ -134,6 +134,8 @@ class GuessSession:
     match_cache: dict[tuple[str, str], float] = field(default_factory=dict)
     # Per-candidate option probabilities for multiple-choice questions.
     choice_cache: dict[tuple[str, str], dict[str, float]] = field(default_factory=dict)
+    # Last good query-LLM rewrite, reused until a newer one lands.
+    llm_queries: list[str] = field(default_factory=list)
 
     # -- candidate pool ------------------------------------------------
     def alive_candidates(self) -> list[Candidate]:
