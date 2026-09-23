@@ -59,9 +59,30 @@ def test_medium_is_one_question_with_movie_and_tv():
     assert "the character is from a live-action or animated film" in MEDIUM["criteria"].values()
 
 
-def test_medium_is_asked_first():
+def test_medium_competes_by_information_gain():
+    """Mixed media keep medium in the ranking; it is not forced as the only ask.
+
+    Series often outranks it: naming one series among several is a finer split
+    than naming the medium. Both still beat traits the pool barely knows.
+    """
     s = _session()
-    assert [q["id"] for q in engine.candidate_questions(s)] == ["medium"]
+    picked = engine.candidate_questions(s)
+    ids = [q["id"] for q in picked]
+    assert "medium" in ids and any(i.startswith("series") for i in ids)
+    assert len(picked) > 1
+    top = ids[:2]
+    assert "medium" in top and any(i.startswith("series") for i in top)
+
+
+def test_shared_medium_lets_series_outrank_medium():
+    """When every candidate is already one medium, series is the better ask."""
+    s = sess_mod.new_session()
+    s.add_candidates([c for c in POOL if c["medium"] == "game"])
+    picked = engine.candidate_questions(s)
+    ids = [q["id"] for q in picked]
+    assert "medium" in ids  # still available, just not forced first
+    assert ids[0].startswith("series")
+    assert "medium" != ids[0]
 
 
 @pytest.mark.parametrize("pick, alive", [

@@ -4,17 +4,22 @@ An **Nekomimi character guesser** for **anime, manga, comics, games, movies and 
 
 ## Nekomimi mode
 
-Think of a character. The engine first asks **where it's from** (anime/manga, game, comic, movie, TV series), then **Yes / No** and **multiple-choice** questions (hair colour, eye colour, and **which series**, built from the leading candidates) — or you can type a detail instead of answering — and searches for matching characters after every answer. The runtime does not read `data/catalog.json`.
+Think of a character. The engine asks **Yes / No** and **multiple-choice**
+questions — including **where it's from** (anime/manga, game, comic, movie, TV)
+and **which series** (built from the leading candidates) when those split the
+pool best — or you can type a detail instead of answering — and searches for
+matching characters after every answer. The runtime does not read
+`data/catalog.json`.
 
 ```bash
 python -m waifu_engine.web
 # open http://127.0.0.1:7860/nekomimi
 ```
 
-The decision tree first establishes the medium, then selects questions by
-expected information gain over retrieved candidates. Empty searches lead to
-more questions, up to the turn limit. Laya evaluates each eligible
-character independently and also judges readiness:
+The decision tree selects questions by expected information gain over retrieved
+candidates; medium and series compete in that ranking rather than being forced
+first. Empty searches lead to more questions, up to the turn limit. Laya
+evaluates each eligible character independently and also judges readiness:
 
 | Laya question | Type | Decides |
 |---|---|---|

@@ -58,13 +58,14 @@ Consequences, in order of how often they get forgotten:
 
 ## The turn contract
 
-1. Establish the medium first with the one `medium` choice question ("Where is
-   your character from?": anime/manga, game, comic, movie, TV, something
-   else). Its pick is a hard filter (`traits.MEDIUM_ACCEPTS`; movie and TV
-   accept each other, "other" accepts no known medium; unknown media are never
-   removed). Then `_pick_question` chooses by mutual information
-   (answer entropy minus within-candidate uncertainty); Laya only answers
-   `ready_to_guess`. Empty searches keep asking until the turn limit.
+1. `_pick_question` chooses by mutual information (answer entropy minus
+   within-candidate uncertainty); Laya only answers `ready_to_guess`. The
+   `medium` choice ("Where is your character from?": anime/manga, game, comic,
+   movie, TV, something else) and dynamic "Which series?" compete in that
+   ranking like any other question — neither is forced first. A medium pick is
+   a hard filter (`traits.MEDIUM_ACCEPTS`; movie and TV accept each other,
+   "other" accepts no known medium; unknown media are never removed). Empty
+   searches keep asking until the turn limit.
 2. `score_candidates` records evidence and evaluates **every eligible candidate**
    with an independent `match` noul call. Never gate evidence on `scoring_pool()`;
    that top-10 list is only a readiness summary.

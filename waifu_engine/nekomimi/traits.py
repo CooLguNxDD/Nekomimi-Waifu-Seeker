@@ -209,7 +209,7 @@ def clue_question(qid: str, clues: str) -> dict[str, Any]:
     return question
 
 QUESTION_BANK: list[dict[str, Any]] = [
-    # --- medium: highest information gain, asked first ---
+    # --- medium: high information gain when the pool spans media ---
     _choice("medium", "medium_kind", "Where is your character from?",
             "Where is the character in `candidate` from?", [
         ("anime", "Anime or manga", "from Japanese anime, manga or a light novel",
