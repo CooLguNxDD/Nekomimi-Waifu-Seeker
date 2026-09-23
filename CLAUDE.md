@@ -46,6 +46,7 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
 | `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo (`web_search.ddg_quick`, capped) fills remaining slots, in the background per session (`background_key`) and only when `ddg_gate()` agrees |
+| `waifu_engine/sources/gemini.py` | Optional Gemini + Google Search grounding source (`google-genai`, default `gemini-2.5-flash`). `search_characters(facts, medium)` → candidates. Never raises. Off unless `WAIFU_GEMINI_SEARCH=1` and `GEMINI_API_KEY`/`GOOGLE_API_KEY` |
 | `waifu_engine/query_llm.py` | Optional OpenAI-compatible query rewriter (default local `Qwen/Qwen3.6-35B-A3B`). `prefetch` (one background worker) / `peek` (non-blocking) / `rewrite` (blocking, tooling only). Never raises. Off unless `WAIFU_QUERY_LLM=1` |
 | `waifu_engine/timing.py` | Per-request spans. `@traced` on `start`/`submit_answer`/`submit_guess_result`/`determine` logs one `[waifu]` line (slowest first) and sets `payload["timing"]`. `span()` is a no-op outside a trace |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
@@ -105,6 +106,13 @@ top characters for anime/manga, Wikipedia game/comic character categories;
 live, never `catalog.json`) up to `WAIFU_POPULAR_POOL` candidates in play.
 `_http` records network failures (`last_search_meta()["errors"]`); the timing
 line shows per-source `hits=` and `err=`.
+
+Gemini search grounding (`sources.gemini`) finds characters from the facts
+themselves, so it works on broad button facts where name searches cannot. It
+shares the memoised `ddg_gate` (Laya `pool_fits`), runs in the background
+(`_GEMINI_BG`, its own worker, capped by `WAIFU_GEMINI_BG_MAX_PENDING`) whenever
+the session has candidates, and inline only when the pool would be empty.
+Results are cached 15 min per facts. With no facts it is skipped (billed calls).
 
 Answers to yes/no questions are **`yes` / `no` / `detail`**. `detail` does not answer the current
 yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and
@@ -168,6 +176,12 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_DDG_TIMEOUT` | `5` | Per-request DuckDuckGo timeout |
 | `WAIFU_DDG_BG_MAX_PENDING` | `4` | Background DuckDuckGo fills queued or running at once; extra ones are dropped |
 | `WAIFU_DDG_BACKGROUND` | `1` | Fill with DuckDuckGo off the request thread (`0` = inline, capped) |
+| `WAIFU_GEMINI_SEARCH` | `0` | Use Gemini with Google Search grounding as a candidate source (billed) |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | Gemini API key; Gemini search stays off without one |
+| `WAIFU_GEMINI_MODEL` | `gemini-2.5-flash` | Any Gemini model that supports the Google Search tool |
+| `WAIFU_GEMINI_TIMEOUT` | `15` | Seconds per grounded request |
+| `WAIFU_GEMINI_BACKGROUND` | `1` | Run Gemini off the request thread when the pool has candidates (`0` = inline) |
+| `WAIFU_GEMINI_BG_MAX_PENDING` | `2` | Background Gemini searches queued or running at once; extra ones are dropped |
 | `WAIFU_POPULAR_POOL` | `24` | Popular candidates kept in play on a cold start (each costs a `match` call per answer) |
 | `WAIFU_TIMING_LOG` | `1` | Log one timing line per request (`payload["timing"]` is always filled) |
 | `WAIFU_LAYA_PRELOAD` | `1` | Load Laya at app startup (`0` = on first request) |
@@ -202,7 +216,12 @@ DuckDuckGo.
    it scraped names or blurbs. Tests stub its HTTP; never call a real endpoint.
 6. The query LLM must never block a turn by default, and must not be called
    per answer: only for new typed text, and only when Laya says search is stuck.
-7. Every function you add or change gets a docstring, including private
+7. Gemini (`sources/gemini.py`) is a **candidate source only**: it lists
+   characters, never writes question text, never makes decisions. Its reply is
+   untrusted web content (parse defensively, render with `textContent`). Its
+   prompt holds player facts only, never scraped names or blurbs. Tests use a
+   fake client; never call the real API.
+8. Every function you add or change gets a docstring, including private
    helpers: one line saying what it returns or does, plus the non-obvious
    *why* (a measured failure, a constraint) when there is one. CodeRabbit's
    pre-merge check requires 80% docstring coverage over the functions a PR

@@ -19,6 +19,7 @@ dependencies = [
 laya = ["laya>=0.3.0"]
 dml = ["onnxruntime-directml", "onnx"]
 playwright = ["playwright>=1.49"]
+gemini = ["google-genai>=1.0"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

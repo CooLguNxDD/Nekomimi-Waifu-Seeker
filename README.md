@@ -111,6 +111,33 @@ runtime. Disabling online search returns no candidates; it does not fall back
 to a fixed character list. In Nekomimi, supply a series, appearance, occupation,
 or another distinguishing detail to refine the next search.
 
+### Optional Gemini search grounding
+
+Gemini with the Google Search tool can be added as a search engine. It is
+asked to list characters matching the player's facts, and it runs the Google
+searches itself. Unlike the name searches, it finds characters from traits
+alone ("female, video game, silver hair"), so it helps most in rounds with no
+seed. Its answers are ordinary candidates that Laya scores. It never picks
+questions or guesses.
+
+```bash
+pip install -e .[gemini]            # google-genai
+export GEMINI_API_KEY=...           # or GOOGLE_API_KEY
+WAIFU_GEMINI_SEARCH=1 python -m waifu_engine.web
+```
+
+Each grounded call is billed and takes a few seconds, so Gemini:
+- only runs when Laya's `pool_fits` says the current candidates don't fit;
+- runs in the background once the round has candidates (hits join the next
+  turn; log line `gemini background ... found=N`), inline only when nothing is
+  in play;
+- caches results for 15 minutes per set of facts, and is skipped with no facts.
+
+`WAIFU_GEMINI_MODEL` (default `gemini-2.5-flash`) picks the model. `/healthz`
+shows `gemini.enabled`, and the timing line shows `hits=gemini:N` /
+`gemini_bg:N` and any `err=gemini: ...` (e.g. quota). The Docker images don't
+install `google-genai`; add it there if you want Gemini in a container.
+
 ### Optional query LLM
 
 Search strings come from templates by default. A small chat model can rewrite

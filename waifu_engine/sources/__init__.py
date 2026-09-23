@@ -16,9 +16,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from .. import timing
-from . import anilist, wikipedia
+from . import anilist, gemini, wikipedia
 
-__all__ = ["anilist", "wikipedia", "find_candidates", "normalize_name"]
+__all__ = ["anilist", "gemini", "wikipedia", "find_candidates", "normalize_name"]
 
 
 def normalize_name(name: str) -> str:
@@ -79,27 +79,93 @@ def _template_queries(constraints: list[str], medium_hint: str | None) -> list[s
     ))
 
 
-# --- background DuckDuckGo fill ---------------------------------------
+# --- background fills ---------------------------------------------------
 #
-# DuckDuckGo is the slow, long-tail source. With a ``background_key`` (the
-# session id) it runs on one worker thread while the player reads the next
-# question; its hits are handed back to the next search for that key.
+# DuckDuckGo and Gemini are the slow sources. With a ``background_key`` (the
+# session id) they run on their own worker thread while the player reads the
+# next question; their hits are handed back to the next search for that key.
 
-_BG_LOCK = threading.Lock()
-_BG_EXECUTOR: ThreadPoolExecutor | None = None
-_BG_PENDING: set[str] = set()
-_BG_READY: dict[str, list[dict[str, Any]]] = {}
+
+class _Background:
+    """One slow source run off the request thread, results parked per key.
+
+    ``max_pending`` bounds queued-or-running jobs across all sessions; a job
+    beyond it is dropped, not queued, because a queued search would run long
+    after its turn and keep its query data alive.
+    """
+
+    def __init__(self, name: str, pending_env: str, pending_default: int, workers: int = 1):
+        """``name`` labels threads and log lines; the cap comes from ``pending_env``."""
+        self.name = name
+        self.pending_env = pending_env
+        self.pending_default = pending_default
+        self.workers = workers
+        self.lock = threading.Lock()
+        self.executor: ThreadPoolExecutor | None = None
+        self.pending: set[str] = set()
+        self.ready: dict[str, list[dict[str, Any]]] = {}
+
+    def max_pending(self) -> int:
+        """The configured cap on queued-or-running jobs (env, else default)."""
+        try:
+            return max(0, int(os.getenv(self.pending_env, str(self.pending_default))))
+        except ValueError:
+            return self.pending_default
+
+    def start(self, key: str, fn: Callable[..., None], *args: Any) -> bool:
+        """Queue ``fn(key, *args)`` unless ``key`` has a job or the queue is full."""
+        with self.lock:
+            if key in self.pending or len(self.pending) >= self.max_pending():
+                return False
+            if self.executor is None:
+                self.executor = ThreadPoolExecutor(
+                    max_workers=self.workers, thread_name_prefix=f"{self.name}-fill")
+            self.pending.add(key)
+        try:
+            self.executor.submit(fn, key, *args)
+        except Exception:  # noqa: BLE001 - e.g. interpreter shutting down
+            with self.lock:
+                self.pending.discard(key)
+            return False
+        return True
+
+    def finish(self, key: str, hits: list[dict[str, Any]], t0: float, errors: list[str]) -> None:
+        """Park ``hits`` for ``key``, clear its pending flag and log the run."""
+        with self.lock:
+            self.pending.discard(key)
+            if len(self.ready) >= _BG_MAX_KEYS:
+                self.ready.pop(next(iter(self.ready)))
+            self.ready.setdefault(key, []).extend(hits)
+        if timing._log_on():
+            timing.log.info("%s background key=%s %.0fms found=%d%s",
+                            self.name, key[:8], (time.perf_counter() - t0) * 1000, len(hits),
+                            f" err={errors[0][:120]}" if errors else "")
+
+    def take(self, key: str) -> list[dict[str, Any]]:
+        """Hits a finished job left for ``key`` (consumed once)."""
+        with self.lock:
+            return self.ready.pop(key, [])
+
+    def is_pending(self, key: str) -> bool:
+        """Whether ``key`` has a job queued or running."""
+        with self.lock:
+            return key in self.pending
+
+
 _BG_MAX_KEYS = 256
+# One worker each: parallel requests only make DuckDuckGo throttle harder, and
+# Gemini calls are billed.
+_DDG_BG = _Background("ddg", "WAIFU_DDG_BG_MAX_PENDING", 4)
+_GEMINI_BG = _Background("gemini", "WAIFU_GEMINI_BG_MAX_PENDING", 2)
+# Names kept for the DuckDuckGo fill (tests and callers use them).
+_BG_LOCK = _DDG_BG.lock
+_BG_PENDING = _DDG_BG.pending
+_BG_READY = _DDG_BG.ready
 
 
 def _bg_max_pending() -> int:
-    """``WAIFU_DDG_BG_MAX_PENDING``: background fills queued or running at once,
-    across all sessions. Beyond it a fill is dropped, not queued: a queued
-    search would run long after its turn and keep its query data alive."""
-    try:
-        return max(0, int(os.getenv("WAIFU_DDG_BG_MAX_PENDING", "4")))
-    except ValueError:
-        return 4
+    """``WAIFU_DDG_BG_MAX_PENDING``: DuckDuckGo fills queued or running at once."""
+    return _DDG_BG.max_pending()
 
 
 def _ddg_background_on() -> bool:
@@ -107,7 +173,8 @@ def _ddg_background_on() -> bool:
 
 
 def _bg_run(key: str, queries: list[str], limit: int) -> None:
-    from .. import timing, web_search
+    """Background DuckDuckGo job: capped fill, parked for the next search."""
+    from .. import web_search
 
     t0 = time.perf_counter()
     errors: list[str] = []
@@ -115,45 +182,35 @@ def _bg_run(key: str, queries: list[str], limit: int) -> None:
         hits = web_search.ddg_quick(queries, limit, errors=errors)
     except Exception as exc:  # noqa: BLE001 - ddg_quick should not raise; be sure
         hits, errors = [], [str(exc)]
-    with _BG_LOCK:
-        _BG_PENDING.discard(key)
-        if len(_BG_READY) >= _BG_MAX_KEYS:
-            _BG_READY.pop(next(iter(_BG_READY)))
-        _BG_READY.setdefault(key, []).extend(hits)
-    if timing._log_on():
-        timing.log.info("ddg background key=%s %.0fms found=%d%s",
-                        key[:8], (time.perf_counter() - t0) * 1000, len(hits),
-                        f" err={errors[0][:120]}" if errors else "")
+    _DDG_BG.finish(key, hits, t0, errors)
 
 
 def _bg_start(key: str, queries: list[str], limit: int) -> bool:
-    """Queue a background fill unless ``key`` has one or the queue is full."""
-    global _BG_EXECUTOR
-    with _BG_LOCK:
-        if key in _BG_PENDING or len(_BG_PENDING) >= _bg_max_pending():
-            return False
-        if _BG_EXECUTOR is None:
-            # One worker: parallel requests only make DuckDuckGo throttle harder.
-            _BG_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ddg-fill")
-        _BG_PENDING.add(key)
-    try:
-        _BG_EXECUTOR.submit(_bg_run, key, list(queries), limit)
-    except Exception:  # noqa: BLE001 - e.g. interpreter shutting down
-        with _BG_LOCK:
-            _BG_PENDING.discard(key)
-        return False
-    return True
+    """Queue a background DuckDuckGo fill unless ``key`` has one or the queue is full."""
+    return _DDG_BG.start(key, _bg_run, list(queries), limit)
+
+
+def _gemini_run(key: str, facts: list[str], medium_hint: str | None, limit: int) -> None:
+    """Background Gemini job: one grounded search, parked for the next search."""
+    t0 = time.perf_counter()
+    errors: list[str] = []
+    hits = gemini.search_characters(facts, medium_hint, limit, errors=errors)
+    _GEMINI_BG.finish(key, hits, t0, errors)
 
 
 def take_background(key: str) -> list[dict[str, Any]]:
-    """Hits a finished background fill left for ``key`` (consumed once)."""
-    with _BG_LOCK:
-        return _BG_READY.pop(key, [])
+    """DuckDuckGo hits a finished background fill left for ``key`` (consumed once)."""
+    return _DDG_BG.take(key)
 
 
 def background_pending(key: str) -> bool:
-    with _BG_LOCK:
-        return key in _BG_PENDING
+    """Whether a DuckDuckGo fill for ``key`` is queued or running."""
+    return _DDG_BG.is_pending(key)
+
+
+def _gemini_background_on() -> bool:
+    """``WAIFU_GEMINI_BACKGROUND`` (default on): run Gemini off the request thread."""
+    return os.getenv("WAIFU_GEMINI_BACKGROUND", "1").strip().lower() in {"1", "true", "yes"}
 
 
 # --- popular pool ----------------------------------------------------------
@@ -227,6 +284,12 @@ def find_candidates(
     ``background_key`` it runs off the request thread whenever the fast sources
     already found something; its hits join the next search for that key. It
     runs inline only when nothing else was found.
+
+    Gemini (``sources.gemini``, off unless configured) searches Google for
+    characters matching the facts themselves, so it helps most when there is
+    nothing specific. It shares ``ddg_gate`` and, like DuckDuckGo, runs in the
+    background whenever the session already has candidates; it runs inline
+    only when the pool would otherwise be empty.
 
     ``specific=False`` means the facts are only broad traits (no seed, typed
     detail or LLM query). Name and keyword searches cannot match those, so
@@ -306,6 +369,7 @@ def find_candidates(
     # fresher, more relevant sources.
     if background_key:
         take(take_background(background_key), "ddg_bg")
+        take(_GEMINI_BG.take(background_key), "gemini_bg")
 
     in_play = len(exclude_names) if pool_size is None else pool_size
     room = popular_limit() - in_play
@@ -320,14 +384,34 @@ def find_candidates(
             except Exception as exc:  # noqa: BLE001
                 web_search._note_error(f"popular: {exc}")
 
+    def gate() -> bool:
+        """Whether slow sources should run. The engine memoises its answer, so
+        DuckDuckGo and Gemini share one Laya pool_fits call."""
+        if ddg_gate is None:
+            return True
+        try:
+            return bool(ddg_gate())
+        except Exception:  # noqa: BLE001 - a failed gate means "search"
+            return True
+
+    # Gemini matches traits, not names, so broad facts are fine. The facts are
+    # the player's own search terms -- never scraped names.
+    # "fictional character" is the engine's placeholder for "no facts yet";
+    # a billed grounded call on it would only list famous characters.
+    facts = [c for c in constraints
+             if c and c.strip() and c.strip().lower() != "fictional character"][-8:]
+    if facts and gemini.enabled() and len(found) < limit and gate():
+        empty = not found and not exclude_names
+        if background_key and not empty and _gemini_background_on():
+            with timing.span("fetch.gemini_background"):
+                _GEMINI_BG.start(background_key, _gemini_run, facts, medium_hint, limit)
+        else:
+            with timing.span("fetch.gemini"):
+                take(gemini.search_characters(facts, medium_hint, limit), "gemini")
+
     need_ddg = use_ddg and web_search._want_ddg_fill(
         len(found), limit, pw_ok=pw_ok, pw_empty=pw_empty, pw_error=pw_error
-    )
-    if need_ddg and ddg_gate is not None:
-        try:
-            need_ddg = bool(ddg_gate())
-        except Exception:  # noqa: BLE001 - a failed gate means "try DDG"
-            need_ddg = True
+    ) and gate()
     # Inline only when the player would otherwise have no candidates at all
     # and there is something specific to search for; broad traits alone get
     # nothing useful back, so they only ever search in the background.
