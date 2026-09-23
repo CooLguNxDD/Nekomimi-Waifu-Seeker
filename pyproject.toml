@@ -27,3 +27,6 @@ waifu-engine = "waifu_engine.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["waifu_engine*"]
+
+[tool.setuptools.package-data]
+"waifu_engine.nekomimi" = ["question_bank.json"]

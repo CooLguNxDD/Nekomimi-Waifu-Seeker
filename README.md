@@ -43,8 +43,9 @@ presented as facts to Laya. This costs one model call per eligible candidate per
 new trait, so large search result pools take longer than small ones.
 It guesses at 80% posterior, or
 after 20 questions, and gets up to 3 guesses. Questions live in
-`waifu_engine/nekomimi/traits.py` (~110 ACG traits) and are topped up with traits
-mined from the search snippets of the current pool.
+`waifu_engine/nekomimi/question_bank.json` (~110 ACG traits, expanded by
+`traits.py`) and are topped up with traits mined from the search snippets of
+the current pool.
 
 JSON API:
 

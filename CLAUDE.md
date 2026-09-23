@@ -25,10 +25,10 @@ Every answer also carries `action.act_probability`.
 
 Consequences, in order of how often they get forgotten:
 
-- **Question text never comes from the model.** All questions live in
-  `waifu_engine/nekomimi/traits.py`. Do not put question wording in prompt
-  strings scattered through the code, and do not add a generative model to
-  write them.
+- **Question text never comes from the model.** Question wording lives in
+ `waifu_engine/nekomimi/question_bank.json`. `traits.py` expands that template
+ into the runtime bank. Do not put question wording in prompt strings
+ scattered through the code, and do not add a generative model to write them.
 - `criteria` keys are the option labels; `choice` returns one of those keys.
 - The result key is **`probabilities`**, not `probs`.
 - Option strings are packed into the decision head. If a `choice` has many long
@@ -41,7 +41,8 @@ Consequences, in order of how often they get forgotten:
 | Path | Role |
 |---|---|
 | `waifu_engine/nekomimi/laya_client.py` | Process-wide `Agent` singleton. `ask(state, questions)` → answers or `None`. Never raises. `preload()` (load + warm-up, run by `web.py`'s lifespan before the port opens), `status()` (read-only, served at `/healthz`). `python -m` it to bake weights. |
-| `waifu_engine/nekomimi/traits.py` | ~110 ACG trait questions + `ANSWER_WEIGHT` + `make_dynamic()` for mined traits |
+| `waifu_engine/nekomimi/question_bank.json` | Question template: yes/no rows, choice rows, and `trait_block` groups |
+| `waifu_engine/nekomimi/traits.py` | Expands the JSON template, plus `ANSWER_WEIGHT` and `make_dynamic()` for mined traits |
 | `waifu_engine/nekomimi/session.py` | `Candidate`, `GuessSession`, log-odds pool, in-process store + TTL |
 | `waifu_engine/nekomimi/engine.py` | The turn loop: `start`, `submit_answer`, `submit_guess_result`, `state_payload` |
 | `waifu_engine/nekomimi_page.py` | Static HTML/JS for `/nekomimi` |
@@ -226,8 +227,8 @@ DuckDuckGo.
 
 ## Rules
 
-1. New questions go in `traits.py`, nowhere else.
-2. Tag slugs in `traits.py` and `web_search.TRAIT_PATTERNS` share one vocabulary
+1. New questions go in `question_bank.json`, nowhere else. `traits.py` only expands that template.
+2. Tag slugs in `question_bank.json` and `web_search.TRAIT_PATTERNS` share one vocabulary
    — add to both or evidence and questions stop lining up.
 3. Candidate identity is `names.name_keys` everywhere (search merge, DDG merge,
    session pool): names match in either word order, because Japanese names
