@@ -16,12 +16,15 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from .. import timing
+from ..names import name_keys
 from . import anilist, gemini, wikipedia
 
 __all__ = ["anilist", "gemini", "wikipedia", "find_candidates", "normalize_name"]
 
 
 def normalize_name(name: str) -> str:
+    """Letters and digits of ``name``, lower-cased. Kept for callers; matching
+    uses ``names.name_keys``, which also equates the two name orders."""
     return "".join(ch for ch in (name or "").lower() if ch.isalnum())
 
 
@@ -299,19 +302,26 @@ def find_candidates(
     """
     from .. import web_search
 
-    exclude_names = {normalize_name(n) for n in (exclude_names or set())}
+    # How many names were already seen (in play or ruled out) -- a count of
+    # names, taken before they are expanded into keys.
+    n_seen = len(exclude_names or ())
+    # Every key of every name already seen, so either name order is excluded.
+    exclude_names = set().union(*(name_keys(n) for n in (exclude_names or set())))
     found: dict[str, dict[str, Any]] = {}
     web_search._begin_search()
 
     hits: dict[str, int] = {}
+    taken: set[str] = set()  # every name key already in ``found``
 
     def take(items: list[dict[str, Any]], source: str = "") -> None:
+        """Add hits whose name (in any spelling) is new; count them under ``source``."""
         added = 0
         for cand in items:
-            key = normalize_name(cand.get("name", ""))
-            if not key or key in exclude_names or key in found:
+            keys = name_keys(cand.get("name", ""))
+            if not keys or keys & exclude_names or keys & taken:
                 continue
-            found[key] = cand
+            found[min(keys)] = cand
+            taken.update(keys)
             added += 1
         if source:
             hits[source] = hits.get(source, 0) + added
@@ -333,7 +343,7 @@ def find_candidates(
                     for q in queries:
                         if len(found) >= limit:
                             break
-                        take(web_search._playwright_hits(q, medium_hint, min(50, limit + len(exclude_names))),
+                        take(web_search._playwright_hits(q, medium_hint, min(50, limit + n_seen)),
                          "playwright")
                     pw_ok = True
                     pw_empty = len(found) == before
@@ -349,7 +359,7 @@ def find_candidates(
             if len(found) >= limit:
                 break
             try:
-                take(wikipedia.search_characters(q, limit=min(50, limit + len(exclude_names))),
+                take(wikipedia.search_characters(q, limit=min(50, limit + n_seen)),
                      "wikipedia")
             except Exception as exc:  # noqa: BLE001
                 web_search._note_error(f"wikipedia: {exc}")
@@ -371,15 +381,15 @@ def find_candidates(
         take(take_background(background_key), "ddg_bg")
         take(_GEMINI_BG.take(background_key), "gemini_bg")
 
-    in_play = len(exclude_names) if pool_size is None else pool_size
+    in_play = n_seen if pool_size is None else pool_size
     room = popular_limit() - in_play
     if not specific and room > 0:
         with timing.span("fetch.popular"):
             try:
                 # Over-fetch by the names already seen (in play or ruled out),
                 # which ``take`` skips, so the free room can still be filled.
-                fresh = [c for c in popular_characters(medium_hint, room + len(exclude_names))
-                         if normalize_name(c.get("name", "")) not in exclude_names]
+                fresh = [c for c in popular_characters(medium_hint, room + n_seen)
+                         if not name_keys(c.get("name", "")) & exclude_names]
                 take(fresh[:room], "popular")
             except Exception as exc:  # noqa: BLE001
                 web_search._note_error(f"popular: {exc}")
@@ -426,7 +436,7 @@ def find_candidates(
         if need_ddg:
             web_search._set_state("fill_ddg")
             try:
-                take(web_search.ddg_quick(queries, min(50, limit + len(exclude_names))), "ddg")
+                take(web_search.ddg_quick(queries, min(50, limit + n_seen)), "ddg")
             except Exception as exc:  # noqa: BLE001
                 web_search._note_error(f"ddg: {exc}")
 

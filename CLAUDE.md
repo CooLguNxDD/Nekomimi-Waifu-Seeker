@@ -213,21 +213,25 @@ DuckDuckGo.
 1. New questions go in `traits.py`, nowhere else.
 2. Tag slugs in `traits.py` and `web_search.TRAIT_PATTERNS` share one vocabulary
    — add to both or evidence and questions stop lining up.
-3. Trait matching is whole-word regex. Plain substring matching once made `"he"`
+3. Candidate identity is `names.name_keys` everywhere (search merge, DDG merge,
+   session pool): names match in either word order, because Japanese names
+   come family-first ("Shimoe Koharu") and given-first ("Koharu Shimoe"), and
+   a duplicate splits its own probability. Don't compare raw name strings.
+4. Trait matching is whole-word regex. Plain substring matching once made `"he"`
    fire on `"the"` and tagged every character male.
-4. Laya calls go through `laya_client.ask`. Do not construct `Router` or call
+5. Laya calls go through `laya_client.ask`. Do not construct `Router` or call
    `laya.load` anywhere else.
-5. The query LLM (`query_llm.py`, either backend: Gemini or OpenAI-compatible) writes **search strings only** — never
+6. The query LLM (`query_llm.py`, either backend: Gemini or OpenAI-compatible) writes **search strings only** — never
    question text, never decisions. Its input is player facts only; never send
    it scraped names or blurbs. Tests stub its HTTP; never call a real endpoint.
-6. The query LLM must never block a turn by default, and must not be called
+7. The query LLM must never block a turn by default, and must not be called
    per answer: only for new typed text, and only when Laya says search is stuck.
-7. Gemini (`sources/gemini.py`) is a **candidate source only**: it lists
+8. Gemini (`sources/gemini.py`) is a **candidate source only**: it lists
    characters, never writes question text, never makes decisions. Its reply is
    untrusted web content (parse defensively, render with `textContent`). Its
    prompt holds player facts only, never scraped names or blurbs. Tests use a
    fake client; never call the real API.
-8. Every function you add or change gets a docstring, including private
+9. Every function you add or change gets a docstring, including private
    helpers: one line saying what it returns or does, plus the non-obvious
    *why* (a measured failure, a constraint) when there is one. CodeRabbit's
    pre-merge check requires 80% docstring coverage over the functions a PR

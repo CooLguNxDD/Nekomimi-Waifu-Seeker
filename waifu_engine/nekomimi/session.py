@@ -15,6 +15,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..names import name_keys
+
 SESSION_TTL_SECONDS = int(os.getenv("WAIFU_NEKOMINI_TTL", "1800"))
 MAX_TURNS = int(os.getenv("WAIFU_NEKOMINI_MAX_TURNS", "20"))
 MAX_GUESSES = int(os.getenv("WAIFU_NEKOMINI_MAX_GUESSES", "3"))
@@ -37,8 +39,6 @@ def popularity_prior(popularity: int | float | None) -> float:
     return min(POPULARITY_CAP, POPULARITY_WEIGHT * math.log10(1.0 + float(popularity)))
 
 
-def _name_key(name: str) -> str:
-    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
 
 
 def answer_label(asked: dict[str, Any]) -> str:
@@ -148,20 +148,26 @@ class GuessSession:
         return None
 
     def add_candidates(self, raws: list[dict[str, Any]]) -> int:
+        """Add search hits not already in the pool; returns how many were added.
+
+        A hit is a duplicate if its id or its name (in either word order) is
+        already known, or it was rejected as a guess.
+        """
         known = {c.id for c in self.candidates}
         # The same character turns up under several URLs (wiki, MAL, fandom),
         # and duplicates split their own posterior mass.
-        seen_names = {_name_key(c.name) for c in self.candidates}
+        # Keys cover both name orders ("Koharu Shimoe" / "Shimoe Koharu").
+        seen_names: set[str] = set().union(*(name_keys(c.name) for c in self.candidates))
         added = 0
         live = self.alive_candidates()
         base = sorted(c.logodds for c in live)[len(live) // 2] if live else 0.0
         for raw in raws:
             if not raw.get("id") or raw["id"] in known or raw["id"] in self.rejected:
                 continue
-            key = _name_key(raw.get("name", ""))
-            if not key or key in seen_names:
+            keys = name_keys(raw.get("name", ""))
+            if not keys or keys & seen_names:
                 continue
-            seen_names.add(key)
+            seen_names |= keys
             cand = Candidate.from_search(raw)
             # New arrivals start at the median of the live pool so they are not
             # instantly eliminated by evidence they were never scored against,
