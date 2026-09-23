@@ -159,6 +159,28 @@ To use OpenAI, set `WAIFU_QUERY_LLM_BASE_URL=https://api.openai.com/v1`,
 `WAIFU_QUERY_LLM_MODEL=<model>` and `OPENAI_API_KEY`. The last queries used are
 listed under `queries` in `web_search.last_search_meta()`.
 
+## Finding the bottleneck
+
+Every Nekomimi request logs one line naming its steps, slowest first:
+
+```
+[waifu] answer found=5 new=2 turn=4 cands=38/42 total=3412ms | search 2980ms, search.fetch 2950ms, fetch.playwright 2100ms, fetch.wikipedia 610ms, score 420ms, laya.match 410ms/38x, pick 80ms, laya.ready_to_guess 60ms
+```
+
+- `search` is candidate discovery, and `fetch.*` splits it by source
+  (`playwright`, `wikipedia`, `anilist`, `ddg`, `enrich`). `search.rescore_new`
+  scores newly found candidates against the earlier answers.
+- `score` is judging every candidate against the answer just given.
+- `laya.<question>` is model time, with a call count (`/38x` = 38 forward
+  passes). `laya.lock_wait` is time spent queued behind other players' model calls.
+- `pick` is choosing the next question; `laya.ready_to_guess` is part of it.
+- Background LLM calls log their own `query_llm <model> <ms>` line, since
+  turns never wait for them.
+
+Dotted names are part of their parent (`fetch.wikipedia` is inside `search`).
+The same numbers come back in each API response as `timing`. Set
+`WAIFU_TIMING_LOG=0` to silence the log line.
+
 ## Notes
 
 - Scope covers anime, manga, comics and games.

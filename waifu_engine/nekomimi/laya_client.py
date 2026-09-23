@@ -17,6 +17,8 @@ import threading
 import time
 from typing import Any
 
+from .. import timing
+
 _AGENT: Any = None
 _LOAD_FAILED = False
 _LOCK = threading.Lock()
@@ -151,9 +153,18 @@ def ask(state: Any, questions: dict[str, dict[str, Any]]) -> dict[str, Any] | No
     agent = get_agent()
     if agent is None:
         return None
+    # One span per question kind: 40 per-candidate ``match`` calls add up into
+    # a single ``laya.match`` entry with its call count.
     try:
-        with _LOCK:  # Agent.predict is not documented as thread-safe
-            result = agent.predict(state, questions)
+        # Agent.predict is not documented as thread-safe. Waiting for the lock
+        # is timed apart: it is other players' turns, not this one's model cost.
+        with timing.span("laya.lock_wait"):
+            _LOCK.acquire()
+        try:
+            with timing.span("laya." + next(iter(questions))):
+                result = agent.predict(state, questions)
+        finally:
+            _LOCK.release()
     except Exception:  # noqa: BLE001
         return None
     answers = result.get("answers")

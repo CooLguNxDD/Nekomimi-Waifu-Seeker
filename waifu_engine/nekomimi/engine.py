@@ -33,7 +33,7 @@ import re
 import threading
 from typing import Any
 
-from .. import query_llm, sources, web_search
+from .. import query_llm, sources, timing, web_search
 from . import laya_client
 from .session import (
     MAX_GUESSES,
@@ -250,6 +250,11 @@ def _llm_queries(sess: GuessSession, medium: str | None) -> list[str] | None:
 
 
 def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = False) -> int:
+    with timing.span("search"):
+        return _refresh_candidates(sess, limit, initial)
+
+
+def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
     """Pull fresh candidates for the current constraints.
 
     Playwright HTML indexes first, then AniList and Wikipedia (structured, with
@@ -263,24 +268,28 @@ def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = Fals
     try:
         entries = _fact_entries(sess)
         medium = _medium_hint(sess)
-        focus = _focus_facts(sess, entries)
-        rewritten = None if initial else _llm_queries(sess, medium)
-        raws = sources.find_candidates(
-            _search_terms(sess),
-            medium_hint=medium,
-            limit=limit * 2 if initial else limit,
-            exclude_names=exclude_names,
-            focus=focus or None,
-            rewritten=rewritten or None,
-        )
+        with timing.span("search.focus"):
+            focus = _focus_facts(sess, entries)
+        with timing.span("search.llm_gate"):
+            rewritten = None if initial else _llm_queries(sess, medium)
+        with timing.span("search.fetch"):
+            raws = sources.find_candidates(
+                _search_terms(sess),
+                medium_hint=medium,
+                limit=limit * 2 if initial else limit,
+                exclude_names=exclude_names,
+                focus=focus or None,
+                rewritten=rewritten or None,
+            )
     except Exception as exc:  # noqa: BLE001 - search is best effort
         sess.notes.append(f"search failed: {exc}")
         if not raws:
             return 0
-    with _session_lock(sess):
+    with _session_lock(sess), timing.span("search.rescore_new"):
         added = sess.add_candidates(raws)
         if added and sess.evidence:
             _rescore_candidates(sess)
+    timing.note(new=added)
     return added
 
 
@@ -430,7 +439,8 @@ def _pick_question(sess: GuessSession) -> tuple[dict[str, Any], dict[str, Any] |
     the work. Expected information gain decides; Laya is spent where it is
     actually good, on judging candidates and on readiness.
     """
-    options = candidate_questions(sess)
+    with timing.span("pick.rank"):
+        options = candidate_questions(sess)
     if not options:
         return {}, None
     questions = {
@@ -593,7 +603,7 @@ def score_candidates(sess: GuessSession, question: dict[str, Any], answer: str) 
             return
     elif not ANSWER_WEIGHT.get(answer, 0.0):
         return
-    with _session_lock(sess):
+    with _session_lock(sess), timing.span("score"):
         sess.evidence[question["id"]] = (dict(question), answer)
         _rescore_candidates(sess)
 
@@ -732,8 +742,12 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
 
 def _advance(sess: GuessSession) -> dict[str, Any]:
     """Emit the next question, or a guess when the evidence is strong enough."""
-    question, laya_answers = _pick_question(sess)
+    with timing.span("pick"):
+        question, laya_answers = _pick_question(sess)
+    alive = len(sess.alive_candidates())
+    timing.note(turn=sess.turn, cands=f"{alive}/{len(sess.candidates)}")
     if _should_guess(sess, laya_answers) or not question:
+        timing.note(guess=True)
         return _guess_payload(sess)
     sess.turn += 1
     sess.asked.append(
@@ -763,6 +777,7 @@ def _advance(sess: GuessSession) -> dict[str, Any]:
     }
 
 
+@timing.traced("start")
 def start(seed: str = "") -> dict[str, Any]:
     sess = new_session(seed)
     if seed:
@@ -774,6 +789,7 @@ def start(seed: str = "") -> dict[str, Any]:
     return payload
 
 
+@timing.traced("answer")
 def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str, Any]:
     if sess.stage != "asking" or not sess.asked:
         return {"error": "no question is pending", "session_id": sess.id, "stage": sess.stage}
@@ -827,6 +843,7 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
     return _advance(sess)
 
 
+@timing.traced("guess_result")
 def submit_guess_result(sess: GuessSession, correct: bool) -> dict[str, Any]:
     if sess.stage != "guessing" or not sess.pending_guess:
         return {"error": "no guess is pending", "session_id": sess.id, "stage": sess.stage}

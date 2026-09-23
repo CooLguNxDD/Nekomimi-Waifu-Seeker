@@ -47,6 +47,7 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
 | `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo fills remaining slots |
 | `waifu_engine/query_llm.py` | Optional OpenAI-compatible query rewriter (default local `Qwen/Qwen3.6-35B-A3B`). `prefetch` (one background worker) / `peek` (non-blocking) / `rewrite` (blocking, tooling only). Never raises. Off unless `WAIFU_QUERY_LLM=1` |
+| `waifu_engine/timing.py` | Per-request spans. `@traced` on `start`/`submit_answer`/`submit_guess_result`/`determine` logs one `[waifu]` line (slowest first) and sets `payload["timing"]`. `span()` is a no-op outside a trace |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
 | `waifu_engine/search.py`, `catalog.py` | Online shortlist ranking; catalog helpers remain for tooling but runtime never loads the catalog |
 
@@ -146,6 +147,7 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_QUERY_LLM_API_KEY` | — | Bearer key; falls back to `OPENAI_API_KEY`; blank for local |
 | `WAIFU_QUERY_LLM_TIMEOUT` | `20` | Seconds per rewrite call |
 | `WAIFU_QUERY_LLM_WAIT` | `0` | Seconds a turn may wait for the LLM (`0` = never block) |
+| `WAIFU_TIMING_LOG` | `1` | Log one timing line per request (`payload["timing"]` is always filled) |
 | `WAIFU_LAYA_PRELOAD` | `1` | Load Laya at app startup (`0` = on first request) |
 | `WAIFU_LAYA_REQUIRED` | `0` | Fail startup if Laya does not load (set in the Laya Docker image) |
 | `USE_TF` | — | Set `0`; Transformers hangs probing TensorFlow |

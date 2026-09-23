@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .. import timing
 from . import anilist, wikipedia
 
 __all__ = ["anilist", "wikipedia", "find_candidates", "normalize_name"]
@@ -103,70 +104,76 @@ def find_candidates(
     pw_empty = True
     pw_error = False
 
-    if web_search._want_playwright():
-        web_search._set_state("playwright_search")
-        before = len(found)
-        try:
-            from .. import browser_search
+    with timing.span("fetch.playwright"):
+        if web_search._want_playwright():
+            web_search._set_state("playwright_search")
+            before = len(found)
+            try:
+                from .. import browser_search
 
-            if browser_search.available():
-                for q in queries:
-                    if len(found) >= limit:
-                        break
-                    take(web_search._playwright_hits(q, medium_hint, min(50, limit + len(exclude_names))))
-                pw_ok = True
-                pw_empty = len(found) == before
-            elif web_search.search_backend() == "playwright":
-                web_search._note_error("playwright unavailable; filling with ddg")
-        except Exception as exc:  # noqa: BLE001
-            pw_error = True
-            web_search._note_error(f"playwright: {exc}")
+                if browser_search.available():
+                    for q in queries:
+                        if len(found) >= limit:
+                            break
+                        take(web_search._playwright_hits(q, medium_hint, min(50, limit + len(exclude_names))))
+                    pw_ok = True
+                    pw_empty = len(found) == before
+                elif web_search.search_backend() == "playwright":
+                    web_search._note_error("playwright unavailable; filling with ddg")
+            except Exception as exc:  # noqa: BLE001
+                pw_error = True
+                web_search._note_error(f"playwright: {exc}")
 
     # Wikipedia: covers all four media and returns real prose.
-    for q in queries:
-        if len(found) >= limit:
-            break
-        try:
-            take(wikipedia.search_characters(q, limit=min(50, limit + len(exclude_names))))
-        except Exception as exc:  # noqa: BLE001
-            web_search._note_error(f"wikipedia: {exc}")
-
-    # AniList adds gender, popularity and better anime/manga coverage.
-    if medium_hint in (None, "anime", "manga") and len(found) < limit:
+    with timing.span("fetch.wikipedia"):
         for q in queries:
             if len(found) >= limit:
                 break
             try:
-                take(anilist.search_characters(q, limit=limit))
+                take(wikipedia.search_characters(q, limit=min(50, limit + len(exclude_names))))
             except Exception as exc:  # noqa: BLE001
-                web_search._note_error(f"anilist: {exc}")
+                web_search._note_error(f"wikipedia: {exc}")
+
+    # AniList adds gender, popularity and better anime/manga coverage.
+    with timing.span("fetch.anilist"):
+        if medium_hint in (None, "anime", "manga") and len(found) < limit:
+            for q in queries:
+                if len(found) >= limit:
+                    break
+                try:
+                    take(anilist.search_characters(q, limit=limit))
+                except Exception as exc:  # noqa: BLE001
+                    web_search._note_error(f"anilist: {exc}")
 
     need_ddg = use_ddg and web_search._want_ddg_fill(
         len(found), limit, pw_ok=pw_ok, pw_empty=pw_empty, pw_error=pw_error
     )
-    if need_ddg:
-        web_search._set_state("fill_ddg")
-        web_search._TLS.nested_ddg = True
-        try:
-            for q in queries:
-                if len(found) >= limit:
-                    break
-                take(web_search.search_by_constraints(
-                    [q], medium_hint=medium_hint,
-                    limit=min(50, limit + len(exclude_names)),
-                ))
-        except Exception as exc:  # noqa: BLE001
-            web_search._note_error(f"ddg: {exc}")
-        finally:
-            web_search._TLS.nested_ddg = False
+    with timing.span("fetch.ddg"):
+        if need_ddg:
+            web_search._set_state("fill_ddg")
+            web_search._TLS.nested_ddg = True
+            try:
+                for q in queries:
+                    if len(found) >= limit:
+                        break
+                    take(web_search.search_by_constraints(
+                        [q], medium_hint=medium_hint,
+                        limit=min(50, limit + len(exclude_names)),
+                    ))
+            except Exception as exc:  # noqa: BLE001
+                web_search._note_error(f"ddg: {exc}")
+            finally:
+                web_search._TLS.nested_ddg = False
 
     # Preserve provider relevance. Fame is only a capped prior after retrieval.
     out = list(found.values())[:limit]
-    if web_search._enrich_on() and out:
-        web_search._set_state("enrich")
-        try:
-            web_search.enrich_candidates(out)
-        except Exception as exc:  # noqa: BLE001
-            web_search._note_error(f"enrich: {exc}")
+    with timing.span("fetch.enrich"):
+        if web_search._enrich_on() and out:
+            web_search._set_state("enrich")
+            try:
+                web_search.enrich_candidates(out)
+            except Exception as exc:  # noqa: BLE001
+                web_search._note_error(f"enrich: {exc}")
     web_search._set_state("done")
+    timing.note(found=len(out))
     return out

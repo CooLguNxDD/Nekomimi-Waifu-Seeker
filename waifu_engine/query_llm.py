@@ -30,6 +30,8 @@ import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
+from . import timing
+
 _YES = {"1", "true", "yes"}
 DEFAULT_MODEL = "Qwen/Qwen3.6-35B-A3B"
 DEFAULT_BASE_URL = "http://localhost:8000/v1"
@@ -134,12 +136,23 @@ def _call(facts: tuple[str, ...], medium_hint: str | None, n: int,
     try:
         with urllib.request.urlopen(req, timeout=_timeout()) as resp:  # noqa: S310 - configured URL
             payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        _log_call(t0, f"failed: {exc}")
+        raise
     finally:
         _STATS["calls"] += 1
         _STATS["last_ms"] = round((time.perf_counter() - t0) * 1000)
     content = payload["choices"][0]["message"]["content"]
     queries = parse_queries(content, n)
+    _log_call(t0, f"{len(queries or [])} queries")
     return tuple(queries) if queries else None
+
+
+def _log_call(t0: float, outcome: str) -> None:
+    # Runs on the background worker, outside any request trace, so it gets its
+    # own line: this is the time the LLM would cost if a turn waited for it.
+    if timing._log_on():
+        timing.log.info("query_llm %s %.0fms %s", model(), (time.perf_counter() - t0) * 1000, outcome)
 
 
 # --- result store --------------------------------------------------------
