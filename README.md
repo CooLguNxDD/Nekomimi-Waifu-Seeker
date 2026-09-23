@@ -156,8 +156,10 @@ llama-server -hf unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M --jinja --reasoning-budget 
 ```
 
 To use OpenAI, set `WAIFU_QUERY_LLM_BASE_URL=https://api.openai.com/v1`,
-`WAIFU_QUERY_LLM_MODEL=<model>` and `OPENAI_API_KEY`. The last queries used are
-listed under `queries` in `web_search.last_search_meta()`.
+`WAIFU_QUERY_LLM_MODEL=<model>` and `OPENAI_API_KEY`. That key is only ever
+sent to `https://api.openai.com`; other endpoints use `WAIFU_QUERY_LLM_API_KEY`.
+The last queries used are listed under `queries` in
+`web_search.last_search_meta()`.
 
 ## Finding the bottleneck
 

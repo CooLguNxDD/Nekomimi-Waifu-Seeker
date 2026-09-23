@@ -121,7 +121,11 @@ def _call(facts: tuple[str, ...], medium_hint: str | None, n: int,
           url: str, model_id: str) -> tuple[str, ...] | None:
     """One blocking HTTP round trip. Raises on transport errors."""
     headers = {"Content-Type": "application/json"}
-    key = os.getenv("WAIFU_QUERY_LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+    key = os.getenv("WAIFU_QUERY_LLM_API_KEY") or ""
+    # The generic OpenAI key only ever goes to OpenAI over HTTPS -- never to
+    # the default local server or any third-party endpoint.
+    if not key and _is_openai(url) and url.startswith("https://"):
+        key = os.getenv("OPENAI_API_KEY") or ""
     if key:
         headers["Authorization"] = f"Bearer {key}"
     body = _request_body(facts, medium_hint, n)

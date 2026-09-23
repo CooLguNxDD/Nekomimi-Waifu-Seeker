@@ -109,3 +109,17 @@ def test_required_laya_fails_startup(monkeypatch):
     with pytest.raises(RuntimeError, match="WAIFU_LAYA_REQUIRED"):
         with TestClient(web.app):
             pass
+
+
+def test_required_laya_loads_even_with_preload_off(monkeypatch):
+    monkeypatch.setenv("WAIFU_LAYA_PRELOAD", "0")
+    monkeypatch.setenv("WAIFU_LAYA_REQUIRED", "1")
+    loads = _install(monkeypatch, FakeAgent())
+    with TestClient(web.app):
+        pass
+    assert loads == [1]
+    laya_client.reset()
+    monkeypatch.setattr(laya_client, "get_agent", lambda: None)
+    with pytest.raises(RuntimeError, match="WAIFU_LAYA_REQUIRED"):
+        with TestClient(web.app):
+            pass

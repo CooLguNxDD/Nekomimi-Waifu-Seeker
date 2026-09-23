@@ -29,9 +29,11 @@ async def lifespan(_app: FastAPI):
     ``WAIFU_LAYA_PRELOAD=0`` restores load-on-first-request. A failed load runs
     the app on heuristics, unless ``WAIFU_LAYA_REQUIRED=1`` asks startup to fail.
     """
-    if _env_on("WAIFU_LAYA_PRELOAD", "1") and not _env_on("WAIFU_FORCE_FALLBACK", "0"):
+    # Required means required: load (and check) even when preload is off.
+    required = _env_on("WAIFU_LAYA_REQUIRED", "0")
+    if required or (_env_on("WAIFU_LAYA_PRELOAD", "1") and not _env_on("WAIFU_FORCE_FALLBACK", "0")):
         info = await asyncio.to_thread(laya_client.preload)
-        if not info["loaded"] and _env_on("WAIFU_LAYA_REQUIRED", "0"):
+        if not info["loaded"] and required:
             raise RuntimeError("WAIFU_LAYA_REQUIRED=1 but Laya failed to load: %s" % info["error"])
     yield
 

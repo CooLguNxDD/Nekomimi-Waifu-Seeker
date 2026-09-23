@@ -139,3 +139,25 @@ def test_failed_call_can_be_retried(monkeypatch):
 def test_prefetch_is_a_no_op_when_disabled():
     assert query_llm.prefetch(["x"]) is False
     assert query_llm.peek(["x"]) is None
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8000/v1", "https://llm.example.com/v1",
+                                 "http://api.openai.com/v1"])
+def test_openai_key_never_leaves_for_other_endpoints(monkeypatch, url):
+    monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
+    monkeypatch.setenv("WAIFU_QUERY_LLM_BASE_URL", url)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    sent = []
+    _serve(monkeypatch, '["q"]', sent)
+    query_llm.rewrite(["tsundere"])
+    assert sent[0][0].get_header("Authorization") is None
+
+
+def test_own_key_is_sent_to_any_endpoint(monkeypatch):
+    monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
+    monkeypatch.setenv("WAIFU_QUERY_LLM_API_KEY", "local-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    sent = []
+    _serve(monkeypatch, '["q"]', sent)
+    query_llm.rewrite(["tsundere"])
+    assert sent[0][0].get_header("Authorization") == "Bearer local-key"

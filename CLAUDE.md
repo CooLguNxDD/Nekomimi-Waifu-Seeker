@@ -160,12 +160,13 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_QUERY_LLM` | `0` | Let an LLM rewrite search queries (search strings only) |
 | `WAIFU_QUERY_LLM_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible endpoint (`https://api.openai.com/v1` for OpenAI) |
 | `WAIFU_QUERY_LLM_MODEL` | `Qwen/Qwen3.6-35B-A3B` | Model name sent to that endpoint |
-| `WAIFU_QUERY_LLM_API_KEY` | — | Bearer key; falls back to `OPENAI_API_KEY`; blank for local |
+| `WAIFU_QUERY_LLM_API_KEY` | — | Bearer key for the query endpoint; blank for local. Falls back to `OPENAI_API_KEY` only for `https://api.openai.com` |
 | `WAIFU_QUERY_LLM_TIMEOUT` | `20` | Seconds per rewrite call |
 | `WAIFU_QUERY_LLM_WAIT` | `0` | Seconds a turn may wait for the LLM (`0` = never block) |
 | `WAIFU_DDG_MAX_REQUESTS` | `3` | DuckDuckGo requests per search |
 | `WAIFU_DDG_BUDGET` | `4` | Seconds after which no new DuckDuckGo request starts |
 | `WAIFU_DDG_TIMEOUT` | `5` | Per-request DuckDuckGo timeout |
+| `WAIFU_DDG_BG_MAX_PENDING` | `4` | Background DuckDuckGo fills queued or running at once; extra ones are dropped |
 | `WAIFU_DDG_BACKGROUND` | `1` | Fill with DuckDuckGo off the request thread (`0` = inline, capped) |
 | `WAIFU_POPULAR_POOL` | `24` | Popular candidates kept in play on a cold start (each costs a `match` call per answer) |
 | `WAIFU_TIMING_LOG` | `1` | Log one timing line per request (`payload["timing"]` is always filled) |

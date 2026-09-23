@@ -92,6 +92,16 @@ _BG_READY: dict[str, list[dict[str, Any]]] = {}
 _BG_MAX_KEYS = 256
 
 
+def _bg_max_pending() -> int:
+    """``WAIFU_DDG_BG_MAX_PENDING``: background fills queued or running at once,
+    across all sessions. Beyond it a fill is dropped, not queued: a queued
+    search would run long after its turn and keep its query data alive."""
+    try:
+        return max(0, int(os.getenv("WAIFU_DDG_BG_MAX_PENDING", "4")))
+    except ValueError:
+        return 4
+
+
 def _ddg_background_on() -> bool:
     return os.getenv("WAIFU_DDG_BACKGROUND", "1").strip().lower() in {"1", "true", "yes"}
 
@@ -117,10 +127,10 @@ def _bg_run(key: str, queries: list[str], limit: int) -> None:
 
 
 def _bg_start(key: str, queries: list[str], limit: int) -> bool:
-    """Queue a background fill unless one is already running for ``key``."""
+    """Queue a background fill unless ``key`` has one or the queue is full."""
     global _BG_EXECUTOR
     with _BG_LOCK:
-        if key in _BG_PENDING:
+        if key in _BG_PENDING or len(_BG_PENDING) >= _bg_max_pending():
             return False
         if _BG_EXECUTOR is None:
             # One worker: parallel requests only make DuckDuckGo throttle harder.

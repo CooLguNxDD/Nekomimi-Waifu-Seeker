@@ -291,3 +291,34 @@ def test_background_ddg_logs_why_it_found_nothing(monkeypatch, quiet_sources):
     finally:
         timing.log.removeHandler(handler)
     assert "found=0" in lines[-1] and "Ratelimit" in lines[-1]
+
+
+def test_background_queue_is_bounded_across_sessions(monkeypatch, quiet_sources):
+    import threading
+
+    monkeypatch.setenv("WAIFU_DDG_BG_MAX_PENDING", "1")
+    gate = threading.Event()
+    monkeypatch.setattr(web_search, "ddg_quick", lambda *a, **k: gate.wait(5) and [])
+    try:
+        assert sources._bg_start("sess-a", ["q"], 5) is True
+        assert sources._bg_start("sess-b", ["q"], 5) is False  # dropped, not queued
+    finally:
+        gate.set()
+    for _ in range(100):
+        if not sources.background_pending("sess-a"):
+            break
+        _time.sleep(0.02)
+    assert sources._bg_start("sess-b", ["q"], 5) is True  # room again
+
+
+def test_colour_option_tags_are_mined_from_snippets():
+    from waifu_engine.nekomimi import traits
+
+    slugs = set(web_search.mine_trait_slugs(
+        "She has green hair and amber eyes; her rival is brown-eyed with purple hair."))
+    assert {"green", "purple", "eyes-gold", "eyes-brown"} <= slugs
+    assert "blue" not in web_search.mine_trait_slugs("She has blue eyes.")  # not hair
+    mined = {slug for slug, _ in web_search.TRAIT_PATTERNS}
+    for qid in ("hair_color", "eye_color"):
+        for option in traits.QUESTIONS_BY_ID[qid]["options"].values():
+            assert set(option["tags"]) <= mined, (qid, option["tags"])
