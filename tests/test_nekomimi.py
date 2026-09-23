@@ -833,3 +833,26 @@ def test_stuck_heuristics_without_laya():
     assert engine._search_stuck(s) is False  # turn 0: too early to judge
     s.turn = 4
     assert engine._search_stuck(s) is True  # four-way tie, nobody leads
+
+
+def test_one_pool_fits_call_gates_both_llm_and_ddg(monkeypatch, llm):
+    s = _typed_session()
+    calls = []
+
+    def ask(state, questions):
+        calls.append(next(iter(questions)))
+        return {"pool_fits": {"noul": 0.1}} if "pool_fits" in questions else None
+
+    monkeypatch.setattr(laya_client, "ask", ask)
+    seen = {}
+
+    def search(terms, **k):
+        seen.update(k)
+        assert k["ddg_gate"]() is True
+        return []
+
+    monkeypatch.setattr(engine.sources, "find_candidates", search)
+    engine.refresh_candidates(s)
+    _drain()
+    assert seen["background_key"] == s.id
+    assert calls.count("pool_fits") == 1

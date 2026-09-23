@@ -224,7 +224,8 @@ def _search_stuck(sess: GuessSession) -> bool:
     return sess.turn >= 3 and ranked[0][1] < 0.3
 
 
-def _llm_queries(sess: GuessSession, medium: str | None) -> list[str] | None:
+def _llm_queries(sess: GuessSession, medium: str | None,
+                 stuck: Any = None) -> list[str] | None:
     """Rewritten queries for this search, without ever waiting by default.
 
     Calls happen at most once per distinct set of typed text, and only when
@@ -238,7 +239,8 @@ def _llm_queries(sess: GuessSession, medium: str | None) -> list[str] | None:
     if ready:
         sess.llm_queries = ready
         return ready
-    if not query_llm.known(free, medium) and _search_stuck(sess):
+    stuck = stuck or (lambda: _search_stuck(sess))
+    if not query_llm.known(free, medium) and stuck():
         query_llm.prefetch(free, medium)
         budget = query_llm.wait_seconds()
         if budget > 0:
@@ -265,13 +267,23 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
         return 0
     exclude_names = {c.name for c in sess.candidates}
     raws: list[dict[str, Any]] = []
+    memo: dict[str, bool] = {}
+
+    def stuck() -> bool:
+        # One Laya pool_fits call per search, shared by the LLM and DDG gates,
+        # and only made if one of them actually needs the answer.
+        if "v" not in memo:
+            with timing.span("search.stuck"):
+                memo["v"] = _search_stuck(sess)
+        return memo["v"]
+
     try:
         entries = _fact_entries(sess)
         medium = _medium_hint(sess)
         with timing.span("search.focus"):
             focus = _focus_facts(sess, entries)
         with timing.span("search.llm_gate"):
-            rewritten = None if initial else _llm_queries(sess, medium)
+            rewritten = None if initial else _llm_queries(sess, medium, stuck)
         with timing.span("search.fetch"):
             raws = sources.find_candidates(
                 _search_terms(sess),
@@ -280,6 +292,8 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
                 exclude_names=exclude_names,
                 focus=focus or None,
                 rewritten=rewritten or None,
+                background_key=sess.id,
+                ddg_gate=None if initial else stuck,
             )
     except Exception as exc:  # noqa: BLE001 - search is best effort
         sess.notes.append(f"search failed: {exc}")

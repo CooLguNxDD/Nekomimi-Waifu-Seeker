@@ -45,7 +45,7 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/nekomimi_page.py` | Static HTML/JS for `/nekomimi` |
 | `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
-| `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo fills remaining slots |
+| `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo (`web_search.ddg_quick`, capped) fills remaining slots, in the background per session (`background_key`) and only when `ddg_gate()` agrees |
 | `waifu_engine/query_llm.py` | Optional OpenAI-compatible query rewriter (default local `Qwen/Qwen3.6-35B-A3B`). `prefetch` (one background worker) / `peek` (non-blocking) / `rewrite` (blocking, tooling only). Never raises. Off unless `WAIFU_QUERY_LLM=1` |
 | `waifu_engine/timing.py` | Per-request spans. `@traced` on `start`/`submit_answer`/`submit_guess_result`/`determine` logs one `[waifu]` line (slowest first) and sets `payload["timing"]`. `span()` is a no-op outside a trace |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
@@ -89,6 +89,13 @@ text (`_free_text`: seed + details), at most once per distinct text, and only
 when `_search_stuck` says so (one `pool_fits` noul over the top five; heuristic
 without Laya). It runs in the background; searches reuse the last good rewrite
 until a newer one lands. The first search of a round never uses it.
+
+DuckDuckGo is the slow source (uncapped it made ~35 sequential requests, ~40 s
+a turn). It is capped (`WAIFU_DDG_MAX_REQUESTS` generic queries within
+`WAIFU_DDG_BUDGET` seconds, one shared client), gated by the same memoised
+`_search_stuck` call as the query LLM (one `pool_fits` per search at most), and
+runs on a background worker whenever the session already has candidates; its
+hits join the next search. It runs inline only when nothing else was found.
 
 Answers to yes/no questions are **`yes` / `no` / `detail`**. `detail` does not answer the current
 yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and
@@ -147,6 +154,10 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_QUERY_LLM_API_KEY` | — | Bearer key; falls back to `OPENAI_API_KEY`; blank for local |
 | `WAIFU_QUERY_LLM_TIMEOUT` | `20` | Seconds per rewrite call |
 | `WAIFU_QUERY_LLM_WAIT` | `0` | Seconds a turn may wait for the LLM (`0` = never block) |
+| `WAIFU_DDG_MAX_REQUESTS` | `3` | DuckDuckGo requests per search |
+| `WAIFU_DDG_BUDGET` | `4` | Seconds after which no new DuckDuckGo request starts |
+| `WAIFU_DDG_TIMEOUT` | `5` | Per-request DuckDuckGo timeout |
+| `WAIFU_DDG_BACKGROUND` | `1` | Fill with DuckDuckGo off the request thread (`0` = inline, capped) |
 | `WAIFU_TIMING_LOG` | `1` | Log one timing line per request (`payload["timing"]` is always filled) |
 | `WAIFU_LAYA_PRELOAD` | `1` | Load Laya at app startup (`0` = on first request) |
 | `WAIFU_LAYA_REQUIRED` | `0` | Fail startup if Laya does not load (set in the Laya Docker image) |

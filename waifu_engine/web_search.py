@@ -20,6 +20,7 @@ import hashlib
 import os
 import re
 import threading
+import time
 from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
@@ -184,15 +185,83 @@ def _ddgs():
         return DDGS
 
 
-def _search_once(query: str, max_results: int = 8) -> list[dict[str, Any]]:
-    DDGS = _ddgs()
+# One DuckDuckGo client for the process: opening a fresh one per request
+# repeats the connection setup every time. The lock also keeps the request
+# thread and the background filler from sharing it at once.
+_DDG_CLIENT: Any = None
+_DDG_LOCK = threading.Lock()
+
+
+def _ddg_timeout() -> float:
     try:
-        with DDGS() as ddgs:
-            return list(ddgs.text(query, max_results=max_results))
-    except Exception as e:  # noqa: BLE001
-        if "no results" in str(e).lower():
-            return []
-        raise
+        return float(os.getenv("WAIFU_DDG_TIMEOUT", "5"))
+    except ValueError:
+        return 5.0
+
+
+def _search_once(query: str, max_results: int = 8) -> list[dict[str, Any]]:
+    global _DDG_CLIENT
+    with _DDG_LOCK:
+        if _DDG_CLIENT is None:
+            DDGS = _ddgs()
+            try:
+                _DDG_CLIENT = DDGS(timeout=_ddg_timeout())
+            except TypeError:  # older clients without a timeout argument
+                _DDG_CLIENT = DDGS()
+        try:
+            return list(_DDG_CLIENT.text(query, max_results=max_results))
+        except Exception as e:  # noqa: BLE001
+            if "no results" in str(e).lower():
+                return []
+            _DDG_CLIENT = None  # a broken session is not reused
+            raise
+
+
+def ddg_max_requests() -> int:
+    try:
+        return max(0, int(os.getenv("WAIFU_DDG_MAX_REQUESTS", "3")))
+    except ValueError:
+        return 3
+
+
+def ddg_budget() -> float:
+    try:
+        return max(0.0, float(os.getenv("WAIFU_DDG_BUDGET", "4")))
+    except ValueError:
+        return 4.0
+
+
+def ddg_quick(
+    queries: list[str],
+    limit: int,
+    max_requests: int | None = None,
+    budget: float | None = None,
+    per_query: int = 8,
+) -> list[dict[str, Any]]:
+    """Capped DuckDuckGo fill for the guessing loop. Never raises.
+
+    One generic search per query (not the seven site-specific variants of
+    ``_constraint_queries``), at most ``max_requests`` requests, and no new
+    request once ``budget`` seconds have passed. Uncapped, one turn made ~35
+    sequential requests and took ~40 s.
+    """
+    max_requests = ddg_max_requests() if max_requests is None else max_requests
+    budget = ddg_budget() if budget is None else budget
+    t0 = time.perf_counter()
+    found: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    for idx, q in enumerate(queries[:max_requests], start=1):
+        if len(found) >= limit or (idx > 1 and time.perf_counter() - t0 >= budget):
+            break
+        try:
+            raw = _search_once(f"{q} wiki", max_results=per_query)
+        except Exception as exc:  # noqa: BLE001 - a dead request must not kill the turn
+            _note_error(f"ddg: {exc}")
+            continue
+        for item in raw:
+            if _take_candidate(found, seen, _to_candidate(item, idx), set(), limit):
+                break
+    return list(found.values())
 
 
 def _clean_name(title: str) -> str:

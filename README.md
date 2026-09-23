@@ -177,6 +177,12 @@ Every Nekomimi request logs one line naming its steps, slowest first:
 - Background LLM calls log their own `query_llm <model> <ms>` line, since
   turns never wait for them.
 
+- `fetch.ddg_background` is only the time to queue DuckDuckGo. The search
+  itself logs its own `ddg background ... found=N` line, and its hits join the
+  next turn. DuckDuckGo runs only when Laya's `pool_fits` says the pool is
+  missing the answer (`search.stuck`), makes at most 3 requests within 4 s, and
+  reuses one client.
+
 Dotted names are part of their parent (`fetch.wikipedia` is inside `search`).
 The same numbers come back in each API response as `timing`. Set
 `WAIFU_TIMING_LOG=0` to silence the log line.

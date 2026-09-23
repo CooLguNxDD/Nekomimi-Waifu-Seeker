@@ -8,8 +8,12 @@ filled up with trope pages.
 
 from __future__ import annotations
 
+import os
 import re
-from typing import Any
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable
 
 from .. import timing
 from . import anilist, wikipedia
@@ -75,6 +79,71 @@ def _template_queries(constraints: list[str], medium_hint: str | None) -> list[s
     ))
 
 
+# --- background DuckDuckGo fill ---------------------------------------
+#
+# DuckDuckGo is the slow, long-tail source. With a ``background_key`` (the
+# session id) it runs on one worker thread while the player reads the next
+# question; its hits are handed back to the next search for that key.
+
+_BG_LOCK = threading.Lock()
+_BG_EXECUTOR: ThreadPoolExecutor | None = None
+_BG_PENDING: set[str] = set()
+_BG_READY: dict[str, list[dict[str, Any]]] = {}
+_BG_MAX_KEYS = 256
+
+
+def _ddg_background_on() -> bool:
+    return os.getenv("WAIFU_DDG_BACKGROUND", "1").strip().lower() in {"1", "true", "yes"}
+
+
+def _bg_run(key: str, queries: list[str], limit: int) -> None:
+    from .. import timing, web_search
+
+    t0 = time.perf_counter()
+    try:
+        hits = web_search.ddg_quick(queries, limit)
+    except Exception:  # noqa: BLE001 - ddg_quick should not raise; be sure
+        hits = []
+    with _BG_LOCK:
+        _BG_PENDING.discard(key)
+        if len(_BG_READY) >= _BG_MAX_KEYS:
+            _BG_READY.pop(next(iter(_BG_READY)))
+        _BG_READY.setdefault(key, []).extend(hits)
+    if timing._log_on():
+        timing.log.info("ddg background key=%s %.0fms found=%d",
+                        key[:8], (time.perf_counter() - t0) * 1000, len(hits))
+
+
+def _bg_start(key: str, queries: list[str], limit: int) -> bool:
+    """Queue a background fill unless one is already running for ``key``."""
+    global _BG_EXECUTOR
+    with _BG_LOCK:
+        if key in _BG_PENDING:
+            return False
+        if _BG_EXECUTOR is None:
+            # One worker: parallel requests only make DuckDuckGo throttle harder.
+            _BG_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ddg-fill")
+        _BG_PENDING.add(key)
+    try:
+        _BG_EXECUTOR.submit(_bg_run, key, list(queries), limit)
+    except Exception:  # noqa: BLE001 - e.g. interpreter shutting down
+        with _BG_LOCK:
+            _BG_PENDING.discard(key)
+        return False
+    return True
+
+
+def take_background(key: str) -> list[dict[str, Any]]:
+    """Hits a finished background fill left for ``key`` (consumed once)."""
+    with _BG_LOCK:
+        return _BG_READY.pop(key, [])
+
+
+def background_pending(key: str) -> bool:
+    with _BG_LOCK:
+        return key in _BG_PENDING
+
+
 def find_candidates(
     constraints: list[str],
     medium_hint: str | None = None,
@@ -83,8 +152,17 @@ def find_candidates(
     use_ddg: bool = True,
     focus: list[str] | None = None,
     rewritten: list[str] | None = None,
+    background_key: str | None = None,
+    ddg_gate: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
-    """Merge candidates from every source, best source first, deduped by name."""
+    """Merge candidates from every source, best source first, deduped by name.
+
+    DuckDuckGo is capped (``web_search.ddg_quick``) and only runs when
+    ``ddg_gate()`` agrees (the engine asks Laya whether search is stuck). With a
+    ``background_key`` it runs off the request thread whenever the fast sources
+    already found something; its hits join the next search for that key. It
+    runs inline only when nothing else was found.
+    """
     from .. import web_search
 
     exclude_names = {normalize_name(n) for n in (exclude_names or set())}
@@ -145,25 +223,31 @@ def find_candidates(
                 except Exception as exc:  # noqa: BLE001
                     web_search._note_error(f"anilist: {exc}")
 
+    # Hits from the previous turn's background fill, after this turn's
+    # fresher, more relevant sources.
+    if background_key:
+        take(take_background(background_key))
+
     need_ddg = use_ddg and web_search._want_ddg_fill(
         len(found), limit, pw_ok=pw_ok, pw_empty=pw_empty, pw_error=pw_error
     )
+    if need_ddg and ddg_gate is not None:
+        try:
+            need_ddg = bool(ddg_gate())
+        except Exception:  # noqa: BLE001 - a failed gate means "try DDG"
+            need_ddg = True
+    # Inline only when the player would otherwise have no candidates at all.
+    if need_ddg and background_key and (found or exclude_names) and _ddg_background_on():
+        with timing.span("fetch.ddg_background"):
+            _bg_start(background_key, queries, limit)
+        need_ddg = False
     with timing.span("fetch.ddg"):
         if need_ddg:
             web_search._set_state("fill_ddg")
-            web_search._TLS.nested_ddg = True
             try:
-                for q in queries:
-                    if len(found) >= limit:
-                        break
-                    take(web_search.search_by_constraints(
-                        [q], medium_hint=medium_hint,
-                        limit=min(50, limit + len(exclude_names)),
-                    ))
+                take(web_search.ddg_quick(queries, min(50, limit + len(exclude_names))))
             except Exception as exc:  # noqa: BLE001
                 web_search._note_error(f"ddg: {exc}")
-            finally:
-                web_search._TLS.nested_ddg = False
 
     # Preserve provider relevance. Fame is only a capped prior after retrieval.
     out = list(found.values())[:limit]
