@@ -40,6 +40,8 @@ class FakeModels:
 
 @pytest.fixture
 def fake(monkeypatch):
+    for var in ("WAIFU_GEMINI_MODEL", "WAIFU_GEMINI_SEARCH_MODEL"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("WAIFU_GEMINI_SEARCH", "1")
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.delenv("WAIFU_ONLINE_SEARCH", raising=False)
@@ -156,7 +158,9 @@ def test_healthz_reports_gemini(monkeypatch):
 
     from waifu_engine.web import app
 
-    monkeypatch.delenv("WAIFU_GEMINI_SEARCH", raising=False)
+    for var in ("WAIFU_GEMINI_SEARCH", "WAIFU_GEMINI_LLM", "WAIFU_GEMINI_MODEL",
+                "WAIFU_GEMINI_SEARCH_MODEL", "WAIFU_GEMINI_LLM_MODEL"):
+        monkeypatch.delenv(var, raising=False)
     health = TestClient(app).get("/healthz").json()
-    assert health["gemini"]["enabled"] is False
-    assert health["gemini"]["model"] == gemini.DEFAULT_MODEL
+    assert health["gemini"]["search"] == {"enabled": False, "model": gemini.DEFAULT_MODEL}
+    assert health["gemini"]["llm"]["enabled"] is False

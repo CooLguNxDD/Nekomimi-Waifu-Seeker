@@ -46,8 +46,10 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
 | `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo (`web_search.ddg_quick`, capped) fills remaining slots, in the background per session (`background_key`) and only when `ddg_gate()` agrees |
-| `waifu_engine/sources/gemini.py` | Optional Gemini + Google Search grounding source (`google-genai`, default `gemini-2.5-flash`). `search_characters(facts, medium)` → candidates. Never raises. Off unless `WAIFU_GEMINI_SEARCH=1` and `GEMINI_API_KEY`/`GOOGLE_API_KEY` |
-| `waifu_engine/query_llm.py` | Optional OpenAI-compatible query rewriter (default local `Qwen/Qwen3.6-35B-A3B`). `prefetch` (one background worker) / `peek` (non-blocking) / `rewrite` (blocking, tooling only). Never raises. Off unless `WAIFU_QUERY_LLM=1` |
+| `waifu_engine/google_config.py` | Google GenAI settings + the one shared `genai.Client`: key, per-feature switches (`search_enabled`, `llm_enabled`), models (`WAIFU_GEMINI_MODEL`, per-feature overrides), minimal `thinking_config` |
+| `waifu_engine/sources/gemini.py` | Optional Gemini + Google Search grounding source. `search_characters(facts, medium)` → candidates. Never raises. Off unless `WAIFU_GEMINI_SEARCH=1` and `GEMINI_API_KEY`/`GOOGLE_API_KEY` |
+| `waifu_engine/envfile.py` | Dependency-free `.env` loader, run from `waifu_engine/__init__.py`; fills only unset variables. `.env.example` lists the settings. Tests set `WAIFU_ENV_FILE=0` (`tests/conftest.py`) |
+| `waifu_engine/query_llm.py` | Optional query rewriter: Gemini (`WAIFU_GEMINI_LLM=1`) or any OpenAI-compatible server (default local `Qwen/Qwen3.6-35B-A3B`). `prefetch` (one background worker) / `peek` (non-blocking) / `rewrite` (blocking, tooling only). Never raises. Off unless `WAIFU_QUERY_LLM=1` |
 | `waifu_engine/timing.py` | Per-request spans. `@traced` on `start`/`submit_answer`/`submit_guess_result`/`determine` logs one `[waifu]` line (slowest first) and sets `payload["timing"]`. `span()` is a no-op outside a trace |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
 | `waifu_engine/search.py`, `catalog.py` | Online shortlist ranking; catalog helpers remain for tooling but runtime never loads the catalog |
@@ -176,9 +178,12 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_DDG_TIMEOUT` | `5` | Per-request DuckDuckGo timeout |
 | `WAIFU_DDG_BG_MAX_PENDING` | `4` | Background DuckDuckGo fills queued or running at once; extra ones are dropped |
 | `WAIFU_DDG_BACKGROUND` | `1` | Fill with DuckDuckGo off the request thread (`0` = inline, capped) |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | Gemini API key for both Gemini features; both stay off without one |
+| `WAIFU_GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model for search and llm |
 | `WAIFU_GEMINI_SEARCH` | `0` | Use Gemini with Google Search grounding as a candidate source (billed) |
-| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | Gemini API key; Gemini search stays off without one |
-| `WAIFU_GEMINI_MODEL` | `gemini-2.5-flash` | Any Gemini model that supports the Google Search tool |
+| `WAIFU_GEMINI_SEARCH_MODEL` | `WAIFU_GEMINI_MODEL` | Search model; must support the Google Search tool |
+| `WAIFU_GEMINI_LLM` | `0` | Use Gemini as the query LLM instead of the OpenAI-compatible server (billed) |
+| `WAIFU_GEMINI_LLM_MODEL` | `WAIFU_GEMINI_MODEL` | Query-LLM model (a lite model is enough) |
 | `WAIFU_GEMINI_TIMEOUT` | `15` | Seconds per grounded request |
 | `WAIFU_GEMINI_BACKGROUND` | `1` | Run Gemini off the request thread when the pool has candidates (`0` = inline) |
 | `WAIFU_GEMINI_BG_MAX_PENDING` | `2` | Background Gemini searches queued or running at once; extra ones are dropped |
@@ -186,6 +191,7 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_TIMING_LOG` | `1` | Log one timing line per request (`payload["timing"]` is always filled) |
 | `WAIFU_LAYA_PRELOAD` | `1` | Load Laya at app startup (`0` = on first request) |
 | `WAIFU_LAYA_REQUIRED` | `0` | Fail startup if Laya does not load (set in the Laya Docker image) |
+| `WAIFU_ENV_FILE` | `.env` | Env file loaded at import (`0` = off); real env vars win |
 | `USE_TF` | — | Set `0`; Transformers hangs probing TensorFlow |
 | `HF_HOME` | — | Weight cache (`/data/hf` in Docker) |
 
@@ -211,7 +217,7 @@ DuckDuckGo.
    fire on `"the"` and tagged every character male.
 4. Laya calls go through `laya_client.ask`. Do not construct `Router` or call
    `laya.load` anywhere else.
-5. The query LLM (`query_llm.py`) writes **search strings only** — never
+5. The query LLM (`query_llm.py`, either backend: Gemini or OpenAI-compatible) writes **search strings only** — never
    question text, never decisions. Its input is player facts only; never send
    it scraped names or blurbs. Tests stub its HTTP; never call a real endpoint.
 6. The query LLM must never block a turn by default, and must not be called

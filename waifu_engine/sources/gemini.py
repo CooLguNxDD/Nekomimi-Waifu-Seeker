@@ -11,7 +11,8 @@ Input is player facts only (search terms, medium). Scraped names and blurbs are
 never put in the prompt, so a web page cannot steer the model.
 
 Off unless ``WAIFU_GEMINI_SEARCH=1`` and an API key is set (``GEMINI_API_KEY``
-or ``GOOGLE_API_KEY``); every call is billed. Needs the optional
+or ``GOOGLE_API_KEY``); every call is billed. Settings and the client are
+shared with the Gemini query LLM in ``google_config``. Needs the optional
 ``google-genai`` package (``pip install -e .[gemini]``). ``search_characters``
 never raises: failures are recorded with ``web_search._note_error`` and return
 ``[]``.
@@ -21,15 +22,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import threading
 import time
 from typing import Any
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+from .. import google_config
+
+DEFAULT_MODEL = google_config.DEFAULT_MODEL
 MEDIA = ("anime", "manga", "comic", "game")
-_YES = {"1", "true", "yes"}
 
 PROMPT = (
     "Use Google Search to find fictional characters from anime, manga, comics or "
@@ -41,48 +41,23 @@ PROMPT = (
 )
 
 _FENCE = re.compile(r"```(?:json)?", re.I)
-_LOCK = threading.Lock()
-_CLIENT: Any = None
 _CACHE: dict[tuple, tuple[float, list[dict[str, Any]]]] = {}
 CACHE_TTL = 900
 
 
-def _api_key() -> str:
-    """The Gemini key: ``GEMINI_API_KEY``, else ``GOOGLE_API_KEY`` (as the SDK reads them)."""
-    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-
-
 def enabled() -> bool:
-    """On only when explicitly switched on, online, and a key is configured."""
-    if os.getenv("WAIFU_ONLINE_SEARCH", "1").strip().lower() not in _YES:
-        return False
-    return os.getenv("WAIFU_GEMINI_SEARCH", "0").strip().lower() in _YES and bool(_api_key())
+    """Search grounding is on: ``WAIFU_GEMINI_SEARCH=1``, online, key set."""
+    return google_config.search_enabled()
 
 
 def model() -> str:
-    """``WAIFU_GEMINI_MODEL``: any Gemini model that supports the Google Search tool."""
-    return os.getenv("WAIFU_GEMINI_MODEL", DEFAULT_MODEL)
-
-
-def _timeout_ms() -> int:
-    """``WAIFU_GEMINI_TIMEOUT`` seconds as the SDK's millisecond timeout."""
-    try:
-        return int(float(os.getenv("WAIFU_GEMINI_TIMEOUT", "15")) * 1000)
-    except ValueError:
-        return 15000
+    """The search model (``WAIFU_GEMINI_SEARCH_MODEL``, else ``WAIFU_GEMINI_MODEL``)."""
+    return google_config.search_model()
 
 
 def _client() -> Any:
-    """Process-wide ``genai.Client``; raises ImportError without google-genai."""
-    global _CLIENT
-    with _LOCK:
-        if _CLIENT is None:
-            from google import genai
-            from google.genai import types
-
-            _CLIENT = genai.Client(
-                api_key=_api_key(), http_options=types.HttpOptions(timeout=_timeout_ms()))
-        return _CLIENT
+    """The shared ``genai.Client`` (see ``google_config``)."""
+    return google_config.client()
 
 
 def _config() -> Any:
@@ -92,6 +67,7 @@ def _config() -> Any:
     return types.GenerateContentConfig(
         tools=[types.Tool(google_search=types.GoogleSearch())],
         temperature=0,
+        thinking_config=google_config.thinking_config(model()),
     )
 
 
@@ -223,19 +199,11 @@ def search_characters(
 
 
 def status() -> dict[str, Any]:
-    """For ``/healthz``: whether Gemini search is on and with which model."""
-    try:
-        import google.genai  # noqa: F401
-
-        sdk = True
-    except Exception:  # noqa: BLE001
-        sdk = False
-    return {"enabled": enabled(), "model": model(), "sdk": sdk, "key": bool(_api_key())}
+    """For ``/healthz``: the shared Google config (search and llm switches, models)."""
+    return google_config.status()
 
 
 def clear() -> None:
-    """Forget the cached client and results (tests)."""
-    global _CLIENT
-    with _LOCK:
-        _CLIENT = None
+    """Forget the shared client and cached results (tests)."""
+    google_config.clear()
     _CACHE.clear()

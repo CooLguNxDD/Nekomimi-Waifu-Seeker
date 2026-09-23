@@ -111,6 +111,23 @@ runtime. Disabling online search returns no candidates; it does not fall back
 to a fixed character list. In Nekomimi, supply a series, appearance, occupation,
 or another distinguishing detail to refine the next search.
 
+### Configuration file
+
+Settings can live in a `.env` file instead of the shell. Copy `.env.example`
+to `.env` and fill it in. It is git-ignored and loaded at startup, and real
+environment variables always win. The Google block:
+
+```bash
+GOOGLE_API_KEY=...                      # one key for both Gemini features
+WAIFU_GEMINI_MODEL=gemini-2.5-flash     # model for both
+WAIFU_GEMINI_SEARCH=1                   # search: grounded candidate search
+WAIFU_GEMINI_LLM=1                      # llm: query rewriting with Gemini
+# WAIFU_GEMINI_SEARCH_MODEL=...         # per-feature model overrides
+# WAIFU_GEMINI_LLM_MODEL=gemini-2.5-flash-lite
+```
+
+`/healthz` shows which Gemini features are on and which model each uses.
+
 ### Optional Gemini search grounding
 
 Gemini with the Google Search tool can be added as a search engine. It is
@@ -139,6 +156,12 @@ shows `gemini.enabled`, and the timing line shows `hits=gemini:N` /
 install `google-genai`; add it there if you want Gemini in a container.
 
 ### Optional query LLM
+
+The rewriter has two backends. `WAIFU_GEMINI_LLM=1` uses Gemini through the
+same key as Gemini search (JSON output, thinking kept to the minimum). Otherwise
+it uses any OpenAI-compatible server, as below. Either way the gating is the
+same: typed text only, only when Laya says search is stuck, and in the
+background.
 
 Search strings come from templates by default. A small chat model can rewrite
 the player's confirmed facts into better search phrases instead. It writes

@@ -30,7 +30,7 @@ import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
-from . import timing
+from . import google_config, timing
 
 _YES = {"1", "true", "yes"}
 DEFAULT_MODEL = "Qwen/Qwen3.6-35B-A3B"
@@ -47,17 +47,34 @@ _THINK = re.compile(r"<think>.*?</think>", re.S | re.I)
 _ARRAY = re.compile(r"\[.*?\]", re.S)
 
 
+# ``_call``'s endpoint argument for the Gemini backend, in place of a URL.
+GEMINI = "gemini"
+
+
+def provider() -> str:
+    """``gemini`` when ``WAIFU_GEMINI_LLM`` is on (and keyed), else ``openai``
+    (any OpenAI-compatible server, local or remote)."""
+    return GEMINI if google_config.llm_enabled() else "openai"
+
+
 def enabled() -> bool:
+    """The query LLM is on: ``WAIFU_GEMINI_LLM=1`` or ``WAIFU_QUERY_LLM=1``, online."""
     if os.getenv("WAIFU_ONLINE_SEARCH", "1").lower() not in _YES:
         return False
-    return os.getenv("WAIFU_QUERY_LLM", "0").lower() in _YES
+    return provider() == GEMINI or os.getenv("WAIFU_QUERY_LLM", "0").lower() in _YES
 
 
 def base_url() -> str:
+    """The OpenAI-compatible endpoint, or ``gemini`` for the Gemini backend."""
+    if provider() == GEMINI:
+        return GEMINI
     return os.getenv("WAIFU_QUERY_LLM_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 
 
 def model() -> str:
+    """The model sent to the active backend."""
+    if provider() == GEMINI:
+        return google_config.llm_model()
     return os.getenv("WAIFU_QUERY_LLM_MODEL", DEFAULT_MODEL)
 
 
@@ -73,6 +90,11 @@ def _is_openai(url: str) -> bool:
 
 
 def _request_body(facts: tuple[str, ...], medium_hint: str | None, n: int) -> dict:
+    """Chat-completions body: fixed system prompt, player facts as the user turn.
+
+    The Gemini backend reuses its two messages, so both backends see the same
+    instructions and the same player-facts-only input.
+    """
     lines = [f"- {f}" for f in facts]
     if medium_hint:
         lines.append(f"- medium: {medium_hint}")
@@ -86,7 +108,7 @@ def _request_body(facts: tuple[str, ...], medium_hint: str | None, n: int) -> di
             {"role": "user", "content": "Facts:\n" + "\n".join(lines)},
         ],
     }
-    if not _is_openai(base_url()):
+    if not _is_openai(base_url()) and base_url() != GEMINI:
         # Qwen3 thinks by default; vLLM/SGLang honour this switch. OpenAI
         # rejects unknown fields, so it never gets it.
         body["chat_template_kwargs"] = {"enable_thinking": False}
@@ -117,9 +139,44 @@ def parse_queries(text: str, n: int = 3) -> list[str] | None:
     return out or None
 
 
+def _call_gemini(facts: tuple[str, ...], medium_hint: str | None, n: int,
+                 model_id: str) -> tuple[str, ...] | None:
+    """One Gemini call through the shared google-genai client. Raises on errors.
+
+    Same fixed system prompt and player-facts-only input as the OpenAI path.
+    No search tool here, so JSON mode is allowed; thinking is kept minimal
+    because this is a short rewrite, not a reasoning task.
+    """
+    from google.genai import types
+
+    body = _request_body(facts, medium_hint, n)
+    config = types.GenerateContentConfig(
+        system_instruction=body["messages"][0]["content"],
+        temperature=0,
+        max_output_tokens=256,
+        response_mime_type="application/json",
+        thinking_config=google_config.thinking_config(model_id),
+    )
+    t0 = time.perf_counter()
+    try:
+        response = google_config.client().models.generate_content(
+            model=model_id, contents=body["messages"][1]["content"], config=config)
+    except Exception as exc:
+        _log_call(t0, f"failed: {exc}")
+        raise
+    finally:
+        _STATS["calls"] += 1
+        _STATS["last_ms"] = round((time.perf_counter() - t0) * 1000)
+    queries = parse_queries(getattr(response, "text", "") or "", n)
+    _log_call(t0, f"{len(queries or [])} queries")
+    return tuple(queries) if queries else None
+
+
 def _call(facts: tuple[str, ...], medium_hint: str | None, n: int,
           url: str, model_id: str) -> tuple[str, ...] | None:
-    """One blocking HTTP round trip. Raises on transport errors."""
+    """One blocking round trip to ``url`` (or Gemini). Raises on transport errors."""
+    if url == GEMINI:
+        return _call_gemini(facts, medium_hint, n, model_id)
     headers = {"Content-Type": "application/json"}
     key = os.getenv("WAIFU_QUERY_LLM_API_KEY") or ""
     # The generic OpenAI key only ever goes to OpenAI over HTTPS -- never to
@@ -279,10 +336,12 @@ def wait_seconds() -> float:
 
 
 def status() -> dict[str, Any]:
+    """For ``/healthz``: backend, model, call count, last latency, in-flight jobs."""
     with _LOCK:
         inflight = len(_FUTURES)
     return {
         "enabled": enabled(),
+        "provider": provider(),
         "model": model(),
         "base_url": base_url(),
         "calls": _STATS["calls"],
