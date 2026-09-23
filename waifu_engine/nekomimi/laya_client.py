@@ -2,19 +2,37 @@
 
 Laya is a non-autoregressive *decision* model: it never generates text, it only
 answers typed questions (``choice`` / ``score`` / ``noul``) in one forward pass.
-Loading the 421M checkpoint costs ~7-10s, so it is loaded once per process and
-every turn issues a single batched ``predict`` instead of one call per question.
+Loading the 421M checkpoint costs ~7-10s (~26 s on the CPU-only dev box), so it
+is loaded once per process. ``web.py`` calls ``preload()`` at startup so the
+first player never pays for it; ``get_agent()`` still loads lazily for the CLI
+and tests. ``python -m waifu_engine.nekomimi.laya_client`` preloads and exits,
+which is how the Docker image bakes the weights at build time.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import threading
+import time
 from typing import Any
+
+from .. import timing
 
 _AGENT: Any = None
 _LOAD_FAILED = False
 _LOCK = threading.Lock()
+_STATUS: dict[str, Any] = {}
+
+# Tiny question for the warm-up pass: the first ``predict`` pays for lazy
+# initialisation that should not land on the first player.
+_WARMUP_STATE = {"candidate": "Mario (Super Mario) [game]. An Italian plumber."}
+_WARMUP_QUESTIONS = {
+    "warmup": {
+        "type": "noul",
+        "instructions": "Is the character in `candidate` from a video game?",
+    }
+}
 
 MODEL_ID = os.getenv("WAIFU_LAYA_MODEL", "convaiinnovations/laya")
 # The `typed-decisions` checkpoint is the same 421M model trained for exactly
@@ -135,13 +153,77 @@ def ask(state: Any, questions: dict[str, dict[str, Any]]) -> dict[str, Any] | No
     agent = get_agent()
     if agent is None:
         return None
+    # One span per question kind: 40 per-candidate ``match`` calls add up into
+    # a single ``laya.match`` entry with its call count.
     try:
-        with _LOCK:  # Agent.predict is not documented as thread-safe
-            result = agent.predict(state, questions)
+        # Agent.predict is not documented as thread-safe. Waiting for the lock
+        # is timed apart: it is other players' turns, not this one's model cost.
+        with timing.span("laya.lock_wait"):
+            _LOCK.acquire()
+        try:
+            with timing.span("laya." + next(iter(questions))):
+                result = agent.predict(state, questions)
+        finally:
+            _LOCK.release()
     except Exception:  # noqa: BLE001
         return None
     answers = result.get("answers")
     return answers if isinstance(answers, dict) else None
+
+
+def preload() -> dict[str, Any]:
+    """Load the agent and run one warm-up pass. Never raises.
+
+    Returns (and remembers, for ``status()``) what happened. A failed load
+    latches ``_LOAD_FAILED`` as before, so requests do not retry it one by one.
+    """
+    info: dict[str, Any] = {
+        "preloaded": True,
+        "loaded": False,
+        "backend": "none",
+        "load_seconds": None,
+        "warmup_seconds": None,
+        "error": None,
+    }
+    if _forced_off():
+        info["error"] = "WAIFU_FORCE_FALLBACK is set"
+        _STATUS.clear()
+        _STATUS.update(info)
+        return dict(info)
+    t0 = time.perf_counter()
+    try:
+        agent = get_agent()
+    except Exception as exc:  # noqa: BLE001 - get_agent should not raise, but be sure
+        agent, info["error"] = None, str(exc)
+    info["load_seconds"] = round(time.perf_counter() - t0, 2)
+    if agent is None:
+        info["error"] = info["error"] or "Laya could not be loaded; using heuristics"
+        print("[waifu] Laya unavailable at startup: %s" % info["error"], flush=True)
+    else:
+        info["loaded"] = True
+        info["backend"] = backend()
+        t1 = time.perf_counter()
+        try:
+            with _LOCK:
+                agent.predict(_WARMUP_STATE, _WARMUP_QUESTIONS)
+        except Exception as exc:  # noqa: BLE001 - a warm-up failure is not a load failure
+            info["error"] = "warm-up failed: %s" % exc
+        info["warmup_seconds"] = round(time.perf_counter() - t1, 2)
+        print(
+            "[waifu] Laya ready: backend=%s load=%.1fs warmup=%.1fs"
+            % (info["backend"], info["load_seconds"], info["warmup_seconds"]),
+            flush=True,
+        )
+    _STATUS.clear()
+    _STATUS.update(info)
+    return dict(info)
+
+
+def status() -> dict[str, Any]:
+    """What ``preload()`` found. Read-only: never triggers a load."""
+    if not _STATUS:
+        return {"preloaded": False, "loaded": _AGENT is not None, "backend": backend()}
+    return dict(_STATUS, loaded=_AGENT is not None, backend=backend())
 
 
 def reset() -> None:
@@ -150,3 +232,15 @@ def reset() -> None:
     with _LOCK:
         _AGENT = None
         _LOAD_FAILED = False
+        _STATUS.clear()
+
+
+def main() -> int:
+    """Preload and report; exit 1 if Laya did not load (Docker build step)."""
+    info = preload()
+    print(info, flush=True)
+    return 0 if info["loaded"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from . import timing
 from .nekomimi import laya_client
 from .catalog import character_text
 from .search import keyword_score, shortlist_with_online
@@ -148,6 +149,7 @@ def _laya_decide(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
+@timing.traced("determine")
 def determine(
     query: str,
     top_k: int = 8,

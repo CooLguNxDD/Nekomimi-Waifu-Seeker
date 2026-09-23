@@ -1,4 +1,5 @@
-# Full image with Laya + torch (large download).
+# Full image with Laya + torch. The weights are baked in at build time, so a
+# container starts offline and loads Laya before it accepts traffic.
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -7,8 +8,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     WAIFU_FORCE_FALLBACK=0 \
+    WAIFU_LAYA_PROVIDER=torch \
+    WAIFU_LAYA_PRELOAD=1 \
+    WAIFU_LAYA_REQUIRED=1 \
     USE_TF=0 \
-    HF_HOME=/data/hf
+    HF_HOME=/opt/hf
 
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
@@ -19,7 +23,19 @@ COPY waifu_engine ./waifu_engine
 
 RUN pip install -e .
 
-VOLUME ["/data/hf"]
+# Download exactly what laya.load fetches (checkpoint + tokenizer) into the
+# image. Fails the build if Laya cannot load. HF_HOME is deliberately not a
+# VOLUME: a mounted volume would hide the baked weights.
+RUN python -m waifu_engine.nekomimi.laya_client
+
+# Runtime never reaches the Hub for weights.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
 EXPOSE 7860
+
+# Healthy only once Laya is loaded (uvicorn opens the port after preload).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+  CMD python -c "import json,sys,urllib.request; r=json.load(urllib.request.urlopen('http://127.0.0.1:7860/healthz', timeout=4)); sys.exit(0 if r['laya']['loaded'] else 1)"
 
 CMD ["uvicorn", "waifu_engine.web:app", "--host", "0.0.0.0", "--port", "7860"]

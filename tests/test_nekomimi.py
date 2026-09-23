@@ -178,7 +178,14 @@ def _answer_as(target_tags: set[str], question_id: str) -> str:
     q = traits.QUESTIONS_BY_ID.get(question_id)
     if q is None:
         return "no"
+    if traits.is_choice(q):
+        return next((k for k, o in q["options"].items() if set(o["tags"]) & target_tags), "other")
     return "yes" if set(q["tags_true"]) & target_tags else "no"
+
+
+def _reply(state: dict, yesno: str) -> str:
+    """``yesno`` for yes/no questions; "other" for a multiple-choice question."""
+    return "other" if state["question"].get("kind") == "choice" else yesno
 
 
 def test_loop_converges_on_the_target():
@@ -198,13 +205,13 @@ def test_rejected_guess_never_returns():
     state = engine.start("")
     s = sess_mod.get_session(state["session_id"])
     while state["stage"] == "asking":
-        state = engine.submit_answer(s, "yes")
+        state = engine.submit_answer(s, _reply(state, "yes"))
     rejected = state["guess"]["id"]
     state = engine.submit_guess_result(s, correct=False)
     assert rejected in s.rejected
     assert all(c.id != rejected for c in s.alive_candidates())
     while state.get("stage") == "asking":
-        state = engine.submit_answer(s, "no")
+        state = engine.submit_answer(s, _reply(state, "no"))
     if state.get("stage") == "guessing":
         assert state["guess"]["id"] != rejected
 
@@ -213,7 +220,7 @@ def test_correct_guess_finishes_the_round():
     state = engine.start("")
     s = sess_mod.get_session(state["session_id"])
     while state["stage"] == "asking":
-        state = engine.submit_answer(s, "yes")
+        state = engine.submit_answer(s, _reply(state, "yes"))
     done = engine.submit_guess_result(s, correct=True)
     assert done["stage"] == "done"
     assert done["correct"] is True
@@ -456,7 +463,7 @@ def test_empty_search_continues_and_target_can_arrive_after_answer(monkeypatch):
 def test_search_terms_preserve_seed_and_details_but_not_negative_keywords():
     s = sess_mod.new_session("Nintendo")
     s.asked = [
-        {"text": "Is your character female?", "answer": "no", "detail": None},
+        {"qid": "gender_female", "text": "Is your character female?", "answer": "no", "detail": None},
         {"text": "Is your character male?", "answer": "yes", "detail": "Italian plumber"},
     ]
     assert engine._search_terms(s) == ["Nintendo", "Italian plumber", "male"]
@@ -537,3 +544,336 @@ def test_nekomimi_page_and_api_paths():
     assert b"/api/nekomimi/" in page.content
     assert client.get("/akinator").status_code == 404
     assert client.post("/api/akinator/start", json={}).status_code == 404
+
+
+# --- multiple-choice questions ----------------------------------------
+
+
+def test_choice_questions_are_narrow_and_replace_colour_yes_nos():
+    choices = [q for q in traits.QUESTION_BANK if traits.is_choice(q)]
+    assert {q["id"] for q in choices} >= {"hair_color", "eye_color"}
+    for q in choices:
+        assert 2 <= len(q["options"]) <= 8
+        assert "other" in q["options"]
+        assert set(q["criteria"]) == set(q["options"])
+        assert "`candidate`" in q["instructions"]
+    for gone in ("hair_blonde", "hair_white", "hair_blue", "eyes_blue", "eyes_red"):
+        assert gone not in traits.QUESTIONS_BY_ID
+    assert traits.QUESTIONS_BY_ID["hair_color"]["options"]["blue"]["tags"] == ["blue"]
+
+
+def _ask_choice(s: GuessSession, qid: str) -> None:
+    q = traits.QUESTIONS_BY_ID[qid]
+    s.stage = "asking"
+    s.asked.append({"qid": q["id"], "text": q["text"], "category": q["category"],
+                    "instructions": q["instructions"], "tags_true": [], "tags_false": [],
+                    "prior": q["prior"], "kind": "choice", "criteria": q["criteria"],
+                    "options": q["options"], "answer": None, "detail": None})
+
+
+def test_choice_answer_uses_laya_option_probabilities(monkeypatch):
+    s = _fresh_session()
+    seen = []
+
+    def fake_ask(state, questions):
+        if "match" not in questions:
+            return None
+        seen.append(questions["match"])
+        keys = list(questions["match"]["criteria"])
+        hit = "blue" if "Hatsune Miku" in state["candidate"] else "black"
+        return {"match": {"choice": hit, "probabilities": {
+            k: (0.9 if k == hit else 0.1 / (len(keys) - 1)) for k in keys}}}
+
+    monkeypatch.setattr(laya_client, "ask", fake_ask)
+    _ask_choice(s, "hair_color")
+    state = engine.submit_answer(s, "blue")
+    assert "error" not in state
+    assert seen and seen[0]["type"] == "choice"
+    assert s.posterior()[0][0].id == "c_miku"
+    assert len(s.choice_cache) == len(POOL)
+    answered = next(h for h in s.history() if h["question"].startswith("What colour is your"))
+    assert answered["answer"] == "Blue"
+    assert "blue hair" in engine._search_terms(s)
+
+
+def test_choice_question_rejects_yes_and_unknown_keys():
+    s = _fresh_session()
+    _ask_choice(s, "hair_color")
+    assert "error" in engine.submit_answer(s, "yes")
+    assert "error" in engine.submit_answer(s, "turquoise")
+    assert "error" not in engine.submit_answer(s, "other")
+
+
+def test_choice_fallback_is_weak_and_replays_for_new_candidates():
+    s = _fresh_session()
+    q = traits.QUESTIONS_BY_ID["hair_color"]
+    dist = engine._tag_choice(q, s.by_id("c_miku"))
+    assert dist["blue"] / dist["black"] <= 1.5 + 1e-9
+    assert sum(dist.values()) == pytest.approx(1.0)
+    engine.score_candidates(s, q, "blue")
+    assert s.posterior()[0][0].id == "c_miku"
+    assert s.by_id("c_mario").alive  # weak evidence, never eliminates
+    s.add_candidates([{"id": "c_new", "name": "New", "tags": ["blue"]}])
+    with engine._session_lock(s):
+        engine._rescore_candidates(s)
+    assert s.by_id("c_new").logodds == pytest.approx(s.by_id("c_miku").logodds, abs=0.5)
+
+
+def test_choice_questions_rank_by_multi_outcome_information_gain():
+    s = _fresh_session()
+    q = traits.QUESTIONS_BY_ID["hair_color"]
+    assert engine._split_quality(q, s.posterior()) > 0.0
+    s2 = sess_mod.new_session()
+    s2.add_candidates([{"id": "a", "name": "A", "tags": []}, {"id": "b", "name": "B", "tags": []}])
+    assert engine._split_quality(q, s2.posterior()) == pytest.approx(0.0)
+
+
+def test_choice_payload_lists_options():
+    s = _fresh_session()
+    payload = engine._question_payload(s, traits.QUESTIONS_BY_ID["eye_color"])
+    assert payload["kind"] == "choice"
+    assert {"key": "other", "label": "Other"} in payload["options"]
+    assert engine._question_payload(s, traits.QUESTIONS_BY_ID["medium_game"])["kind"] == "yesno"
+
+
+def test_choice_support_gates_early_guess():
+    s = _fresh_session()
+    q = traits.QUESTIONS_BY_ID["hair_color"]
+    s.evidence["hair_color"] = (q, "blue")
+    s.choice_cache[("c_miku", "hair_color")] = {k: (0.8 if k == "blue" else 0.2 / 7)
+                                                for k in q["options"]}
+    s.evidence["gender_female"] = (traits.QUESTIONS_BY_ID["gender_female"], "yes")
+    s.match_cache[("c_miku", "gender_female")] = 0.9
+    s.by_id("c_miku").logodds = 20.0
+    s.turn = 6
+    assert engine._should_guess(s, None)
+
+
+def test_mined_colour_slugs_do_not_become_dynamic_questions():
+    s = sess_mod.new_session()
+    s.add_candidates([{"id": str(i), "name": f"C{i}", "blurb": "she has blue hair"}
+                      for i in range(3)])
+    assert all(q["id"] != "dyn_blue" for q in engine._dynamic_questions(s))
+
+
+# --- Laya picks which facts lead the search ---------------------------
+
+
+def _facts_session() -> GuessSession:
+    s = sess_mod.new_session("Nintendo")
+    s.asked = [
+        {"qid": "gender_female", "text": "Is your character female?", "category": "gender", "prior": 0.5,
+         "answer": "yes", "detail": None},
+        {"qid": "medium_game", "text": "Is your character from a video game?", "category": "medium", "prior": 0.35,
+         "answer": "yes", "detail": None},
+        {"qid": "job_mage", "text": "Is your character a mage?", "category": "job", "prior": 0.1,
+         "answer": "yes", "detail": None},
+        {"qid": "pers_tsundere", "text": "Is your character a tsundere?", "category": "pers", "prior": 0.08,
+         "answer": "yes", "detail": None},
+    ]
+    return s
+
+
+def test_focus_uses_laya_choice_when_it_is_decisive(monkeypatch):
+    s = _facts_session()
+    asked = []
+
+    def fake_ask(state, questions):
+        asked.append(questions)
+        keys = questions["focus"]["criteria"]
+        pick = next(k for k, v in keys.items() if v == "a mage")
+        return {"focus": {"choice": pick, "probabilities": {
+            k: (0.7 if k == pick else 0.3 / (len(keys) - 1)) for k in keys}}}
+
+    monkeypatch.setattr(laya_client, "ask", fake_ask)
+    focus = engine._focus_facts(s, engine._fact_entries(s))
+    assert asked[0]["focus"]["type"] == "choice"
+    assert focus[0] == "a mage"
+    assert len(focus) == engine.FOCUS_TAKE
+
+
+def test_focus_falls_back_to_rarity_when_laya_is_flat(monkeypatch):
+    s = _facts_session()
+    monkeypatch.setattr(laya_client, "ask", lambda state, questions: {"focus": {
+        "probabilities": {k: 1 / len(questions["focus"]["criteria"])
+                          for k in questions["focus"]["criteria"]}}})
+    focus = engine._focus_facts(s, engine._fact_entries(s))
+    assert focus == ["Nintendo", "a tsundere", "a mage"]
+    assert "female" not in focus
+
+
+def test_focus_facts_reach_the_search(monkeypatch):
+    s = _facts_session()
+    calls = []
+    monkeypatch.setattr(engine.sources, "find_candidates",
+                        lambda terms, **k: calls.append(k) or [])
+    engine.refresh_candidates(s)
+    assert calls[0]["focus"][0] == "Nintendo"
+    assert calls[0]["rewritten"] is None  # query LLM is off by default
+
+
+# --- query LLM: typed text only, gated by Laya, never blocking -----------
+
+
+import io
+import json
+import threading
+
+from waifu_engine import query_llm
+
+
+@pytest.fixture
+def llm(monkeypatch):
+    """Real query_llm with a stubbed endpoint; ``gate`` holds replies back."""
+    monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
+    monkeypatch.delenv("WAIFU_QUERY_LLM_WAIT", raising=False)
+    query_llm.clear()
+    state = {"sent": [], "gate": threading.Event()}
+    state["gate"].set()
+
+    def urlopen(req, timeout):
+        body = json.loads(req.data)
+        state["sent"].append(body["messages"][1]["content"])
+        state["gate"].wait(5)
+        reply = json.dumps(["mech pilot desert war character"])
+        return io.BytesIO(json.dumps({"choices": [{"message": {"content": reply}}]}).encode())
+
+    monkeypatch.setattr(query_llm.urllib.request, "urlopen", urlopen)
+    yield state
+    state["gate"].set()
+    query_llm.clear()
+
+
+def _pool_fits(p):
+    def ask(state, questions):
+        if "pool_fits" in questions:
+            return {"pool_fits": {"noul": p}}
+        return None
+    return ask
+
+
+def _typed_session() -> GuessSession:
+    s = _facts_session()
+    s.asked[-1]["detail"] = "pilots a mech in a desert war"
+    s.add_candidates(POOL)
+    return s
+
+
+def _drain():
+    query_llm._executor().submit(lambda: None).result(timeout=5)
+
+
+def test_llm_waits_for_laya_to_say_search_is_stuck(monkeypatch, llm):
+    s = _typed_session()
+    monkeypatch.setattr(laya_client, "ask", _pool_fits(0.9))  # pool looks fine
+    engine.refresh_candidates(s)
+    _drain()
+    assert llm["sent"] == []
+
+
+def test_llm_sees_only_typed_text_and_never_blocks_the_turn(monkeypatch, llm):
+    import time as _time
+
+    s = _typed_session()
+    monkeypatch.setattr(laya_client, "ask", _pool_fits(0.1))  # stuck
+    searches = []
+    monkeypatch.setattr(engine.sources, "find_candidates",
+                        lambda terms, **k: searches.append(k["rewritten"]) or [])
+    llm["gate"].clear()  # the model is slow
+    t0 = _time.perf_counter()
+    engine.refresh_candidates(s)
+    assert _time.perf_counter() - t0 < 1.0
+    assert searches == [None]
+    llm["gate"].set()
+    _drain()
+    sent = llm["sent"][0]
+    assert "pilots a mech in a desert war" in sent and "Nintendo" in sent
+    assert "female" not in sent and "mage" not in sent  # bank answers stay out
+    engine.refresh_candidates(s)
+    assert searches[-1] == ["mech pilot desert war character"]
+    for _ in range(3):  # same typed text: no more calls
+        engine.refresh_candidates(s)
+    _drain()
+    assert len(llm["sent"]) == 1
+
+
+def test_button_only_rounds_never_call_the_llm(monkeypatch, llm):
+    s = _fresh_session()
+    s.seed = ""
+    s.asked = [{"qid": "gender_female", "text": "Is your character female?",
+                "category": "gender", "prior": 0.5, "answer": "yes", "detail": None}]
+    monkeypatch.setattr(laya_client, "ask", _pool_fits(0.0))
+    engine.refresh_candidates(s)
+    _drain()
+    assert llm["sent"] == []
+
+
+def test_first_search_uses_templates_only(monkeypatch, llm):
+    state = engine.start("pilots a mech")
+    _drain()
+    assert state["stage"] == "asking"
+    assert llm["sent"] == []
+
+
+def test_wait_budget_uses_the_answer_in_the_same_turn(monkeypatch, llm):
+    monkeypatch.setenv("WAIFU_QUERY_LLM_WAIT", "2")
+    s = _typed_session()
+    monkeypatch.setattr(laya_client, "ask", _pool_fits(0.1))
+    searches = []
+    monkeypatch.setattr(engine.sources, "find_candidates",
+                        lambda terms, **k: searches.append(k["rewritten"]) or [])
+    engine.refresh_candidates(s)
+    assert searches == [["mech pilot desert war character"]]
+
+
+def test_stuck_heuristics_without_laya():
+    empty = sess_mod.new_session()
+    assert engine._search_stuck(empty) is True
+    s = _fresh_session()
+    assert engine._search_stuck(s) is False  # turn 0: too early to judge
+    s.turn = 4
+    assert engine._search_stuck(s) is True  # four-way tie, nobody leads
+
+
+def test_one_pool_fits_call_gates_both_llm_and_ddg(monkeypatch, llm):
+    s = _typed_session()
+    calls = []
+
+    def ask(state, questions):
+        calls.append(next(iter(questions)))
+        return {"pool_fits": {"noul": 0.1}} if "pool_fits" in questions else None
+
+    monkeypatch.setattr(laya_client, "ask", ask)
+    seen = {}
+
+    def search(terms, **k):
+        seen.update(k)
+        assert k["ddg_gate"]() is True
+        return []
+
+    monkeypatch.setattr(engine.sources, "find_candidates", search)
+    engine.refresh_candidates(s)
+    _drain()
+    assert seen["background_key"] == s.id
+    assert calls.count("pool_fits") == 1
+
+
+def test_only_typed_text_counts_as_something_specific_to_search(monkeypatch):
+    seen = []
+    monkeypatch.setattr(engine.sources, "find_candidates",
+                        lambda terms, **k: seen.append(k["specific"]) or [])
+    s = _fresh_session()
+    s.seed = ""
+    s.asked = [{"qid": "gender_female", "text": "Is your character female?",
+                "category": "gender", "prior": 0.5, "answer": "yes", "detail": None}]
+    engine.refresh_candidates(s)
+    s.asked[0]["detail"] = "Vocaloid"
+    engine.refresh_candidates(s)
+    assert seen == [False, True]
+
+
+def test_page_asks_for_a_detail_when_no_candidates_are_in_play():
+    from waifu_engine.nekomimi_page import NEKOMIMI_PAGE
+
+    assert 'id="emptyHint"' in NEKOMIMI_PAGE
+    assert "show(el('emptyHint'), !data.candidates_alive)" in NEKOMIMI_PAGE

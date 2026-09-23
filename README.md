@@ -4,7 +4,7 @@ An **Nekomimi character guesser** for **anime, manga, comics and games**, plus t
 
 ## Nekomimi mode
 
-Think of a character. The engine asks **Yes / No** questions — or you can type a detail instead of answering — and searches for matching characters after every answer. The runtime does not read `data/catalog.json`.
+Think of a character. The engine asks **Yes / No** and **multiple-choice** questions (hair colour, eye colour) — or you can type a detail instead of answering — and searches for matching characters after every answer. The runtime does not read `data/catalog.json`.
 
 ```bash
 python -m waifu_engine.web
@@ -20,6 +20,8 @@ character independently and also judges readiness:
 |---|---|---|
 | `ready_to_guess` | `noul` | whether the evidence is enough to name a character |
 | `match` | `noul` | whether one character satisfies the trait just asked |
+| `match` | `choice` | which option of a multiple-choice question fits one character; `probabilities[picked]` is the evidence |
+| `focus` | `choice` | which confirmed facts are most distinctive, so they lead the search query |
 
 Search uses concise positive clues, with shorter query variants when a search
 is too restrictive. Negative answers remain in Laya's evidence instead of
@@ -44,6 +46,8 @@ JSON API:
 ```bash
 curl -X POST http://127.0.0.1:7860/api/nekomimi/start  -H "Content-Type: application/json" -d "{}"
 curl -X POST http://127.0.0.1:7860/api/nekomimi/answer -H "Content-Type: application/json" -d '{"session_id":"<id>","answer":"yes"}'
+# multiple-choice questions ("kind": "choice") take an option key instead:
+curl -X POST http://127.0.0.1:7860/api/nekomimi/answer -H "Content-Type: application/json" -d '{"session_id":"<id>","answer":"white"}'
 curl -X POST http://127.0.0.1:7860/api/nekomimi/guess -H "Content-Type: application/json" -d '{"session_id":"<id>","correct":false}'
 curl http://127.0.0.1:7860/api/nekomimi/state/<id>
 ```
@@ -107,6 +111,93 @@ runtime. Disabling online search returns no candidates; it does not fall back
 to a fixed character list. In Nekomimi, supply a series, appearance, occupation,
 or another distinguishing detail to refine the next search.
 
+### Optional query LLM
+
+Search strings come from templates by default. A small chat model can rewrite
+the player's confirmed facts into better search phrases instead. It writes
+**search queries only**: never question text, and never decisions. Laya still
+makes every decision. The model only sees what the player typed or confirmed;
+scraped pages are never sent. Any failure falls back to the templates.
+
+Any OpenAI-compatible `/v1/chat/completions` endpoint works. The default is a
+local server hosting `Qwen/Qwen3.6-35B-A3B`:
+
+```bash
+# GPU: vLLM
+vllm serve Qwen/Qwen3.6-35B-A3B --port 8000
+# CPU (no CUDA): a Q4 GGUF under llama.cpp. ~3B active params, ~20-24 GB RAM
+llama-server --model Qwen3.6-35B-A3B-Q4_K_M.gguf --port 8000
+
+WAIFU_QUERY_LLM=1 python -m waifu_engine.web
+```
+
+**Laya keeps the game fast; the LLM is called rarely and never waited on.**
+
+- It only ever sees what the player *typed* (the seed and details). Button
+  answers already have fixed search wording, so a round played only with
+  buttons makes **zero** LLM calls.
+- It is called only when Laya says search is stuck. One fast `pool_fits` noul
+  (~0.3 s) asks whether any current leader fits the facts. If one does, the
+  LLM stays idle.
+- Each distinct set of typed text is rewritten at most once, on one background
+  worker. Turns never wait: the queries are used by the next search once they
+  land, usually one answer later. The first search of a round always uses the
+  templates.
+- Set `WAIFU_QUERY_LLM_WAIT=1.5` to let a turn wait up to that many seconds for
+  a fast (GPU) server. The default `0` never waits.
+
+A typical round makes 0–2 LLM calls instead of one per answer. `/healthz`
+reports `query_llm.calls`, `last_ms` and `inflight`.
+
+For the unsloth GGUF on CPU, turn thinking off (it dominates latency):
+
+```bash
+llama-server -hf unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M --jinja --reasoning-budget 0 -c 2048 --port 8000
+```
+
+To use OpenAI, set `WAIFU_QUERY_LLM_BASE_URL=https://api.openai.com/v1`,
+`WAIFU_QUERY_LLM_MODEL=<model>` and `OPENAI_API_KEY`. That key is only ever
+sent to `https://api.openai.com`; other endpoints use `WAIFU_QUERY_LLM_API_KEY`.
+The last queries used are listed under `queries` in
+`web_search.last_search_meta()`.
+
+## Finding the bottleneck
+
+Every Nekomimi request logs one line naming its steps, slowest first:
+
+```
+[waifu] answer found=5 new=2 turn=4 cands=38/42 total=3412ms | search 2980ms, search.fetch 2950ms, fetch.playwright 2100ms, fetch.wikipedia 610ms, score 420ms, laya.match 410ms/38x, pick 80ms, laya.ready_to_guess 60ms
+```
+
+- `search` is candidate discovery, and `fetch.*` splits it by source
+  (`playwright`, `wikipedia`, `anilist`, `ddg`, `enrich`). `search.rescore_new`
+  scores newly found candidates against the earlier answers.
+- `score` is judging every candidate against the answer just given.
+- `laya.<question>` is model time, with a call count (`/38x` = 38 forward
+  passes). `laya.lock_wait` is time spent queued behind other players' model calls.
+- `pick` is choosing the next question; `laya.ready_to_guess` is part of it.
+- Background LLM calls log their own `query_llm <model> <ms>` line, since
+  turns never wait for them.
+
+- `fetch.ddg_background` is only the time to queue DuckDuckGo. The search
+  itself logs its own `ddg background ... found=N` line, and its hits join the
+  next turn. DuckDuckGo runs only when Laya's `pool_fits` says the pool is
+  missing the answer (`search.stuck`), makes at most 3 requests within 4 s, and
+  reuses one client.
+
+- `hits=` counts new candidates per source (`popular`, `wikipedia`, `anilist`,
+  `playwright`, `ddg`, `ddg_bg` from the previous turn's background search).
+  `err=` shows network failures, so a blocked or rate-limited source is not
+  mistaken for "no results".
+- With no seed or typed detail, searches for broad traits can't match names.
+  The game starts from popular characters instead (`fetch.popular`, filtered by
+  medium once known) and the page asks for a series or detail when nothing is
+  in play.
+
+Dotted names are part of their parent (`fetch.wikipedia` is inside `search`).
+The same numbers come back in each API response as `timing`. Set
+`WAIFU_TIMING_LOG=0` to silence the log line.
+
 ## Notes
 
 - Scope covers anime, manga, comics and games.
@@ -134,11 +225,18 @@ docker compose up --build -d
 
 Open http://127.0.0.1:7860
 
-Full Laya image (large; downloads model weights on first request):
+Full Laya image. The weights are downloaded **at build time** and baked into
+the image, so the first build is large and slow. Containers then start offline.
+Laya loads (and runs one warm-up pass) before uvicorn opens the port, so no
+player waits for the model. If Laya fails to load, the container fails to
+start (`WAIFU_LAYA_REQUIRED=1`) instead of quietly running on heuristics.
 
 ```bash
 docker compose --profile laya up --build -d
+curl http://127.0.0.1:7860/healthz   # {"status":"ok","laya":{"loaded":true,...}}
 ```
+
+The image's `HEALTHCHECK` reports healthy only once `laya.loaded` is true.
 
 Stop:
 
@@ -174,3 +272,9 @@ docker compose down
 ```
 
 Weights cache at `%USERPROFILE%\.cache\huggingface\`.
+
+`python -m waifu_engine.web` loads Laya at startup, taking about 26 s on this
+box, before it prints "Application startup complete". Set
+`WAIFU_LAYA_PRELOAD=0` to load on the first request instead, or run
+`python -m waifu_engine.nekomimi.laya_client` to download and check the weights
+without starting the server.

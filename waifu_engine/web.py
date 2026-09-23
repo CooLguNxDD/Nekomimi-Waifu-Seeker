@@ -1,16 +1,44 @@
 from __future__ import annotations
 
+import asyncio
 import html
+import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse
 
 from .nekomimi import engine as nekomimi_engine
+from .nekomimi import laya_client
 from .nekomimi import session as nekomimi_session
 from .nekomimi_page import NEKOMIMI_PAGE
+from . import query_llm
 from .decide import determine
 
-app = FastAPI(title="Nekomimi-Waifu-Seeker", version="0.2.0")
+_YES = {"1", "true", "yes"}
+
+
+def _env_on(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() in _YES
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Load Laya before uvicorn opens the port, so no player waits for it.
+
+    ``WAIFU_LAYA_PRELOAD=0`` restores load-on-first-request. A failed load runs
+    the app on heuristics, unless ``WAIFU_LAYA_REQUIRED=1`` asks startup to fail.
+    """
+    # Required means required: load (and check) even when preload is off.
+    required = _env_on("WAIFU_LAYA_REQUIRED", "0")
+    if required or (_env_on("WAIFU_LAYA_PRELOAD", "1") and not _env_on("WAIFU_FORCE_FALLBACK", "0")):
+        info = await asyncio.to_thread(laya_client.preload)
+        if not info["loaded"] and required:
+            raise RuntimeError("WAIFU_LAYA_REQUIRED=1 but Laya failed to load: %s" % info["error"])
+    yield
+
+
+app = FastAPI(title="Nekomimi-Waifu-Seeker", version="0.2.0", lifespan=lifespan)
 
 PAGE = """<!doctype html>
 <html lang="en">
@@ -158,6 +186,11 @@ def decide_form(
         rounds=str(n_rounds),
         result=body,
     )
+
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok", "laya": laya_client.status(), "query_llm": query_llm.status()}
 
 
 @app.get("/nekomimi", response_class=HTMLResponse)
