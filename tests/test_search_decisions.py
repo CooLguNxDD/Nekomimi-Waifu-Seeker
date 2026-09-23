@@ -181,3 +181,113 @@ def test_ddg_runs_inline_when_nothing_else_was_found(monkeypatch, quiet_sources)
                                   background_key="s3", ddg_gate=lambda: True)
     assert [c["name"] for c in out] == ["Mario"]
     assert not sources.background_pending("s3")
+
+
+# --- cold start: broad facts use the popular pool; errors are visible -------
+
+from waifu_engine import timing
+from waifu_engine.sources import _http
+
+
+def _named(*names, medium="anime"):
+    return [{"id": n.lower(), "name": n, "medium": medium, "popularity": i}
+            for i, n in enumerate(names)]
+
+
+def test_broad_facts_skip_name_search_and_use_the_popular_pool(monkeypatch, quiet_sources):
+    called = []
+    monkeypatch.setattr(wikipedia, "search_characters", lambda q, limit: called.append("wiki") or [])
+    monkeypatch.setattr(anilist, "search_characters", lambda q, limit: called.append("anilist") or [])
+    monkeypatch.setattr(web_search, "ddg_quick", lambda *a, **k: called.append("ddg") or [])
+    monkeypatch.setattr(sources, "popular_characters",
+                        lambda medium, n: _named("Miku", "Rem", "Saber")[:n])
+    out = sources.find_candidates(["female video game character"], limit=12,
+                                  specific=False, ddg_gate=lambda: True)
+    assert [c["name"] for c in out] == ["Miku", "Rem", "Saber"]
+    assert called == []  # no name search, and no inline DuckDuckGo for broad traits
+
+
+def test_popular_pool_stops_growing_at_its_cap(monkeypatch, quiet_sources):
+    monkeypatch.setenv("WAIFU_POPULAR_POOL", "2")
+    asked = []
+    monkeypatch.setattr(sources, "popular_characters",
+                        lambda medium, n: asked.append(n) or _named("A", "B", "C")[:n])
+    assert len(sources.find_candidates(["x"], specific=False)) == 2
+    assert sources.find_candidates(["x"], specific=False, exclude_names={"A", "B"}) == []
+    assert asked == [2]
+
+
+def test_popular_characters_follow_the_medium(monkeypatch):
+    monkeypatch.setattr(anilist, "top_characters",
+                        lambda page=1, per_page=50: _named("Lelouch", "Levi", "Gojo", "Rem")[:per_page])
+    members = {"Category:Female characters in video games": ["Lara Croft", "Samus Aran"],
+               "Category:Male characters in video games": ["Mario", "Link"],
+               "Category:Marvel Comics superheroes": ["Spider-Man"],
+               "Category:DC Comics superheroes": ["Batman"]}
+    monkeypatch.setattr(wikipedia, "category_members", lambda cat, limit=100: members[cat])
+    media = {"Spider-Man": "comic", "Batman": "comic"}
+    views = {"Samus Aran": 900, "Mario": 500, "Link": 400, "Lara Croft": 300}
+    monkeypatch.setattr(wikipedia, "pages_by_title", lambda titles: [
+        {"id": t, "name": t, "medium": media.get(t, "game"), "popularity": views.get(t, 1)}
+        for t in titles])
+    assert [c["name"] for c in sources.popular_characters("anime", 2)] == ["Lelouch", "Levi"]
+    games = sources.popular_characters("game", 4)
+    assert {c["name"] for c in games} == {"Lara Croft", "Samus Aran", "Mario", "Link"}
+    assert [c["name"] for c in games][0] == "Samus Aran"  # most viewed first
+    mixed = sources.popular_characters(None, 8)
+    assert {c["medium"] for c in mixed} == {"anime", "game", "comic"}
+    assert len(mixed) <= 8
+
+
+def test_network_errors_are_recorded_not_mistaken_for_no_results(monkeypatch, quiet_sources):
+    import urllib.error
+
+    def refuse(req, timeout=None, context=None):
+        raise urllib.error.URLError("Tunnel connection failed: 403 Forbidden")
+
+    monkeypatch.setattr(_http.urllib.request, "urlopen", refuse)
+    _http.clear_cache()
+    monkeypatch.setattr(wikipedia, "search_characters",
+                        lambda q, limit: wikipedia._query({"list": "search", "srsearch": q}))
+
+    @timing.traced("t")
+    def run():
+        sources.find_candidates(["Vocaloid"], limit=5)
+        return {}
+
+    out = run()
+    assert any("403" in e for e in web_search.last_search_meta()["errors"])
+    assert "403" in out["timing"]["err"]
+    assert out["timing"]["hits"].startswith("wikipedia:0")
+
+
+def test_popular_pool_refills_by_candidates_still_in_play(monkeypatch, quiet_sources):
+    monkeypatch.setenv("WAIFU_POPULAR_POOL", "3")
+    monkeypatch.setattr(sources, "popular_characters",
+                        lambda medium, n: _named("A", "B", "C", "D", "E", "F")[:n])
+    # A-C were added earlier; two were ruled out, one is still in play.
+    out = sources.find_candidates(["x"], specific=False,
+                                  exclude_names={"A", "B", "C"}, pool_size=1)
+    assert [c["name"] for c in out] == ["D", "E"]
+
+
+def test_background_ddg_logs_why_it_found_nothing(monkeypatch, quiet_sources):
+    import logging
+
+    lines = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = Grab()
+    timing.log.addHandler(handler)
+    try:
+        def ratelimited(q, max_results=8):
+            raise RuntimeError("202 Ratelimit")
+
+        monkeypatch.setattr(web_search, "_search_once", ratelimited)
+        sources._bg_run("k1", ["x"], 5)
+    finally:
+        timing.log.removeHandler(handler)
+    assert "found=0" in lines[-1] and "Ratelimit" in lines[-1]

@@ -73,10 +73,22 @@ def _request(req: urllib.request.Request, key: str) -> Any | None:
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT, context=_context()) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
-    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+        # A failed request must look different from "no results": record it
+        # for the search meta and the per-turn timing line.
+        _note_error(urllib.parse.urlparse(req.full_url).netloc, exc)
         return None
     _cache_put(key, data)
     return data
+
+
+def _note_error(host: str, exc: BaseException) -> None:
+    try:
+        from .. import web_search
+
+        web_search._note_error(f"{host}: {str(exc)[:120]}")
+    except Exception:  # noqa: BLE001 - diagnostics must never break a search
+        pass
 
 
 def get_json(url: str, params: dict[str, Any], accept: str = "application/json") -> Any | None:

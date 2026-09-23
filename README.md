@@ -183,6 +183,15 @@ Every Nekomimi request logs one line naming its steps, slowest first:
   missing the answer (`search.stuck`), makes at most 3 requests within 4 s, and
   reuses one client.
 
+- `hits=` counts new candidates per source (`popular`, `wikipedia`, `anilist`,
+  `playwright`, `ddg`, `ddg_bg` from the previous turn's background search).
+  `err=` shows network failures, so a blocked or rate-limited source is not
+  mistaken for "no results".
+- With no seed or typed detail, searches for broad traits can't match names.
+  The game starts from popular characters instead (`fetch.popular`, filtered by
+  medium once known) and the page asks for a series or detail when nothing is
+  in play.
+
 Dotted names are part of their parent (`fetch.wikipedia` is inside `search`).
 The same numbers come back in each API response as `timing`. Set
 `WAIFU_TIMING_LOG=0` to silence the log line.

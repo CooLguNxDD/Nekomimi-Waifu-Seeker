@@ -294,6 +294,10 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
                 rewritten=rewritten or None,
                 background_key=sess.id,
                 ddg_gate=None if initial else stuck,
+                # Only typed text (or an LLM rewrite of it) can match names;
+                # broad button facts fall back to the popular pool.
+                specific=bool(_free_text(sess) or rewritten),
+                pool_size=len(sess.alive_candidates()),
             )
     except Exception as exc:  # noqa: BLE001 - search is best effort
         sess.notes.append(f"search failed: {exc}")

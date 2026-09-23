@@ -856,3 +856,24 @@ def test_one_pool_fits_call_gates_both_llm_and_ddg(monkeypatch, llm):
     _drain()
     assert seen["background_key"] == s.id
     assert calls.count("pool_fits") == 1
+
+
+def test_only_typed_text_counts_as_something_specific_to_search(monkeypatch):
+    seen = []
+    monkeypatch.setattr(engine.sources, "find_candidates",
+                        lambda terms, **k: seen.append(k["specific"]) or [])
+    s = _fresh_session()
+    s.seed = ""
+    s.asked = [{"qid": "gender_female", "text": "Is your character female?",
+                "category": "gender", "prior": 0.5, "answer": "yes", "detail": None}]
+    engine.refresh_candidates(s)
+    s.asked[0]["detail"] = "Vocaloid"
+    engine.refresh_candidates(s)
+    assert seen == [False, True]
+
+
+def test_page_asks_for_a_detail_when_no_candidates_are_in_play():
+    from waifu_engine.nekomimi_page import NEKOMIMI_PAGE
+
+    assert 'id="emptyHint"' in NEKOMIMI_PAGE
+    assert "show(el('emptyHint'), !data.candidates_alive)" in NEKOMIMI_PAGE

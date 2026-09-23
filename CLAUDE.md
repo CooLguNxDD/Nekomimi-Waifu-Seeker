@@ -97,6 +97,15 @@ a turn). It is capped (`WAIFU_DDG_MAX_REQUESTS` generic queries within
 runs on a background worker whenever the session already has candidates; its
 hits join the next search. It runs inline only when nothing else was found.
 
+Only the player's typed text (or an LLM rewrite of it) can match names, so
+`find_candidates(specific=False)` when the facts are broad button answers:
+Playwright/Wikipedia/AniList name searches are skipped, DuckDuckGo never runs
+inline, and the pool is topped up from `sources.popular_characters` (AniList
+top characters for anime/manga, Wikipedia game/comic character categories;
+live, never `catalog.json`) up to `WAIFU_POPULAR_POOL` candidates in play.
+`_http` records network failures (`last_search_meta()["errors"]`); the timing
+line shows per-source `hits=` and `err=`.
+
 Answers to yes/no questions are **`yes` / `no` / `detail`**. `detail` does not answer the current
 yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and
 refines search. The initial seed is evaluated the same way.
@@ -158,6 +167,7 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_DDG_BUDGET` | `4` | Seconds after which no new DuckDuckGo request starts |
 | `WAIFU_DDG_TIMEOUT` | `5` | Per-request DuckDuckGo timeout |
 | `WAIFU_DDG_BACKGROUND` | `1` | Fill with DuckDuckGo off the request thread (`0` = inline, capped) |
+| `WAIFU_POPULAR_POOL` | `24` | Popular candidates kept in play on a cold start (each costs a `match` call per answer) |
 | `WAIFU_TIMING_LOG` | `1` | Log one timing line per request (`payload["timing"]` is always filled) |
 | `WAIFU_LAYA_PRELOAD` | `1` | Load Laya at app startup (`0` = on first request) |
 | `WAIFU_LAYA_REQUIRED` | `0` | Fail startup if Laya does not load (set in the Laya Docker image) |

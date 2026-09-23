@@ -237,6 +237,7 @@ def ddg_quick(
     max_requests: int | None = None,
     budget: float | None = None,
     per_query: int = 8,
+    errors: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Capped DuckDuckGo fill for the guessing loop. Never raises.
 
@@ -257,6 +258,8 @@ def ddg_quick(
             raw = _search_once(f"{q} wiki", max_results=per_query)
         except Exception as exc:  # noqa: BLE001 - a dead request must not kill the turn
             _note_error(f"ddg: {exc}")
+            if errors is not None:
+                errors.append(f"ddg: {exc}")
             continue
         for item in raw:
             if _take_candidate(found, seen, _to_candidate(item, idx), set(), limit):

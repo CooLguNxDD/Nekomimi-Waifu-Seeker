@@ -25,6 +25,7 @@ NEKOMIMI_PAGE = """<!doctype html>
     button:disabled { opacity: 0.5; cursor: progress; }
     .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
     [hidden] { display: none !important; }
+    .hint { margin: 0.4rem 0 0.8rem; padding: 0.55rem 0.75rem; border-radius: 10px; background: #2a2412; color: #f1d58a; font-size: 0.9rem; }
     input[type=text] { flex: 1 1 14rem; padding: 0.55rem 0.7rem; border-radius: 10px; border: 1px solid #333; background: #1a1d24; color: inherit; }
     .meta { font-size: 0.85rem; color: #9aa0a6; margin-top: 0.75rem; }
     .bar { height: 6px; border-radius: 999px; background: #232833; overflow: hidden; margin: 0.5rem 0 0; }
@@ -52,6 +53,7 @@ NEKOMIMI_PAGE = """<!doctype html>
     <div class="meta" id="progress"></div>
     <div class="bar"><i id="progressBar" style="width:0%"></i></div>
     <div class="q" id="question"></div>
+    <div class="hint" id="emptyHint" hidden>No candidates yet &mdash; search needs something specific. Type a series, franchise or name-like detail below (e.g. &ldquo;Vocaloid&rdquo;, &ldquo;Final Fantasy&rdquo;), or keep answering.</div>
     <div class="row" id="yesno">
       <button data-answer="yes">Yes</button>
       <button data-answer="no">No</button>
@@ -228,6 +230,7 @@ NEKOMIMI_PAGE = """<!doctype html>
         show(el('play'), true);
         el('question').textContent = data.question.text;
         renderOptions(data.question);
+        show(el('emptyHint'), !data.candidates_alive);
         var t = data.question.turn, max = data.question.max_turns;
         el('progress').textContent = 'Question ' + t + ' of up to ' + max
           + '  \\u00b7  ' + (data.candidates_alive || 0) + ' candidates in play'
