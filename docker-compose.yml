@@ -25,10 +25,7 @@ services:
       WAIFU_ONLINE_SEARCH: "1"
       WAIFU_SEARCH_ROUNDS: "3"
       USE_TF: "0"
-      HF_HOME: /data/hf
-    volumes:
-      - laya-hf-cache:/data/hf
+      # Weights are baked into the image; Laya loads before the port opens.
+      WAIFU_LAYA_PRELOAD: "1"
+      WAIFU_LAYA_REQUIRED: "1"
     restart: unless-stopped
-
-volumes:
-  laya-hf-cache:

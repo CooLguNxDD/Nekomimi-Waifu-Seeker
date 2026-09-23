@@ -162,11 +162,18 @@ docker compose up --build -d
 
 Open http://127.0.0.1:7860
 
-Full Laya image (large; downloads model weights on first request):
+Full Laya image. The weights are downloaded **at build time** and baked into
+the image, so the first build is large and slow. Containers then start offline.
+Laya loads (and runs one warm-up pass) before uvicorn opens the port, so no
+player waits for the model. If Laya fails to load, the container fails to
+start (`WAIFU_LAYA_REQUIRED=1`) instead of quietly running on heuristics.
 
 ```bash
 docker compose --profile laya up --build -d
+curl http://127.0.0.1:7860/healthz   # {"status":"ok","laya":{"loaded":true,...}}
 ```
+
+The image's `HEALTHCHECK` reports healthy only once `laya.loaded` is true.
 
 Stop:
 
@@ -202,3 +209,9 @@ docker compose down
 ```
 
 Weights cache at `%USERPROFILE%\.cache\huggingface\`.
+
+`python -m waifu_engine.web` loads Laya at startup, taking about 26 s on this
+box, before it prints "Application startup complete". Set
+`WAIFU_LAYA_PRELOAD=0` to load on the first request instead, or run
+`python -m waifu_engine.nekomimi.laya_client` to download and check the weights
+without starting the server.

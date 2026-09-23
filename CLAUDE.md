@@ -38,7 +38,7 @@ Consequences, in order of how often they get forgotten:
 
 | Path | Role |
 |---|---|
-| `waifu_engine/nekomimi/laya_client.py` | Process-wide `Agent` singleton. `ask(state, questions)` → answers or `None`. Never raises. |
+| `waifu_engine/nekomimi/laya_client.py` | Process-wide `Agent` singleton. `ask(state, questions)` → answers or `None`. Never raises. `preload()` (load + warm-up, run by `web.py`'s lifespan before the port opens), `status()` (read-only, served at `/healthz`). `python -m` it to bake weights. |
 | `waifu_engine/nekomimi/traits.py` | ~110 ACG trait questions + `ANSWER_WEIGHT` + `make_dynamic()` for mined traits |
 | `waifu_engine/nekomimi/session.py` | `Candidate`, `GuessSession`, log-odds pool, in-process store + TTL |
 | `waifu_engine/nekomimi/engine.py` | The turn loop: `start`, `submit_answer`, `submit_guess_result`, `state_payload` |
@@ -107,7 +107,8 @@ swap in Redis/SQLite before doing that.
 CPU-only. Development machine is AMD RDNA2 on Windows: no CUDA, and neither
 `torch-directml` nor ROCm has a wheel for `torch 2.14` / Python 3.14. Measured on
 this box: **~26 s one-time load, ~0.3 s for one question, ~1.2 s for a batch of
-10.** That is why the agent is a singleton and why a turn is two batched calls
+10.** The load now happens at app startup (`preload()` in the lifespan), never on a
+player's request. That is why the agent is a singleton and why a turn is two batched calls
 rather than one call per candidate. A future ONNX Runtime + DirectML export is
 the plausible GPU path; not built.
 
@@ -138,6 +139,8 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_QUERY_LLM_MODEL` | `Qwen/Qwen3.6-35B-A3B` | Model name sent to that endpoint |
 | `WAIFU_QUERY_LLM_API_KEY` | — | Bearer key; falls back to `OPENAI_API_KEY`; blank for local |
 | `WAIFU_QUERY_LLM_TIMEOUT` | `20` | Seconds per rewrite call |
+| `WAIFU_LAYA_PRELOAD` | `1` | Load Laya at app startup (`0` = on first request) |
+| `WAIFU_LAYA_REQUIRED` | `0` | Fail startup if Laya does not load (set in the Laya Docker image) |
 | `USE_TF` | — | Set `0`; Transformers hangs probing TensorFlow |
 | `HF_HOME` | — | Weight cache (`/data/hf` in Docker) |
 
