@@ -4,7 +4,7 @@ An **Nekomimi character guesser** for **anime, manga, comics and games**, plus t
 
 ## Nekomimi mode
 
-Think of a character. The engine asks **Yes / No** questions — or you can type a detail instead of answering — and searches for matching characters after every answer. The runtime does not read `data/catalog.json`.
+Think of a character. The engine asks **Yes / No** and **multiple-choice** questions (hair colour, eye colour) — or you can type a detail instead of answering — and searches for matching characters after every answer. The runtime does not read `data/catalog.json`.
 
 ```bash
 python -m waifu_engine.web
@@ -20,6 +20,8 @@ character independently and also judges readiness:
 |---|---|---|
 | `ready_to_guess` | `noul` | whether the evidence is enough to name a character |
 | `match` | `noul` | whether one character satisfies the trait just asked |
+| `match` | `choice` | which option of a multiple-choice question fits one character; `probabilities[picked]` is the evidence |
+| `focus` | `choice` | which confirmed facts are most distinctive, so they lead the search query |
 
 Search uses concise positive clues, with shorter query variants when a search
 is too restrictive. Negative answers remain in Laya's evidence instead of
@@ -44,6 +46,8 @@ JSON API:
 ```bash
 curl -X POST http://127.0.0.1:7860/api/nekomimi/start  -H "Content-Type: application/json" -d "{}"
 curl -X POST http://127.0.0.1:7860/api/nekomimi/answer -H "Content-Type: application/json" -d '{"session_id":"<id>","answer":"yes"}'
+# multiple-choice questions ("kind": "choice") take an option key instead:
+curl -X POST http://127.0.0.1:7860/api/nekomimi/answer -H "Content-Type: application/json" -d '{"session_id":"<id>","answer":"white"}'
 curl -X POST http://127.0.0.1:7860/api/nekomimi/guess -H "Content-Type: application/json" -d '{"session_id":"<id>","correct":false}'
 curl http://127.0.0.1:7860/api/nekomimi/state/<id>
 ```
@@ -106,6 +110,30 @@ Both modes use online search. The historical catalog file is unused by the
 runtime. Disabling online search returns no candidates; it does not fall back
 to a fixed character list. In Nekomimi, supply a series, appearance, occupation,
 or another distinguishing detail to refine the next search.
+
+### Optional query LLM
+
+Search strings come from templates by default. A small chat model can rewrite
+the player's confirmed facts into better search phrases instead. It writes
+**search queries only**: never question text, and never decisions. Laya still
+makes every decision. The model only sees what the player typed or confirmed;
+scraped pages are never sent. Any failure falls back to the templates.
+
+Any OpenAI-compatible `/v1/chat/completions` endpoint works. The default is a
+local server hosting `Qwen/Qwen3.6-35B-A3B`:
+
+```bash
+# GPU: vLLM
+vllm serve Qwen/Qwen3.6-35B-A3B --port 8000
+# CPU (no CUDA): a Q4 GGUF under llama.cpp. ~3B active params, ~20-24 GB RAM
+llama-server --model Qwen3.6-35B-A3B-Q4_K_M.gguf --port 8000
+
+WAIFU_QUERY_LLM=1 python -m waifu_engine.web
+```
+
+To use OpenAI, set `WAIFU_QUERY_LLM_BASE_URL=https://api.openai.com/v1`,
+`WAIFU_QUERY_LLM_MODEL=<model>` and `OPENAI_API_KEY`. The last queries used are
+listed under `queries` in `web_search.last_search_meta()`.
 
 ## Notes
 

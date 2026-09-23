@@ -41,6 +41,13 @@ def _name_key(name: str) -> str:
     return "".join(ch for ch in (name or "").lower() if ch.isalnum())
 
 
+def answer_label(asked: dict[str, Any]) -> str:
+    """The player's answer as they saw it: an option label for choice questions."""
+    answer = asked.get("answer")
+    option = (asked.get("options") or {}).get(answer)
+    return option["label"] if option else (answer or "")
+
+
 def logit(p: float, floor: float = 0.02) -> float:
     p = min(max(p, floor), 1.0 - floor)
     return math.log(p / (1.0 - p))
@@ -125,6 +132,8 @@ class GuessSession:
     laya_used: bool = False
     evidence: dict[str, tuple[dict[str, Any], str]] = field(default_factory=dict)
     match_cache: dict[tuple[str, str], float] = field(default_factory=dict)
+    # Per-candidate option probabilities for multiple-choice questions.
+    choice_cache: dict[tuple[str, str], dict[str, float]] = field(default_factory=dict)
 
     # -- candidate pool ------------------------------------------------
     def alive_candidates(self) -> list[Candidate]:
@@ -199,7 +208,7 @@ class GuessSession:
 
     def history(self) -> list[dict[str, Any]]:
         return [
-            {"question": a["text"], "answer": a["answer"], "detail": a.get("detail") or ""}
+            {"question": a["text"], "answer": answer_label(a), "detail": a.get("detail") or ""}
             for a in self.asked
         ]
 

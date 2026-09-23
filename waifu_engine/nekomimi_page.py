@@ -24,6 +24,7 @@ NEKOMIMI_PAGE = """<!doctype html>
     button.ghost { background: #232833; color: #c5c8ce; }
     button:disabled { opacity: 0.5; cursor: progress; }
     .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+    [hidden] { display: none !important; }
     input[type=text] { flex: 1 1 14rem; padding: 0.55rem 0.7rem; border-radius: 10px; border: 1px solid #333; background: #1a1d24; color: inherit; }
     .meta { font-size: 0.85rem; color: #9aa0a6; margin-top: 0.75rem; }
     .bar { height: 6px; border-radius: 999px; background: #232833; overflow: hidden; margin: 0.5rem 0 0; }
@@ -37,7 +38,7 @@ NEKOMIMI_PAGE = """<!doctype html>
 </head>
 <body>
   <h1>Nekomimi</h1>
-  <p class="sub">Think of a character from an <b>anime</b>, <b>comic</b> or <b>game</b>. Answer yes or no &mdash; or type a detail to help. Laya decides what to ask next.</p>
+  <p class="sub">Think of a character from an <b>anime</b>, <b>comic</b> or <b>game</b>. Answer each question &mdash; yes/no or pick an option &mdash; or type a detail to help. Laya decides what to ask next.</p>
 
   <div id="intro" class="card">
     <div class="row">
@@ -51,10 +52,11 @@ NEKOMIMI_PAGE = """<!doctype html>
     <div class="meta" id="progress"></div>
     <div class="bar"><i id="progressBar" style="width:0%"></i></div>
     <div class="q" id="question"></div>
-    <div class="row">
+    <div class="row" id="yesno">
       <button data-answer="yes">Yes</button>
       <button data-answer="no">No</button>
     </div>
+    <div class="row" id="choices" hidden></div>
     <div class="row" style="margin-top:0.6rem">
       <input type="text" id="detail" placeholder="Add a detail instead (e.g. she pilots a mech)"/>
       <button class="ghost" id="detailBtn">Send detail</button>
@@ -198,6 +200,25 @@ NEKOMIMI_PAGE = """<!doctype html>
       box.appendChild(again);
     }
 
+    function renderOptions(question) {
+      // Option labels come from the server's fixed question bank, but build
+      // them with textContent like everything else on this page.
+      var box = el('choices');
+      box.textContent = '';
+      var isChoice = question.kind === 'choice' && question.options;
+      show(el('yesno'), !isChoice);
+      show(box, !!isChoice);
+      if (!isChoice) return;
+      question.options.forEach(function (opt) {
+        var b = document.createElement('button');
+        b.textContent = opt.label;
+        b.onclick = function () {
+          post('/api/nekomimi/answer', { session_id: sessionId, answer: opt.key }).then(render);
+        };
+        box.appendChild(b);
+      });
+    }
+
     function render(data) {
       if (!data) return;
       sessionId = data.session_id || sessionId;
@@ -206,6 +227,7 @@ NEKOMIMI_PAGE = """<!doctype html>
         show(el('guess'), false);
         show(el('play'), true);
         el('question').textContent = data.question.text;
+        renderOptions(data.question);
         var t = data.question.turn, max = data.question.max_turns;
         el('progress').textContent = 'Question ' + t + ' of up to ' + max
           + '  \\u00b7  ' + (data.candidates_alive || 0) + ' candidates in play'

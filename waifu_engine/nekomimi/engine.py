@@ -8,8 +8,14 @@ Laya never writes text; it decides. Per turn:
 * one call for ``ready_to_guess`` (noul, is the evidence enough to name a
   character);
 * one call **per candidate** for ``match`` (noul, does this candidate satisfy
-  the question just answered) -- see ``_match_probabilities`` for why these are
-  not batched into a shared state.
+  the question just answered; or ``choice`` over the options of a
+  multiple-choice question) -- see ``_match_probabilities`` for why these are
+  not batched into a shared state;
+* one ``choice`` call ranking which confirmed facts are most distinctive, so
+  search queries lead with them rather than with "female" or "anime".
+
+Search query *text* is never Laya's: templates build it, optionally with an
+OpenAI-compatible LLM rewriting the player's facts (``query_llm``).
 
 When Laya is unavailable the same decisions fall back to tag overlap and
 entropy heuristics, so the loop still plays (less sharply) with no model.
@@ -23,7 +29,7 @@ import re
 import threading
 from typing import Any
 
-from .. import sources, web_search
+from .. import query_llm, sources, web_search
 from . import laya_client
 from .session import (
     MAX_GUESSES,
@@ -38,8 +44,10 @@ from .traits import (
     QUESTION_BANK,
     QUESTIONS_BY_ID,
     clue_question,
+    is_choice,
     make_dynamic,
     noul_criteria,
+    valid_answers,
 )
 
 # Which candidate media each medium question accepts. Used to eliminate
@@ -59,6 +67,13 @@ MIN_QUESTIONS_BEFORE_GUESS = int(os.getenv("WAIFU_NEKOMINI_MIN_QUESTIONS", "5"))
 # would guess a random candidate. Require a leader as well.
 READY_MIN_POSTERIOR = float(os.getenv("WAIFU_NEKOMINI_READY_POSTERIOR", "0.45"))
 ONLINE = os.getenv("WAIFU_ONLINE_SEARCH", "1").lower() in {"1", "true", "yes"}
+# Facts offered to Laya when ranking which ones lead the search query, and how
+# many of the winners go into the focused query.
+FOCUS_OPTIONS = 8
+FOCUS_TAKE = 3
+# Broad facts that match thousands of characters; they go last in the fallback
+# focus ranking.
+_BROAD_CATEGORIES = frozenset({"medium", "gender", "meta"})
 
 _SESSION_LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
@@ -85,19 +100,76 @@ def _medium_hint(sess: GuessSession) -> str | None:
     return None
 
 
-def _search_terms(sess: GuessSession) -> list[str]:
-    # Search engines often ignore negation: "not female" retrieves female
-    # characters. Negative answers remain in the model evidence, not keywords.
-    terms = []
-    if sess.seed:
-        terms.append(sess.seed)
+def _fact_entries(sess: GuessSession) -> list[tuple[str, float]]:
+    """Positive search facts with a distinctiveness rank (lower = rarer).
+
+    Search engines often ignore negation: "not female" retrieves female
+    characters. Negative answers remain in the model evidence, not keywords.
+    Free text from the player ranks first; broad categories rank last.
+    """
+    entries: dict[str, float] = {}
+
+    def add(text: str | None, rank: float) -> None:
+        text = (text or "").strip()
+        if text and text not in entries:
+            entries[text] = rank
+
+    add(sess.seed, 0.0)
     for a in sess.asked:
-        if a.get("detail"):
-            terms.append(a["detail"])
-        if a.get("answer") == "yes":
+        add(a.get("detail"), 0.0)
+        answer = a.get("answer")
+        if a.get("kind") == "choice":
+            option = (a.get("options") or {}).get(answer) or {}
+            add(option.get("fact"), float(option.get("prior", 0.5)))
+        elif answer == "yes":
             text = re.sub(r"^(?:Is|Does|Has|Did) your character\s+", "", a["text"])
-            terms.append(text.rstrip("?"))
-    return list(dict.fromkeys(terms)) or ["fictional character"]
+            broad = a.get("category") in _BROAD_CATEGORIES
+            add(text.rstrip("?"), 1.0 + float(a.get("prior", 0.5)) if broad
+                else float(a.get("prior", 0.5)))
+    return list(entries.items())
+
+
+def _search_terms(sess: GuessSession) -> list[str]:
+    return [text for text, _ in _fact_entries(sess)] or ["fictional character"]
+
+
+def _focus_facts(sess: GuessSession, entries: list[tuple[str, float]]) -> list[str]:
+    """The few most distinctive facts, to lead the search query.
+
+    Laya cannot write the query, but it can pick among the facts: one ``choice``
+    call over up to eight of them. Its choice over question ids once came back
+    near-uniform, so a flat answer is ignored in favour of rarity order.
+    """
+    if len(entries) <= FOCUS_TAKE:
+        return []  # the template queries already carry every fact
+    offered = (entries if len(entries) <= FOCUS_OPTIONS
+               else [entries[0], *entries[-(FOCUS_OPTIONS - 1):]])
+    keys = {f"fact_{i}": text for i, (text, _) in enumerate(offered, start=1)}
+    answers = laya_client.ask(
+        {"goal": "Identify one anime, comic or video game character.",
+         "confirmed_facts": list(keys.values())},
+        {"focus": {
+            "type": "choice",
+            "instructions": "Which confirmed fact most narrows down which specific character this is?",
+            "criteria": {k: text[:80] for k, text in keys.items()},
+        }},
+    )
+    probs = ((answers or {}).get("focus") or {}).get("probabilities")
+    if isinstance(probs, dict):
+        clean = {}
+        for k, v in probs.items():
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if k in keys and math.isfinite(v) and 0.0 <= v <= 1.0:
+                clean[k] = v
+        if clean and max(clean.values()) >= 1.5 / len(keys):
+            sess.laya_used = True
+            ranked = sorted(clean, key=clean.get, reverse=True)
+            return [keys[k] for k in ranked[:FOCUS_TAKE]]
+    ranked_text = sorted(offered, key=lambda e: e[1])  # stable: ties keep answer order
+    return [text for text, _ in ranked_text[:FOCUS_TAKE]]
 
 
 def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = False) -> int:
@@ -112,11 +184,18 @@ def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = Fals
     exclude_names = {c.name for c in sess.candidates}
     raws: list[dict[str, Any]] = []
     try:
+        entries = _fact_entries(sess)
+        medium = _medium_hint(sess)
+        focus = _focus_facts(sess, entries)
+        # Player facts only -- never scraped names or blurbs.
+        rewritten = query_llm.rewrite([text for text, _ in entries], medium)
         raws = sources.find_candidates(
             _search_terms(sess),
-            medium_hint=_medium_hint(sess),
+            medium_hint=medium,
             limit=limit * 2 if initial else limit,
             exclude_names=exclude_names,
+            focus=focus or None,
+            rewritten=rewritten or None,
         )
     except Exception as exc:  # noqa: BLE001 - search is best effort
         sess.notes.append(f"search failed: {exc}")
@@ -181,6 +260,13 @@ def _split_quality(question: dict[str, Any], candidates: Any) -> float:
              if isinstance(candidates[0], Candidate) else list(candidates))
     total = sum(w for _, w in pairs) or 1.0
 
+    if is_choice(question):
+        # Same quantity over n outcomes; a multiple-choice question can be
+        # worth more than one bit, which is why it replaces a run of yes/nos.
+        dists = [(_tag_choice(question, c, strength=6.0), w / total) for c, w in pairs]
+        mix = {k: sum(d[k] * w for d, w in dists) for k in question["options"]}
+        return max(0.0, _entropy_n(mix) - sum(w * _entropy_n(d) for d, w in dists))
+
     def entropy(p: float) -> float:
         if p <= 0.0 or p >= 1.0:
             return 0.0
@@ -196,6 +282,22 @@ def _split_quality(question: dict[str, Any], candidates: Any) -> float:
     return max(0.0, entropy(p_yes) - sum(w * entropy(p) for p, w in predictions))
 
 
+def _entropy_n(dist: dict[str, float]) -> float:
+    return -sum(p * math.log2(p) for p in dist.values() if p > 0.0)
+
+
+def _bank_tags() -> set[str]:
+    tags = set()
+    for q in QUESTION_BANK:
+        tags.update(q["tags_true"])
+        for option in (q.get("options") or {}).values():
+            tags.update(option["tags"])
+    return tags
+
+
+_BANK_TAGS = _bank_tags()
+
+
 def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
     """Questions mined from the blurbs of the current candidate pool."""
     asked = sess.asked_ids()
@@ -207,7 +309,7 @@ def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
     for slug, n in counts.items():
         if n < 2 or f"dyn_{slug}" in asked or slug in QUESTIONS_BY_ID:
             continue
-        if any(slug in q["tags_true"] for q in QUESTION_BANK):
+        if slug in _BANK_TAGS:
             continue
         out.append(make_dynamic(slug, slug.replace("-", " ")))
     return out
@@ -290,6 +392,63 @@ def _tag_match(question: dict[str, Any], cand: Candidate) -> float:
     return 0.5
 
 
+def _tag_choice(question: dict[str, Any], cand: Candidate,
+                strength: float = 1.5) -> dict[str, float]:
+    """Heuristic option distribution for a multiple-choice question.
+
+    Uniform, with options the candidate's tags (or a whole-phrase blurb hit)
+    point at weighted ``strength`` times the rest. The default 1.5 mirrors the
+    [0.4, 0.6] cap on yes/no fallbacks: noisy tags stay weak evidence.
+    """
+    tags = set(cand.tags)
+    blurb = f"{cand.name} {cand.series} {cand.blurb}".lower()
+    weights = {}
+    for key, option in question["options"].items():
+        hit = bool(set(option["tags"]) & tags) or bool(
+            option["fact"] and re.search(r"\b" + re.escape(option["fact"].lower()) + r"\b", blurb))
+        weights[key] = strength if hit else 1.0
+    total = sum(weights.values())
+    return {k: w / total for k, w in weights.items()}
+
+
+def _choice_probabilities(
+    pool: list[Candidate], question: dict[str, Any]
+) -> dict[str, dict[str, float]]:
+    """Option probabilities per candidate, one Laya ``choice`` call each.
+
+    Same reasoning as ``_match_probabilities``: a shared state blurs the
+    candidates together. Answers that do not cover every option, or carry
+    non-probabilities, are dropped so the heuristic takes over.
+    """
+    out: dict[str, dict[str, float]] = {}
+    keys = list(question["options"])
+    for c in pool:
+        answers = laya_client.ask(
+            {"candidate": c.profile()},
+            {
+                "match": {
+                    "type": "choice",
+                    "instructions": question["instructions"],
+                    "criteria": question["criteria"],
+                }
+            },
+        )
+        got = ((answers or {}).get("match") or {}).get("probabilities")
+        if not isinstance(got, dict):
+            continue
+        try:
+            dist = {k: float(got[k]) for k in keys}
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not all(math.isfinite(p) and 0.0 <= p <= 1.0 for p in dist.values()):
+            continue
+        total = sum(dist.values())
+        if total <= 0.0:
+            continue
+        out[c.id] = {k: p / total for k, p in dist.items()}
+    return out
+
+
 def _match_probabilities(
     pool: list[Candidate], question: dict[str, Any]
 ) -> dict[str, float]:
@@ -353,7 +512,10 @@ def _eliminate_by_medium(sess: GuessSession, question: dict[str, Any], answer: s
 
 def score_candidates(sess: GuessSession, question: dict[str, Any], answer: str) -> None:
     """Evaluate every eligible identity; posterior rank never gates model access."""
-    if not ANSWER_WEIGHT.get(answer, 0.0):
+    if is_choice(question):
+        if answer not in question["options"]:
+            return
+    elif not ANSWER_WEIGHT.get(answer, 0.0):
         return
     with _session_lock(sess):
         sess.evidence[question["id"]] = (dict(question), answer)
@@ -374,6 +536,16 @@ def _rescore_candidates(sess: GuessSession) -> None:
     for c in live:
         c.logodds = popularity_prior(c.popularity)
     for qid, (question, answer) in sess.evidence.items():
+        if is_choice(question):
+            missing = [c for c in live if (c.id, qid) not in sess.choice_cache]
+            dists = _choice_probabilities(missing, question)
+            if dists:
+                sess.laya_used = True
+                sess.choice_cache.update({(cid, qid): d for cid, d in dists.items()})
+            for c in live:
+                dist = sess.choice_cache.get((c.id, qid)) or _tag_choice(question, c)
+                c.logodds += math.log(min(0.98, max(0.02, dist.get(answer, 0.0))))
+            continue
         media = _MEDIUM_QUESTIONS.get(qid)
         missing = [c for c in live if (c.id, qid) not in sess.match_cache
                    and not (media and c.medium not in ("", "unknown"))]
@@ -397,13 +569,17 @@ def _rescore_candidates(sess: GuessSession) -> None:
 
 
 def _question_payload(sess: GuessSession, question: dict[str, Any]) -> dict[str, Any]:
-    return {
+    out = {
         "qid": question["id"],
         "text": question["text"],
         "category": question["category"],
+        "kind": question.get("kind", "yesno"),
         "turn": sess.turn,
         "max_turns": MAX_TURNS,
     }
+    if is_choice(question):
+        out["options"] = [{"key": k, "label": o["label"]} for k, o in question["options"].items()]
+    return out
 
 
 def _top_payload(sess: GuessSession, n: int = 3) -> list[dict[str, Any]]:
@@ -447,7 +623,16 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
     # model support before turning relative rank into an early guess.
     leader = ranked[0][0]
     support = []
-    for qid, (_, answer) in sess.evidence.items():
+    for qid, (question, answer) in sess.evidence.items():
+        if is_choice(question):
+            # Scale-free support: 0.5 when the pick ties the candidate's best
+            # other option, so the same 0.6 bar applies as for yes/no.
+            dist = sess.choice_cache.get((leader.id, qid))
+            if dist:
+                p = dist.get(answer, 0.0)
+                other = max((v for k, v in dist.items() if k != answer), default=0.0)
+                support.append(p / (p + other) if p + other > 0.0 else 0.5)
+            continue
         p = sess.match_cache.get((leader.id, qid))
         if p is not None:
             support.append(p if answer == "yes" else 1.0 - p)
@@ -479,6 +664,9 @@ def _advance(sess: GuessSession) -> dict[str, Any]:
             "tags_true": question["tags_true"],
             "tags_false": question["tags_false"],
             "prior": question["prior"],
+            "kind": question.get("kind", "yesno"),
+            "criteria": question.get("criteria"),
+            "options": question.get("options"),
             "answer": None,
             "detail": None,
         }
@@ -508,11 +696,12 @@ def start(seed: str = "") -> dict[str, Any]:
 def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str, Any]:
     if sess.stage != "asking" or not sess.asked:
         return {"error": "no question is pending", "session_id": sess.id, "stage": sess.stage}
-    answer = (answer or "").strip().lower()
-    if answer not in ANSWER_WEIGHT:
-        return {"error": f"answer must be one of {sorted(ANSWER_WEIGHT)}", "session_id": sess.id}
-
     current = sess.asked[-1]
+    answer = (answer or "").strip().lower()
+    allowed = valid_answers(current)
+    if answer not in allowed:
+        return {"error": f"answer must be one of {sorted(allowed)}", "session_id": sess.id}
+
     current["answer"] = answer
     current["detail"] = detail.strip() or None
 
@@ -524,9 +713,17 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
         "tags_true": current["tags_true"],
         "tags_false": current["tags_false"],
         "prior": current["prior"],
+        "kind": current.get("kind", "yesno"),
     }
+    if current.get("criteria"):
+        question["criteria"] = current["criteria"]
+    if current.get("options"):
+        question["options"] = current["options"]
 
-    if answer == "yes":
+    if is_choice(question) and answer in question["options"]:
+        label = question["options"][answer]["label"]
+        sess.constraints.append(f"{current['text'].rstrip('?')}: {label}")
+    elif answer == "yes":
         sess.constraints.append(current["text"].replace("Is your character", "The character is")
                                 .replace("Does your character", "The character does")
                                 .replace("Has your character", "The character has")

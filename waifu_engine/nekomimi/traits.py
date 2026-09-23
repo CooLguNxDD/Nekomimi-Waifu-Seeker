@@ -5,7 +5,7 @@ question the engine can ask lives here, and Laya's job is to choose which one
 is worth asking next. Dynamic questions mined from search snippets are built
 with the same shape (see ``make_dynamic``).
 
-Question shape::
+Yes/no question shape (``_q``)::
 
     {
       "id": "medium_game",
@@ -15,7 +15,11 @@ Question shape::
       "tags_true": [...],   # candidate tags that imply the answer is yes
       "tags_false": [...],  # candidate tags that imply the answer is no
       "prior": 0.35,        # rough P(yes) across all ACG characters
+      "kind": "yesno",
     }
+
+Multiple-choice questions (``_choice``) carry ``"kind": "choice"`` and an
+``options`` map; the player answers with an option key.
 """
 
 from __future__ import annotations
@@ -79,7 +83,54 @@ def _q(
         "tags_false": tags_false or [],
         "prior": prior,
         "dynamic": False,
+        "kind": "yesno",
     }
+
+
+def _choice(
+    qid: str,
+    category: str,
+    text: str,
+    instructions: str,
+    options: list[tuple[str, str, str, list[str], str, float]],
+) -> dict[str, Any]:
+    """A multiple-choice question, scored with one Laya ``choice`` per candidate.
+
+    options: (key, user-facing label, Laya option text, candidate tags that
+    imply this option, search keyword fact or "" for none, prior). Keep it to
+    eight options at most: Laya is weak on wide choice sets and every option
+    string counts against ``head_max_len``.
+    """
+    assert 2 <= len(options) <= 8, qid
+    return {
+        "kind": "choice",
+        "id": qid,
+        "category": category,
+        "text": text,
+        "instructions": instructions,
+        "criteria": {key: f"the character has {crit}" for key, _, crit, _, _, _ in options},
+        "options": {
+            key: {"label": label, "tags": list(tags), "fact": fact, "prior": prior}
+            for key, label, _, tags, fact, prior in options
+        },
+        # Kept for code that treats every question alike; choice evidence
+        # never reads them.
+        "tags_true": [],
+        "tags_false": [],
+        "prior": 0.5,
+        "dynamic": False,
+    }
+
+
+def is_choice(question: dict[str, Any]) -> bool:
+    return question.get("kind") == "choice"
+
+
+def valid_answers(question: dict[str, Any]) -> tuple[str, ...]:
+    """Answers accepted for ``question``: option keys for choice, else yes/no."""
+    if is_choice(question):
+        return (*question["options"], "detail")
+    return ANSWERS
 
 
 def _trait_block(
@@ -206,31 +257,42 @@ QUESTION_BANK: list[dict[str, Any]] = [
        tags_true=["leader", "captain"], prior=0.18),
 
     # --- appearance: hair ---
+    # Hair and eye colour are mutually exclusive, so they are single
+    # multiple-choice questions scored with a Laya ``choice`` per candidate
+    # rather than a run of yes/no questions. Option tags keep the bare hair
+    # slugs so web_search.mine_trait_slugs colours line up.
+    _choice("hair_color", "hair_color", "What colour is your character's hair?",
+            "What hair colour does the character in `candidate` have?", [
+        ("blonde", "Blonde", "blonde, golden or yellow hair", ["blonde"], "blonde hair", 0.18),
+        ("black", "Black", "black hair", ["black"], "black hair", 0.2),
+        ("brown", "Brown", "brown hair", ["brown"], "brown hair", 0.16),
+        ("white", "White / silver", "white, silver or grey hair", ["white"], "silver hair", 0.12),
+        ("red", "Red / orange", "red, crimson or orange hair", ["red"], "red hair", 0.1),
+        ("blue", "Blue", "blue hair", ["blue"], "blue hair", 0.08),
+        ("pink", "Pink", "pink hair", ["pink"], "pink hair", 0.06),
+        ("other", "Other (green, purple...)", "green, purple or another hair colour",
+         ["green", "purple"], "", 0.1),
+    ]),
     *_trait_block("hair", "hair", [
-        ("blonde", "blonde", "described as having blonde, golden or yellow hair", 0.18),
-        ("black", "black-haired", "described as having black hair", 0.2),
-        ("brown", "brown-haired", "described as having brown hair", 0.16),
-        ("white", "white or silver haired", "described as having white, silver or grey hair", 0.12),
-        ("red", "red-haired", "described as having red, crimson or orange hair", 0.1),
-        ("blue", "blue-haired", "described as having blue hair", 0.08),
-        ("pink", "pink-haired", "described as having pink hair", 0.06),
-        ("green", "green-haired", "described as having green hair", 0.04),
-        ("purple", "purple-haired", "described as having purple or violet hair", 0.05),
         ("long", "long-haired", "described as having long hair", 0.4),
         ("short", "short-haired", "described as having short hair", 0.35),
         ("twintails", "wearing twintails", "known for wearing twintails or pigtails", 0.08),
         ("ponytail", "wearing a ponytail", "known for wearing a ponytail", 0.1),
-        # NOTE: hair slugs stay bare so web_search.mine_trait_slugs colours line up.
     ]),
 
     # --- appearance: eyes ---
-    # Slugs are prefixed: a bare "blue" would collide with hair_blue and make
-    # one tag satisfy both a hair and an eye question.
+    # Slugs are prefixed: a bare "blue" would collide with the hair colour and
+    # make one tag satisfy both a hair and an eye question.
+    _choice("eye_color", "eye_color", "What colour are your character's eyes?",
+            "What eye colour does the character in `candidate` have?", [
+        ("blue", "Blue", "blue eyes", ["eyes-blue"], "blue eyes", 0.2),
+        ("red", "Red", "red or crimson eyes", ["eyes-red"], "red eyes", 0.1),
+        ("green", "Green", "green eyes", ["eyes-green"], "green eyes", 0.1),
+        ("gold", "Gold / amber", "golden, yellow or amber eyes", ["eyes-gold"], "golden eyes", 0.1),
+        ("brown", "Brown / dark", "brown or dark eyes", ["eyes-brown"], "", 0.3),
+        ("other", "Other", "another eye colour, such as purple or pink", [], "", 0.2),
+    ]),
     *_trait_block("eyes", "eyes", [
-        ("blue", "blue-eyed", "described as having blue eyes", 0.2),
-        ("red", "red-eyed", "described as having red or crimson eyes", 0.1),
-        ("green", "green-eyed", "described as having green eyes", 0.1),
-        ("gold", "gold or amber eyed", "described as having golden, yellow or amber eyes", 0.1),
         ("heterochromia", "heterochromatic (two eye colours)", "having two different eye colours", 0.03),
     ], tag_prefix="eyes-"),
 

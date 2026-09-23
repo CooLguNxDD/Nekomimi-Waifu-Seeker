@@ -28,7 +28,32 @@ _MEDIUM_SUFFIX = {
 }
 
 
-def _queries(constraints: list[str], medium_hint: str | None) -> list[str]:
+MAX_QUERIES = 5
+
+
+def _queries(
+    constraints: list[str],
+    medium_hint: str | None,
+    focus: list[str] | None = None,
+    rewritten: list[str] | None = None,
+) -> list[str]:
+    """Search strings, best first.
+
+    ``rewritten`` (from the optional query LLM) goes first verbatim, then the
+    ``focus`` facts Laya ranked most distinctive, then the template groups.
+    Without either, this is exactly the template list.
+    """
+    templates = _template_queries(constraints, medium_hint)
+    if not focus and not rewritten:
+        return templates
+    suffix = _MEDIUM_SUFFIX.get(medium_hint or "", "character")
+    lead = [" ".join(q.split())[:200] for q in (rewritten or []) if q and q.strip()]
+    if focus:
+        lead.append(f"{' '.join(dict.fromkeys(f[:80] for f in focus))[:200]} {suffix}")
+    return list(dict.fromkeys([*lead, *templates]))[:MAX_QUERIES]
+
+
+def _template_queries(constraints: list[str], medium_hint: str | None) -> list[str]:
     facts = []
     for c in constraints:
         c = (c or "").strip()
@@ -55,6 +80,8 @@ def find_candidates(
     limit: int = 12,
     exclude_names: set[str] | None = None,
     use_ddg: bool = True,
+    focus: list[str] | None = None,
+    rewritten: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Merge candidates from every source, best source first, deduped by name."""
     from .. import web_search
@@ -70,7 +97,8 @@ def find_candidates(
                 continue
             found[key] = cand
 
-    queries = _queries(constraints, medium_hint)
+    queries = _queries(constraints, medium_hint, focus=focus, rewritten=rewritten)
+    web_search._LAST_SEARCH["queries"] = list(queries)
     pw_ok = False
     pw_empty = True
     pw_error = False

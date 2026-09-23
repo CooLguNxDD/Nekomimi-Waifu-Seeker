@@ -46,6 +46,7 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
 | `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo fills remaining slots |
+| `waifu_engine/query_llm.py` | Optional OpenAI-compatible query rewriter (default local `Qwen/Qwen3.6-35B-A3B`). `rewrite(facts, medium)` → queries or `None`. Never raises. Off unless `WAIFU_QUERY_LLM=1` |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
 | `waifu_engine/search.py`, `catalog.py` | Online shortlist ranking; catalog helpers remain for tooling but runtime never loads the catalog |
 
@@ -72,7 +73,17 @@ candidate tags or feed noisy mined tags to Laya as confirmed identity facts.
 `posterior()` softmaxes these scores. Cost scales with eligible candidates per
 new trait; there is no longer a ten-forward-pass evidence budget.
 
-Answers are **`yes` / `no` / `detail`**. `detail` does not answer the current
+Multiple-choice questions (`kind: "choice"`, built with `traits._choice`, ≤8
+options including `other`) are answered with an option key. Each candidate gets
+its own Laya `choice` call; `probabilities[picked]` is the likelihood (cached in
+`choice_cache`). Heuristic fallback weights a tag hit at most 1.5× uniform.
+Early-guess support for choice evidence is `p_pick / (p_pick + best_other)`.
+
+Before each search, one Laya `choice` call (`focus`) ranks the positive facts;
+the top three lead the query. A near-uniform answer (< 1.5/n) is ignored in
+favour of rarity order (details first, broad medium/gender facts last).
+
+Answers to yes/no questions are **`yes` / `no` / `detail`**. `detail` does not answer the current
 yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and
 refines search. The initial seed is evaluated the same way.
 
@@ -122,6 +133,11 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_NEKOMINI_CHOICE_WIDTH` | `8` | Questions offered to Laya per turn |
 | `WAIFU_NEKOMINI_GUESS_CONFIDENCE` | `0.80` | Posterior needed to guess |
 | `WAIFU_LAYA_HEAD_MAX_LEN` | `480` | Option-token budget |
+| `WAIFU_QUERY_LLM` | `0` | Let an LLM rewrite search queries (search strings only) |
+| `WAIFU_QUERY_LLM_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible endpoint (`https://api.openai.com/v1` for OpenAI) |
+| `WAIFU_QUERY_LLM_MODEL` | `Qwen/Qwen3.6-35B-A3B` | Model name sent to that endpoint |
+| `WAIFU_QUERY_LLM_API_KEY` | — | Bearer key; falls back to `OPENAI_API_KEY`; blank for local |
+| `WAIFU_QUERY_LLM_TIMEOUT` | `20` | Seconds per rewrite call |
 | `USE_TF` | — | Set `0`; Transformers hangs probing TensorFlow |
 | `HF_HOME` | — | Weight cache (`/data/hf` in Docker) |
 
@@ -133,7 +149,8 @@ python -m waifu_engine.web         # http://127.0.0.1:7860  (+ /nekomimi)
 python -m waifu_engine "silver hair mage" --fallback
 ```
 
-Tests stub `laya_client.ask` and `web_search.search_by_constraints`. Keep them
+Tests stub `laya_client.ask`, `web_search.search_by_constraints` and the
+query LLM's `urlopen`. Keep them
 offline — do not add a test that downloads weights, launches Chromium, or hits
 DuckDuckGo.
 
@@ -146,3 +163,6 @@ DuckDuckGo.
    fire on `"the"` and tagged every character male.
 4. Laya calls go through `laya_client.ask`. Do not construct `Router` or call
    `laya.load` anywhere else.
+5. The query LLM (`query_llm.py`) writes **search strings only** — never
+   question text, never decisions. Its input is player facts only; never send
+   it scraped names or blurbs. Tests stub its HTTP; never call a real endpoint.
