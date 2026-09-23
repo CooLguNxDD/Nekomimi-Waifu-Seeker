@@ -58,7 +58,9 @@ MEDIUM_TEXT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 # Disambiguation, list and franchise pages that survive the category check.
 BAD_TITLE = re.compile(
     r"\((disambiguation|franchise|video game series|film series|TV series)\)|"
-    r"^(List of|Category:|Portal:|Template:)",
+    r"^(List of|Category:|Portal:|Template:)|"
+    # Roster articles: "Characters of the Mortal Kombat series".
+    r"^Characters (of|in) \b|\bcast of\b",
     re.I,
 )
 
@@ -129,7 +131,9 @@ def _series_of(title: str, categories: list[str], extract: str) -> str:
 
 
 def _clean_title(title: str) -> str:
-    return re.sub(r"\s*\((?:character|comics|video game).*?\)\s*$", "", title, flags=re.I).strip()
+    """Drop Wikipedia's disambiguation parenthetical: "Black Cat (Marvel Comics)"."""
+    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", title).strip()
+    return cleaned or title.strip()
 
 
 def _pageviews(page: dict[str, Any]) -> int:
@@ -185,6 +189,7 @@ def search_characters(query: str, limit: int = 8) -> list[dict[str, Any]]:
             "prop": "extracts|pageimages|categories|pageviews",
             "exintro": "1",
             "explaintext": "1",
+            "exlimit": "max",
             "piprop": "thumbnail",
             "pithumbsize": "400",
             "clshow": "!hidden",
@@ -192,7 +197,7 @@ def search_characters(query: str, limit: int = 8) -> list[dict[str, Any]]:
         }
     )
     out = []
-    for p in pages:
+    for p in sorted(pages, key=lambda p: p.get("index", 0)):
         cand = _to_candidate(p)
         if cand:
             out.append(cand)
@@ -231,10 +236,14 @@ def pages_by_title(titles: list[str]) -> list[dict[str, Any]]:
                 "prop": "extracts|pageimages|categories|pageviews",
                 "exintro": "1",
                 "explaintext": "1",
+                # Without exlimit the extracts API returns prose for the FIRST
+                # title only, and the rest come back bare -- which silently
+                # dropped Hatsune Miku and Pikachu from the catalog.
+                "exlimit": "max",
                 "piprop": "thumbnail",
                 "pithumbsize": "400",
                 "clshow": "!hidden",
-                "cllimit": "50",
+                "cllimit": "max",
             }
         )
         for p in pages:

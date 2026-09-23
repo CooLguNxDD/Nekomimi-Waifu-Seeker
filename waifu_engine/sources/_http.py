@@ -9,6 +9,7 @@ Two things here are not optional, both learned the hard way:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import ssl
 import threading
@@ -95,7 +96,9 @@ def post_json(url: str, payload: dict[str, Any]) -> Any | None:
             "Content-Type": "application/json",
         },
     )
-    return _request(req, f"{url}|{body.decode()[:400]}")
+    # Hash the whole body: truncating it made every GraphQL page share one
+    # cache key, so paging through AniList returned page 1 six times.
+    return _request(req, f"{url}|{hashlib.sha1(body).hexdigest()}")
 
 
 def clear_cache() -> None:

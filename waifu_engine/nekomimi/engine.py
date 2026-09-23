@@ -19,24 +19,25 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import threading
 from typing import Any
 
 from .. import sources, web_search
-from ..catalog import load_catalog
 from . import laya_client
 from .session import (
     MAX_GUESSES,
     MAX_TURNS,
     Candidate,
     GuessSession,
-    logit,
     new_session,
+    popularity_prior,
 )
 from .traits import (
     ANSWER_WEIGHT,
     QUESTION_BANK,
     QUESTIONS_BY_ID,
+    clue_question,
     make_dynamic,
     noul_criteria,
 )
@@ -57,8 +58,6 @@ MIN_QUESTIONS_BEFORE_GUESS = int(os.getenv("WAIFU_NEKOMINI_MIN_QUESTIONS", "5"))
 # Laya saying "ready" is not enough on its own -- with a flat posterior it
 # would guess a random candidate. Require a leader as well.
 READY_MIN_POSTERIOR = float(os.getenv("WAIFU_NEKOMINI_READY_POSTERIOR", "0.45"))
-REFRESH_EVERY = 3
-REFRESH_WHEN_BELOW = 4
 ONLINE = os.getenv("WAIFU_ONLINE_SEARCH", "1").lower() in {"1", "true", "yes"}
 
 _SESSION_LOCKS: dict[str, threading.Lock] = {}
@@ -87,30 +86,26 @@ def _medium_hint(sess: GuessSession) -> str | None:
 
 
 def _search_terms(sess: GuessSession) -> list[str]:
-    terms = list(sess.constraints)
+    # Search engines often ignore negation: "not female" retrieves female
+    # characters. Negative answers remain in the model evidence, not keywords.
+    terms = []
     if sess.seed:
-        terms.insert(0, sess.seed)
-    return terms or ["popular anime game comic character"]
-
-
-def seed_from_catalog(sess: GuessSession) -> int:
-    """Start warm from the prebuilt catalog instead of a cold web search."""
-    try:
-        entries = load_catalog()
-    except Exception as exc:  # noqa: BLE001 - a broken catalog must not end the round
-        sess.notes.append(f"catalog unavailable: {exc}")
-        return 0
-    if not entries:
-        return 0
-    with _session_lock(sess):
-        return sess.add_candidates(entries)
+        terms.append(sess.seed)
+    for a in sess.asked:
+        if a.get("detail"):
+            terms.append(a["detail"])
+        if a.get("answer") == "yes":
+            text = re.sub(r"^(?:Is|Does|Has|Did) your character\s+", "", a["text"])
+            terms.append(text.rstrip("?"))
+    return list(dict.fromkeys(terms)) or ["fictional character"]
 
 
 def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = False) -> int:
     """Pull fresh candidates for the current constraints.
 
-    AniList and Wikipedia first (structured, with real prose and a popularity
-    number); DuckDuckGo only as the long-tail fallback inside ``find_candidates``.
+    Playwright HTML indexes first, then AniList and Wikipedia (structured, with
+    real prose and a popularity number); DuckDuckGo fills remaining slots
+    inside ``find_candidates``.
     """
     if not ONLINE:
         return 0
@@ -129,11 +124,9 @@ def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = Fals
             return 0
     with _session_lock(sess):
         added = sess.add_candidates(raws)
+        if added and sess.evidence:
+            _rescore_candidates(sess)
     return added
-
-
-def _refresh_async(sess: GuessSession) -> None:
-    threading.Thread(target=refresh_candidates, args=(sess,), daemon=True).start()
 
 
 # --- question selection ---------------------------------------------
@@ -178,11 +171,29 @@ def _p_yes(question: dict[str, Any], candidates: Any) -> float:
 
 
 def _split_quality(question: dict[str, Any], candidates: Any) -> float:
-    """Expected information gain in bits: 1.0 halves the pool, 0.0 says nothing."""
-    p = _p_yes(question, candidates)
-    if p <= 0.0 or p >= 1.0:
+    """Mutual information: answer entropy minus within-candidate uncertainty.
+
+    A trait unknown for every candidate is a coin flip, not a useful split.
+    """
+    if not candidates:
         return 0.0
-    return -(p * math.log2(p) + (1.0 - p) * math.log2(1.0 - p))
+    pairs = ([(c, 1.0) for c in candidates]
+             if isinstance(candidates[0], Candidate) else list(candidates))
+    total = sum(w for _, w in pairs) or 1.0
+
+    def entropy(p: float) -> float:
+        if p <= 0.0 or p >= 1.0:
+            return 0.0
+        return -p * math.log2(p) - (1.0 - p) * math.log2(1.0 - p)
+
+    media = _MEDIUM_QUESTIONS.get(question["id"])
+    predictions = [
+        (float(c.medium in media) if media and c.medium not in ("", "unknown")
+         else _tag_match(question, c), w / total)
+        for c, w in pairs
+    ]
+    p_yes = sum(p * w for p, w in predictions)
+    return max(0.0, entropy(p_yes) - sum(w * entropy(p) for p, w in predictions))
 
 
 def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
@@ -214,6 +225,10 @@ def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
     ]
     if not pool:
         pool = [q for q in QUESTION_BANK if q["id"] not in asked]
+    # Establish a search domain before ranking a small, biased result set.
+    domains = [q for q in pool if q["id"] in _MEDIUM_QUESTIONS]
+    if _medium_hint(sess) is None and domains:
+        return domains[:CHOICE_WIDTH]
     pool.sort(key=lambda q: _split_quality(q, weighted), reverse=True)
     return pool[:CHOICE_WIDTH]
 
@@ -269,7 +284,8 @@ def _tag_match(question: dict[str, Any], cand: Candidate) -> float:
     if set(question["tags_false"]) & tags:
         return 0.15
     blurb = f"{cand.name} {cand.series} {cand.blurb}".lower()
-    if any(t.replace("-", " ") in blurb for t in question["tags_true"]):
+    if any(re.search(r"\b" + re.escape(t.replace("-", " ")) + r"\b", blurb)
+           for t in question["tags_true"]):
         return 0.7
     return 0.5
 
@@ -290,8 +306,11 @@ def _match_probabilities(
     # holds" -- the model is scoring against a restatement of the real claim.
     criteria = question.get("criteria") or noul_criteria(question["instructions"])
     for c in pool:
+        state = {"candidate": c.profile()}
+        if question.get("clues"):
+            state["clues"] = question["clues"]
         answers = laya_client.ask(
-            {"candidate": c.profile()},
+            state,
             {
                 "match": {
                     "type": "noul",
@@ -301,8 +320,12 @@ def _match_probabilities(
             },
         )
         got = (answers or {}).get("match") or {}
-        if "noul" in got:
-            probs[c.id] = float(got["noul"])
+        try:
+            p = float(got["noul"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(p) and 0.0 <= p <= 1.0:
+            probs[c.id] = p
     return probs
 
 
@@ -323,37 +346,51 @@ def _eliminate_by_medium(sess: GuessSession, question: dict[str, Any], answer: s
         matches = cand.medium in medium
         if (answer == "yes" and not matches) or (answer == "no" and matches):
             cand.alive = False
+            cand.logodds = -math.inf
             dropped += 1
     return dropped
 
 
 def score_candidates(sess: GuessSession, question: dict[str, Any], answer: str) -> None:
-    """Fold the answer into every live candidate's log-odds."""
-    weight = ANSWER_WEIGHT.get(answer, 0.0)
-    if weight == 0.0:
+    """Evaluate every eligible identity; posterior rank never gates model access."""
+    if not ANSWER_WEIGHT.get(answer, 0.0):
         return
+    with _session_lock(sess):
+        sess.evidence[question["id"]] = (dict(question), answer)
+        _rescore_candidates(sess)
+
+
+def _rescore_candidates(sess: GuessSession) -> None:
+    """Replay evidence for new arrivals, reusing successful model judgments.
+
+    The caller holds the session lock. Only known medium contradictions and
+    rejected guesses remove identities; uncertain evidence must be recoverable.
+    """
+    for question, answer in sess.evidence.values():
+        _eliminate_by_medium(sess, question, answer)
     live = sess.alive_candidates()
     if not live:
         return
-
-    # Laya judges the leaders; the rest are scored from their tags, so a
-    # several-hundred-entry catalog costs the same per turn as ten candidates.
-    pool = sess.scoring_pool()
-    probs = _match_probabilities(pool, question)
-    if probs:
-        sess.laya_used = True
     for c in live:
-        p = probs.get(c.id)
-        if p is None:
-            p = _tag_match(question, c)
-        c.logodds += weight * logit(p)
-        # Record what the pool now looks like so mined tags stay useful.
-        if weight > 0 and p > 0.6:
-            for tag in question["tags_true"]:
-                if tag not in c.tags:
-                    c.tags.append(tag)
-    _eliminate_by_medium(sess, question, answer)
-    sess.prune()
+        c.logodds = popularity_prior(c.popularity)
+    for qid, (question, answer) in sess.evidence.items():
+        media = _MEDIUM_QUESTIONS.get(qid)
+        missing = [c for c in live if (c.id, qid) not in sess.match_cache
+                   and not (media and c.medium not in ("", "unknown"))]
+        probs = _match_probabilities(missing, question)
+        if probs:
+            sess.laya_used = True
+            sess.match_cache.update({(cid, qid): p for cid, p in probs.items()})
+        for c in live:
+            if media and c.medium not in ("", "unknown"):
+                continue  # known medium already applied as a hard constraint
+            p = sess.match_cache.get((c.id, qid))
+            if p is None:
+                # A failed model call must not make noisy tags stronger evidence
+                # than the model's typically modest confidence.
+                p = min(0.6, max(0.4, _tag_match(question, c)))
+            likelihood = p if answer == "yes" else 1.0 - p
+            c.logodds += math.log(min(0.98, max(0.02, likelihood)))
 
 
 # --- public API -------------------------------------------------------
@@ -381,7 +418,7 @@ def _guess_payload(sess: GuessSession) -> dict[str, Any]:
             "session_id": sess.id,
             "stage": "done",
             "guess": None,
-            "message": "Out of candidates -- no character matches those answers.",
+            "message": "Search did not find a matching character. Try another round with a specific clue.",
             "top": [],
         }
     cand, prob = ranked[0]
@@ -402,13 +439,22 @@ def _guess_payload(sess: GuessSession) -> dict[str, Any]:
 def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bool:
     ranked = sess.posterior()
     if not ranked:
+        return sess.turn >= MAX_TURNS
+    if sess.turn >= MAX_TURNS:
         return True
-    if len(ranked) == 1 and sess.turn >= 3:
-        return True
+    # The posterior is conditional on what search happened to find. A lone hit
+    # has probability 1 even when it contradicts every clue. Require independent
+    # model support before turning relative rank into an early guess.
+    leader = ranked[0][0]
+    support = []
+    for qid, (_, answer) in sess.evidence.items():
+        p = sess.match_cache.get((leader.id, qid))
+        if p is not None:
+            support.append(p if answer == "yes" else 1.0 - p)
+    if len(support) < 2 or sum(support) / len(support) < 0.6:
+        return False
     top_p = ranked[0][1]
     if top_p >= GUESS_CONFIDENCE and sess.turn >= MIN_QUESTIONS_BEFORE_GUESS:
-        return True
-    if sess.turn >= MAX_TURNS:
         return True
     if laya_answers and sess.turn >= MIN_QUESTIONS_BEFORE_GUESS and top_p >= READY_MIN_POSTERIOR:
         ready = laya_answers.get("ready_to_guess") or {}
@@ -420,8 +466,6 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
 
 def _advance(sess: GuessSession) -> dict[str, Any]:
     """Emit the next question, or a guess when the evidence is strong enough."""
-    if len(sess.alive_candidates()) < REFRESH_WHEN_BELOW:
-        refresh_candidates(sess)
     question, laya_answers = _pick_question(sess)
     if _should_guess(sess, laya_answers) or not question:
         return _guess_payload(sess)
@@ -454,9 +498,7 @@ def start(seed: str = "") -> dict[str, Any]:
     sess = new_session(seed)
     if seed:
         sess.constraints.append(seed)
-    seeded = seed_from_catalog(sess)
-    if seeded:
-        sess.notes.append(f"catalog seeded {seeded} candidates")
+        score_candidates(sess, clue_question("clue_seed", seed), "yes")
     refresh_candidates(sess, limit=16, initial=True)
     payload = _advance(sess)
     payload["seed"] = sess.seed
@@ -496,10 +538,12 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
         sess.constraints.append(current["detail"])
 
     score_candidates(sess, question, answer)
+    if current["detail"]:
+        score_candidates(sess, clue_question(f"clue_{sess.turn}", current["detail"]), "yes")
 
-    answered = sum(1 for a in sess.asked if a.get("answer"))
-    if current["detail"] or answered % REFRESH_EVERY == 0:
-        _refresh_async(sess)
+    # Every answer opens a new search branch. Discover and replay evidence
+    # before choosing the next question or declaring a winner.
+    refresh_candidates(sess)
 
     sess.touch()
     return _advance(sess)

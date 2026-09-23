@@ -36,13 +36,13 @@ _LEAD = re.compile(
 )
 
 
-def noul_criteria(instructions: str) -> dict[str, str]:
+def noul_criteria(instructions: str, detail: str | None = None) -> dict[str, str]:
     """Explicit true/false option text for a ``noul`` question.
 
     Without this Laya scores against its generic "yes, the statement holds",
     which is a much weaker target than a restatement of the actual claim.
     """
-    clause = _LEAD.sub("", instructions.strip()).rstrip("?").strip()
+    clause = (detail or "").strip() or _LEAD.sub("", instructions.strip()).rstrip("?").strip()
     clause = clause[0].lower() + clause[1:] if clause else "the statement holds"
     # Framed rather than inflected: the clause can be adjectival ("female") or
     # verbal ("die at some point"), and "the character is die" reads as noise.
@@ -57,12 +57,20 @@ def _q(
     category: str,
     text: str,
     instructions: str,
+    criteria_detail: str | None = None,
     tags_true: list[str] | None = None,
     tags_false: list[str] | None = None,
     prior: float = 0.5,
 ) -> dict[str, Any]:
+    """Keep ``instructions`` short.
+
+    Measured on the typed-decisions checkpoint, the same question asked with a
+    140-character instruction scored Mario 0.38 for "is this a video game
+    character"; asked in 50 characters it scored 0.71. Elaboration belongs in
+    ``criteria_detail``, which only shapes the true/false option text.
+    """
     return {
-        "criteria": noul_criteria(instructions),
+        "criteria": noul_criteria(instructions, criteria_detail),
         "id": qid,
         "category": category,
         "text": text,
@@ -92,7 +100,7 @@ def _trait_block(
                 f"{prefix}_{slug}",
                 category,
                 f"Is your character {label}?",
-                f"Is the character described in `candidate` {clause}?",
+                f"Is the character in `candidate` {clause}?",
                 tags_true=[f"{tag_prefix}{slug}"],
                 prior=prior,
             )
@@ -102,31 +110,39 @@ def _trait_block(
 
 MEDIUM_VALUES = ("anime", "manga", "comic", "game")
 
+
+def clue_question(qid: str, clues: str) -> dict[str, Any]:
+    """Evaluate a user's free-text search clue against one retrieved identity."""
+    question = _q(qid, "clue", "Does your character match these clues?",
+                  "Does `candidate` match the supplied `clues`?")
+    question["clues"] = clues
+    return question
+
 QUESTION_BANK: list[dict[str, Any]] = [
     # --- medium: highest information gain, asked first ---
     _q("medium_game", "medium", "Is your character from a video game?",
-       "Did the character in `candidate` originate in a video game (including visual novels and gacha games), rather than in anime, manga or comics?",
+       "Is the character in `candidate` from a video game?", criteria_detail="from a video game, visual novel or gacha game -- not anime, manga or comics",
        tags_true=["game", "vn", "rpg", "gacha", "fighting-game"],
        tags_false=["anime", "manga", "comic"], prior=0.35),
     _q("medium_anime", "medium", "Is your character from an anime or manga?",
-       "Did the character in `candidate` originate in Japanese anime, manga or a light novel?",
+       "Is the character in `candidate` from anime or manga?", criteria_detail="from Japanese anime, manga or a light novel",
        tags_true=["anime", "manga", "light-novel"],
        tags_false=["comic", "game"], prior=0.45),
     _q("medium_comic", "medium", "Is your character from a Western comic?",
-       "Did the character in `candidate` originate in a Western comic book, graphic novel or webtoon (Marvel, DC, Image, webtoons)?",
+       "Is the character in `candidate` from a Western comic?", criteria_detail="from a Western comic book, graphic novel or webtoon such as Marvel or DC",
        tags_true=["comic", "marvel", "dc", "webtoon"],
        tags_false=["anime", "manga", "game"], prior=0.2),
     _q("medium_vn", "medium", "Is your character from a visual novel or dating sim?",
-       "Is the character in `candidate` from a visual novel, dating sim or otome game?",
+       "Is the character in `candidate` from a visual novel?", criteria_detail="from a visual novel, dating sim or otome game",
        tags_true=["vn", "otome", "dating-sim"], prior=0.1),
     _q("medium_gacha", "medium", "Is your character from a gacha or live-service mobile game?",
-       "Is the character in `candidate` from a gacha or live-service mobile game such as Genshin Impact, Fate/Grand Order, Blue Archive or Honkai?",
+       "Is the character in `candidate` from a gacha mobile game?", criteria_detail="from a gacha or live-service mobile game such as Genshin Impact, Fate/Grand Order or Blue Archive",
        tags_true=["gacha", "mobile"], prior=0.12),
     _q("medium_fighting", "medium", "Is your character on a fighting game roster?",
-       "Is the character in `candidate` a playable fighter in a fighting game series such as Street Fighter, Tekken, Guilty Gear, King of Fighters or Smash Bros?",
+       "Is the character in `candidate` a fighting game fighter?", criteria_detail="a playable fighter in a series such as Street Fighter, Tekken, Guilty Gear or Smash Bros",
        tags_true=["fighting-game"], prior=0.08),
     _q("medium_playable", "medium", "Is your character playable by the user?",
-       "Is the character in `candidate` a player-controlled or playable character in their source work?",
+       "Is the character in `candidate` playable?", criteria_detail="a player-controlled or playable character in their source work",
        tags_true=["playable"], prior=0.3),
 
     # --- identity ---
@@ -135,11 +151,11 @@ QUESTION_BANK: list[dict[str, Any]] = [
     _q("gender_male", "gender", "Is your character male?",
        "Is the character in `candidate` male?", tags_true=["male"], tags_false=["female"], prior=0.5),
     _q("gender_ambiguous", "gender", "Is your character's gender ambiguous or non-binary?",
-       "Is the character in `candidate` explicitly gender-ambiguous, androgynous, non-binary, or known for crossdressing?",
+       "Is the character in `candidate` androgynous?", criteria_detail="gender-ambiguous, androgynous, non-binary, or known for crossdressing",
        tags_true=["androgynous"], prior=0.06),
 
     _q("species_human", "species", "Is your character human?",
-       "Is the character in `candidate` a normal human being (not a demon, god, robot, alien, beast or spirit)?",
+       "Is the character in `candidate` human?", criteria_detail="a normal human being, not a demon, god, robot, alien, beast or spirit",
        tags_true=["human"], tags_false=["demon", "robot", "alien", "beast", "god"], prior=0.55),
     _q("species_robot", "species", "Is your character a robot, android or AI?",
        "Is the character in `candidate` a robot, android, cyborg or artificial intelligence?",
@@ -151,7 +167,7 @@ QUESTION_BANK: list[dict[str, Any]] = [
        "Is the character in `candidate` a god, goddess, deity or divine being?",
        tags_true=["god", "deity"], prior=0.07),
     _q("species_beast", "species", "Does your character have animal features?",
-       "Does the character in `candidate` have animal ears, a tail, or is an anthropomorphic animal / beastkin?",
+       "Does the character in `candidate` have animal features?", criteria_detail="has animal ears, a tail, or is an anthropomorphic beastkin",
        tags_true=["beast", "kemonomimi", "furry"], prior=0.12),
     _q("species_alien", "species", "Is your character an alien or from another world?",
        "Is the character in `candidate` an alien, extraterrestrial, or a native of another world or dimension?",
@@ -168,10 +184,10 @@ QUESTION_BANK: list[dict[str, Any]] = [
        "Is the character in `candidate` a villain, antagonist or main enemy?",
        tags_true=["antagonist", "villain"], tags_false=["protagonist"], prior=0.22),
     _q("role_antihero", "role", "Is your character an anti-hero?",
-       "Is the character in `candidate` an anti-hero -- morally grey, fighting for good by questionable means?",
+       "Is the character in `candidate` an anti-hero?", criteria_detail="morally grey, fighting for good by questionable means",
        tags_true=["antihero"], prior=0.14),
     _q("role_love_interest", "role", "Is your character a canonical love interest?",
-       "Is the character in `candidate` a canonical romantic partner or love interest of another major character?",
+       "Is the character in `candidate` a canonical love interest?", criteria_detail="a canonical romantic partner or love interest of another major character",
        tags_true=["love-interest", "romance"], prior=0.22),
     _q("role_rival", "role", "Is your character the protagonist's rival?",
        "Is the character in `candidate` a rival or foil to the protagonist?",
@@ -215,7 +231,7 @@ QUESTION_BANK: list[dict[str, Any]] = [
         ("red", "red-eyed", "described as having red or crimson eyes", 0.1),
         ("green", "green-eyed", "described as having green eyes", 0.1),
         ("gold", "gold or amber eyed", "described as having golden, yellow or amber eyes", 0.1),
-        ("heterochromia", "heterochromatic (two eye colours)", "described as having heterochromia -- two different eye colours", 0.03),
+        ("heterochromia", "heterochromatic (two eye colours)", "having two different eye colours", 0.03),
     ], tag_prefix="eyes-"),
 
     # --- appearance: other ---
@@ -248,14 +264,14 @@ QUESTION_BANK: list[dict[str, Any]] = [
     _q("age_adult", "age", "Is your character an adult?",
        "Is the character in `candidate` an adult, 20 years or older?", tags_true=["adult"], prior=0.45),
     _q("age_ancient", "age", "Is your character centuries old?",
-       "Is the character in `candidate` centuries old, immortal, or ageless despite a young appearance?",
+       "Is the character in `candidate` centuries old?", criteria_detail="centuries old, immortal, or ageless despite a young appearance",
        tags_true=["immortal", "ancient"], prior=0.1),
 
     # --- personality archetypes ---
     *_trait_block("pers", "pers", [
-        ("tsundere", "a tsundere", "a tsundere -- harsh or cold on the outside but affectionate underneath", 0.1),
-        ("kuudere", "cold and emotionless", "a kuudere -- cold, blunt and emotionally flat", 0.08),
-        ("yandere", "obsessive and dangerous in love", "a yandere -- obsessively, dangerously devoted to someone", 0.05),
+        ("tsundere", "a tsundere", "a tsundere", 0.1),
+        ("kuudere", "cold and emotionless", "cold, blunt and emotionless", 0.08),
+        ("yandere", "obsessive and dangerous in love", "obsessively and dangerously devoted to someone", 0.05),
         ("dandere", "shy and quiet", "shy, timid or very quiet around others", 0.1),
         ("genki", "energetic and cheerful", "energetic, loud and relentlessly cheerful", 0.16),
         ("stoic", "stoic and serious", "stoic, serious and composed", 0.2),
@@ -294,8 +310,8 @@ QUESTION_BANK: list[dict[str, Any]] = [
         ("sword", "a sword user", "a character whose signature weapon is a sword or blade", 0.25),
         ("gun", "a gun user", "a character whose signature weapon is a gun or firearm", 0.18),
         ("bow", "an archer", "an archer or bow user", 0.05),
-        ("fists", "an unarmed fighter", "a fighter who mainly uses fists, martial arts or hand-to-hand combat", 0.2),
-        ("elemental", "able to control an element", "able to control fire, ice, lightning, water, wind or earth", 0.22),
+        ("fists", "an unarmed fighter", "a hand-to-hand or martial arts fighter", 0.2),
+        ("elemental", "able to control an element", "able to control an element", 0.22),
         ("psychic", "psychic or telepathic", "psychic, telepathic or telekinetic", 0.08),
         ("healer", "a healer or support fighter", "a healer or support-type fighter", 0.1),
         ("transform", "able to transform", "able to transform into a stronger or alternate form", 0.22),
@@ -305,7 +321,7 @@ QUESTION_BANK: list[dict[str, Any]] = [
 
     # --- franchise / meta ---
     _q("fame_famous", "fame", "Is your character world-famous outside their fandom?",
-       "Is the character in `candidate` famous to the general public, recognisable even to people who do not follow the source work?",
+       "Is the character in `candidate` famous to the general public?", criteria_detail="recognisable even to people who do not follow the source work",
        tags_true=["famous", "iconic"], prior=0.2),
     _q("fame_mascot", "fame", "Is your character the mascot or face of their franchise?",
        "Is the character in `candidate` the mascot, cover character or face of their franchise?",
@@ -315,7 +331,7 @@ QUESTION_BANK: list[dict[str, Any]] = [
     _q("era_recent", "era", "Did your character first appear in the last ten years?",
        "Did the character in `candidate` first appear within the last ten years?", tags_true=["modern"], prior=0.35),
     _q("meta_adapted", "meta", "Has your character appeared in more than one medium?",
-       "Has the character in `candidate` appeared in more than one medium -- for example both a game and an anime, or both a comic and a film?",
+       "Has the character in `candidate` appeared in more than one medium?", criteria_detail="appears in more than one medium, for example both a game and an anime",
        tags_true=["multimedia"], prior=0.4),
     _q("meta_live_action", "meta", "Has your character been played by a live-action actor?",
        "Has the character in `candidate` been portrayed by a live-action actor in a film or series?",
@@ -323,7 +339,7 @@ QUESTION_BANK: list[dict[str, Any]] = [
     _q("meta_japanese_origin", "meta", "Is your character from a Japanese work?",
        "Is the source work of the character in `candidate` Japanese?", tags_true=["japanese"], prior=0.65),
     _q("meta_ensemble", "meta", "Is your character part of a large ensemble cast?",
-       "Is the character in `candidate` one of a large ensemble cast rather than one of only a few main characters?",
+       "Is the character in `candidate` part of a large ensemble cast?", criteria_detail="one of a large ensemble cast rather than one of only a few main characters",
        tags_true=["ensemble"], prior=0.35),
 
     # --- setting ---
@@ -331,7 +347,7 @@ QUESTION_BANK: list[dict[str, Any]] = [
        "Is the character in `candidate` set in a fantasy world with magic, swords or mythical creatures?",
        tags_true=["fantasy"], prior=0.35),
     _q("setting_scifi", "setting", "Is your character's world science fiction?",
-       "Is the character in `candidate` set in a science-fiction world with spaceships, cyberpunk tech or a far future?",
+       "Is the character in `candidate` in a science-fiction world?", criteria_detail="a world of spaceships, cyberpunk technology or a far future",
        tags_true=["scifi", "cyberpunk", "mecha"], prior=0.2),
     _q("setting_modern", "setting", "Is your character's story set in the modern real world?",
        "Is the character in `candidate` set in the modern-day real world?", tags_true=["modern-setting"], prior=0.3),

@@ -43,29 +43,43 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/nekomimi/session.py` | `Candidate`, `GuessSession`, log-odds pool, in-process store + TTL |
 | `waifu_engine/nekomimi/engine.py` | The turn loop: `start`, `submit_answer`, `submit_guess_result`, `state_payload` |
 | `waifu_engine/nekomimi_page.py` | Static HTML/JS for `/nekomimi` |
-| `waifu_engine/web_search.py` | DuckDuckGo. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
-| `waifu_engine/sources/` | AniList + Wikipedia first; DuckDuckGo is the long-tail fallback |
+| `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
+| `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
+| `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo fills remaining slots |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
-| `waifu_engine/search.py`, `catalog.py` | Keyword scoring, local catalog (ships empty → always online) |
+| `waifu_engine/search.py`, `catalog.py` | Online shortlist ranking; catalog helpers remain for tooling but runtime never loads the catalog |
 
 ## The turn contract
 
-One turn = **two** batched Laya calls, each a single forward pass:
+1. Establish the medium, then `_pick_question` chooses by mutual information
+   (answer entropy minus within-candidate uncertainty); Laya only answers
+   `ready_to_guess`. Empty searches keep asking until the turn limit.
+2. `score_candidates` records evidence and evaluates **every eligible candidate**
+   with an independent `match` noul call. Never gate evidence on `scoring_pool()`;
+   that top-10 list is only a readiness summary.
+3. Successful probabilities are cached by candidate/question. Replay history for
+   new search results, apply known medium constraints before inference, and
+   rebuild scores from capped popularity priors plus answer log-likelihoods.
+4. Search again after **every answer**, replaying history before the next
+   question/guess. Use compact positive clues and shorter fallback queries;
+   negatives stay in model evidence. Preserve provider relevance before fame.
+   Never seed from `catalog.json`, including in the one-shot mode.
 
-1. `_pick_question` — `next_question` (`choice` over ~8 entropy-prefiltered bank
-   questions) + `ready_to_guess` (`noul`).
-2. `score_candidates` — `match_<i>` (`noul`) for each of ≤10 candidates, folded in as
-   `logodds += ANSWER_WEIGHT[answer] * logit(noul)`.
+The loop does not call `prune()`: soft evidence must remain recoverable. Only
+medium contradictions and rejected guesses eliminate candidates. Heuristic
+fallback probabilities are capped to [0.4, 0.6]; never write predictions into
+candidate tags or feed noisy mined tags to Laya as confirmed identity facts.
+`posterior()` softmaxes these scores. Cost scales with eligible candidates per
+new trait; there is no longer a ten-forward-pass evidence budget.
 
-Then `prune()` drops anything more than `ELIMINATION_MARGIN` (4.0) log-odds behind
-the leader, and `posterior()` softmaxes the survivors.
-
-Answers are **`yes` / `no` / `detail`**. `detail` carries no evidence weight — it
-appends free text to `session.constraints`, which drives the next DuckDuckGo
-refresh.
+Answers are **`yes` / `no` / `detail`**. `detail` does not answer the current
+yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and
+refines search. The initial seed is evaluated the same way.
 
 Guess when any of: top posterior ≥ 0.80 after ≥ 5 questions; `ready_to_guess.noul`
-≥ 0.75 with `act_probability` ≥ 0.6; or turn ≥ `MAX_TURNS`. Up to 3 guesses.
+≥ 0.75 with `act_probability` ≥ 0.6; or turn ≥ `MAX_TURNS`. Early guesses also
+require at least two model judgments with mean answer likelihood ≥ 0.6. A lone
+search hit is not sufficient evidence. Up to 3 guesses.
 
 **Every Laya path has a heuristic fallback** (`_tag_match`, `_split_quality`), so
 the loop plays with no weights installed — less sharply. Never let a Laya failure
@@ -97,7 +111,10 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | Var | Default | Effect |
 |---|---|---|
 | `WAIFU_FORCE_FALLBACK` | `0` | Skip Laya entirely (heuristics only) |
-| `WAIFU_ONLINE_SEARCH` | `1` | Allow DuckDuckGo |
+| `WAIFU_ONLINE_SEARCH` | `1` | Allow online search (Playwright + DuckDuckGo) |
+| `WAIFU_SEARCH_BACKEND` | `auto` | `auto` (Playwright then DDG), `playwright`, or `ddg` |
+| `WAIFU_PLAYWRIGHT_ENRICH` | `1` | Visit character pages to fill blurb/tags/image |
+| `WAIFU_PLAYWRIGHT_ENRICH_LIMIT` | `8` | Max candidates to enrich per search |
 | `WAIFU_SEARCH_ROUNDS` | `3` | Rounds for one-shot determine |
 | `WAIFU_NEKOMINI_MAX_TURNS` | `20` | Hard question cap |
 | `WAIFU_NEKOMINI_MAX_GUESSES` | `3` | Guesses before giving up |
@@ -111,13 +128,14 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 ## Dev
 
 ```bash
-python -m pytest tests -q          # 22 offline tests, no weights, no network
+python -m pytest tests -q          # offline tests, no weights, no network, no Chromium
 python -m waifu_engine.web         # http://127.0.0.1:7860  (+ /nekomimi)
 python -m waifu_engine "silver hair mage" --fallback
 ```
 
 Tests stub `laya_client.ask` and `web_search.search_by_constraints`. Keep them
-offline — do not add a test that downloads weights or hits DuckDuckGo.
+offline — do not add a test that downloads weights, launches Chromium, or hits
+DuckDuckGo.
 
 ## Rules
 
