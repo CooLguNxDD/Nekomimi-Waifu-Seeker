@@ -6,6 +6,8 @@ import logging
 
 import pytest
 
+import time
+
 from waifu_engine import timing
 from waifu_engine.nekomimi import engine, laya_client, session as sess_mod
 
@@ -56,7 +58,9 @@ def test_spans_add_up_and_count_calls(lines):
     def handler():
         for _ in range(3):
             with timing.span("laya.match"):
-                pass
+                time.sleep(0.002)
+        with timing.span("instant"):
+            pass
         timing.note(turn=2)
         return {"ok": True}
 
@@ -66,6 +70,7 @@ def test_spans_add_up_and_count_calls(lines):
     assert out["timing"]["step"] == "demo" and out["timing"]["turn"] == 2
     assert len(lines) == 1 and lines[0].startswith("demo turn=2 total=")
     assert "laya.match" in lines[0] and "/3x" in lines[0]
+    assert "instant" in spans and "instant" not in lines[0]  # sub-ms: payload only
     assert timing.current() is None
 
 
