@@ -39,8 +39,8 @@ MAX_QUERY_CHARS = 120
 
 SYSTEM_PROMPT = (
     "You write web-search queries for finding one fictional character from anime, "
-    "manga, comics or video games. Use only the facts given. Reply with a JSON "
-    "array of at most {n} short search queries and nothing else."
+    "manga, comics, video games, movies or TV series. Use only the facts given. "
+    "Reply with a JSON array of at most {n} short search queries and nothing else."
 )
 
 _THINK = re.compile(r"<think>.*?</think>", re.S | re.I)
@@ -145,17 +145,21 @@ def _call_gemini(facts: tuple[str, ...], medium_hint: str | None, n: int,
 
     Same fixed system prompt and player-facts-only input as the OpenAI path.
     No search tool here, so JSON mode is allowed; thinking is kept minimal
-    because this is a short rewrite, not a reasoning task.
+    because this is a short rewrite, not a reasoning task. Thinking tokens
+    count toward ``max_output_tokens``, so the 256 cap is only safe when the
+    budget is explicitly zero — otherwise the JSON array comes back empty.
     """
     from google.genai import types
 
     body = _request_body(facts, medium_hint, n)
+    thinking = google_config.thinking_config(model_id)
+    zero = thinking is not None and getattr(thinking, "thinking_budget", None) == 0
     config = types.GenerateContentConfig(
         system_instruction=body["messages"][0]["content"],
         temperature=0,
-        max_output_tokens=256,
+        max_output_tokens=256 if zero else 2048,
         response_mime_type="application/json",
-        thinking_config=google_config.thinking_config(model_id),
+        thinking_config=thinking,
     )
     t0 = time.perf_counter()
     try:

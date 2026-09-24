@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import time
 from typing import Any
 
@@ -47,6 +48,7 @@ PROMPT = (
 
 _FENCE = re.compile(r"```(?:json)?", re.I)
 _CACHE: dict[tuple, tuple[float, list[dict[str, Any]]]] = {}
+_CACHE_LOCK = threading.Lock()
 CACHE_TTL = 900
 
 
@@ -88,18 +90,25 @@ def parse_characters(text: str, n: int) -> list[dict[str, str]]:
     """Pull a JSON array of character objects out of a model reply.
 
     Grounded replies cannot use JSON mode, so the array is located in free
-    text (code fences and prose around it are ignored). Anything that is not a
-    well-formed object with a name is dropped; strings are length-capped.
+    text (code fences and prose around it are ignored). The first ``[`` is
+    often prose ("[up to 5]"), and decoding only there returned nothing for
+    a billed call that was then cached. Anything that is not a well-formed
+    object with a name is dropped; strings are length-capped.
     """
     text = _FENCE.sub("", text or "")
+    decoder = json.JSONDecoder()
+    items = None
     start = text.find("[")
-    if start < 0:
-        return []
-    try:
-        items, _ = json.JSONDecoder().raw_decode(text[start:])
-    except ValueError:
-        return []
-    if not isinstance(items, list):
+    while start >= 0:
+        try:
+            got, _ = decoder.raw_decode(text[start:])
+        except ValueError:
+            got = None
+        if isinstance(got, list) and any(isinstance(i, dict) for i in got):
+            items = got
+            break
+        start = text.find("[", start + 1)
+    if items is None:
         return []
     out: list[dict[str, str]] = []
     for item in items:
@@ -170,14 +179,17 @@ def search_characters(
 
     Results are cached for ``CACHE_TTL`` seconds per (facts, medium, limit):
     a grounded call costs seconds and money, and the same facts recur across
-    turns and sessions.
+    turns and sessions. The cache is locked: this runs on the request thread
+    and on the background worker, and an unlocked eviction raised out of the
+    call and left the worker's queue slot pending.
     """
     from .. import web_search
 
     if not enabled():
         return []
     key = (tuple(f.strip() for f in facts if f and f.strip()), medium_hint, limit, model())
-    hit = _CACHE.get(key)
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
     if hit and time.time() - hit[0] < CACHE_TTL:
         return [dict(c) for c in hit[1]]
     try:
@@ -197,9 +209,10 @@ def search_characters(
     out = [_to_candidate(i, sources) for i in items]
     if searched:
         web_search._LAST_SEARCH.setdefault("gemini_queries", []).extend(searched[:5])
-    if len(_CACHE) > 256:
-        _CACHE.pop(next(iter(_CACHE)))
-    _CACHE[key] = (time.time(), out)
+    with _CACHE_LOCK:
+        if len(_CACHE) > 256:
+            _CACHE.pop(next(iter(_CACHE)), None)
+        _CACHE[key] = (time.time(), out)
     return [dict(c) for c in out]
 
 
@@ -211,4 +224,5 @@ def status() -> dict[str, Any]:
 def clear() -> None:
     """Forget the shared client and cached results (tests)."""
     google_config.clear()
-    _CACHE.clear()
+    with _CACHE_LOCK:
+        _CACHE.clear()

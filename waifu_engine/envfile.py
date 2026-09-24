@@ -21,7 +21,9 @@ def parse(text: str) -> dict[str, str]:
 
     Blank lines and ``#`` comments are skipped, an ``export`` prefix is
     allowed, and a value in matching single or double quotes is taken
-    verbatim; an unquoted value ends at `` #``.
+    verbatim, including when a `` #`` comment follows the closing quote.
+    An unquoted value ends at `` #``. Matching the first and last character
+    left the quotes on ``KEY="abc"  # note``, and the key was sent quoted.
     """
     out: dict[str, str] = {}
     for raw in text.splitlines():
@@ -31,8 +33,9 @@ def parse(text: str) -> dict[str, str]:
         if not m:
             continue
         key, value = m.group(1), m.group(2)
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
+        quoted = re.match(r"""^(['"])(.*?)\1(?:\s+#.*)?$""", value)
+        if quoted:
+            value = quoted.group(2)
         else:
             value = value.split(" #", 1)[0].strip()
         out[key] = value

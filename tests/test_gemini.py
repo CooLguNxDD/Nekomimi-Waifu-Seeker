@@ -97,6 +97,15 @@ def test_bad_replies_yield_nothing(fake, text):
     assert gemini.search_characters(["x"]) == []
 
 
+def test_prose_bracket_before_the_array_is_skipped():
+    text = (
+        'Here are [up to 5] matches: [{"name": "Ripley", "series": "Alien", '
+        '"medium": "movie", "description": "Warrant officer."}]'
+    )
+    got = gemini.parse_characters(text, 5)
+    assert [c["name"] for c in got] == ["Ripley"]
+
+
 def test_failures_are_recorded_not_raised(fake):
     fake.fail = RuntimeError("429 RESOURCE_EXHAUSTED")
     errors = []

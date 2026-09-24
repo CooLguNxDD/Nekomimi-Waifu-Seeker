@@ -117,7 +117,15 @@ def test_gemini_llm_rewrites_typed_text_with_the_selected_model(gemini_llm, monk
     assert "JSON array" in cfg.system_instruction
     assert cfg.response_mime_type == "application/json"
     assert cfg.thinking_config.thinking_budget == 0
+    assert cfg.max_output_tokens == 256  # zero budget: the reply is the whole cap
+    assert "movies" in cfg.system_instruction and "TV series" in cfg.system_instruction
     assert cfg.tools is None  # no search tool: this call only writes queries
+
+
+def test_gemini_llm_leaves_room_for_thinking_tokens(gemini_llm, monkeypatch):
+    monkeypatch.setenv("WAIFU_GEMINI_LLM_MODEL", "gemini-3-flash")
+    query_llm.rewrite(["pilots a mech"], "movie")
+    assert gemini_llm.calls[0]["config"].max_output_tokens == 2048
 
 
 def test_gemini_llm_runs_through_the_same_background_prefetch(gemini_llm):
@@ -153,12 +161,14 @@ GOOGLE_API_KEY=abc123  # trailing comment
 export WAIFU_GEMINI_SEARCH=1
 WAIFU_GEMINI_MODEL="gemini-2.5-flash"
 QUOTED='keep # this'
+GOOGLE_API_KEY_QUOTED="abc123"  # prod key
 not a line
 EMPTY=
 """
     assert envfile.parse(text) == {
         "GOOGLE_API_KEY": "abc123", "WAIFU_GEMINI_SEARCH": "1",
-        "WAIFU_GEMINI_MODEL": "gemini-2.5-flash", "QUOTED": "keep # this", "EMPTY": ""}
+        "WAIFU_GEMINI_MODEL": "gemini-2.5-flash", "QUOTED": "keep # this",
+        "GOOGLE_API_KEY_QUOTED": "abc123", "EMPTY": ""}
 
 
 def test_env_file_fills_only_unset_variables(tmp_path, monkeypatch):

@@ -65,7 +65,6 @@ MEDIUM_DOMAIN_HINTS: tuple[tuple[str, str], ...] = (
     ("dc.fandom.com", "comic"),
     ("marvel.com", "comic"),
     ("dc.com", "comic"),
-    ("imdb.com", "movie"),
 )
 
 MEDIUM_TEXT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -283,13 +282,21 @@ def _clean_name(title: str) -> str:
 
 
 def _guess_medium(title: str, href: str, body: str) -> str:
+    """Medium implied by a search hit, or ``unknown``.
+
+    A domain that hosts one medium wins. IMDb hosts film and television, so
+    it is not in that map: labeling every IMDb hit a movie scored TV
+    characters at 0.16 on a TV answer. Markers are whole words, the same
+    rule as trait slugs — ``film`` matched ``filmed`` and ``hbo`` matched
+    ``neighbor``, and a mislabeled candidate was then eliminated.
+    """
     low_href = (href or "").lower()
     for domain, medium in MEDIUM_DOMAIN_HINTS:
         if domain in low_href:
             return medium
     low = f"{title} {body}".lower()
     for medium, markers in MEDIUM_TEXT_HINTS:
-        if any(m in low for m in markers):
+        if any(_marker_re(m).search(low) for m in markers):
             return medium
     return "unknown"
 

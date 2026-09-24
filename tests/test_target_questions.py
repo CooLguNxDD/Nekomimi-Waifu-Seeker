@@ -130,6 +130,12 @@ def test_film_and_tv_pages_are_classified():
                                  "Category:Television characters"], "") == "anime"
     assert web_search._guess_medium("Walter White", "", "a character in the TV series") == "tv"
     assert web_search._guess_medium("Rem", "", "Re:Zero anime TV series") == "anime"
+    # IMDb hosts television; the domain alone is not a movie.
+    assert web_search._guess_medium(
+        "Jesse Pinkman", "https://www.imdb.com/title/tt0903747/", "Breaking Bad (TV Series)") == "tv"
+    assert web_search._guess_medium("Someone", "https://www.imdb.com/name/nm1/", "a biography") == "unknown"
+    # Substring hits used to tag these movie/tv and then eliminate them.
+    assert web_search._guess_medium("Neighbor", "", "the neighbourhood was filmed") == "unknown"
 
 
 # --- series ---------------------------------------------------------------
@@ -137,6 +143,11 @@ def test_film_and_tv_pages_are_classified():
 
 def test_series_keys():
     assert series_key("Blue Archive (video game)") == series_key("blue archive") == "bluearchive"
+    assert series_key("The Office (TV series)") == "office"
+    american = series_key("The Office (American TV series)")
+    british = series_key("The Office (British TV series)")
+    assert american != british and american and british
+    assert not same_series("The Office (American TV series)", "The Office (British TV series)")
     assert series_key("Web result") == series_key("") == ""
     assert same_series("Re:Zero", "Re:Zero - Starting Life in Another World")
     assert not same_series("Fate", "Fate/Grand Order")  # too short to prefix-match

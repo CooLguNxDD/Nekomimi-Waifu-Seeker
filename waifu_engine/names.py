@@ -39,15 +39,25 @@ def same_character(a: str, b: str) -> bool:
 # Placeholders sources use when they could not tell the series.
 _NO_SERIES = {"", "webresult", "unknown", "none"}
 
+# A trailing note that only names the medium, not a different work.
+# "The Office (American TV series)" and "(British TV series)" must stay apart.
+_MEDIUM_NOTE = re.compile(
+    r"\s*\((?:video game|game|anime|manga|comic|comics|film|movie|"
+    r"tv series|television series|visual novel)\)\s*$",
+    re.I,
+)
+
 
 def series_key(series: str) -> str:
     """Comparable form of a series name, or "" when the series is unknown.
 
-    Letters and digits only, lower-cased, with a trailing parenthetical and a
-    leading "The" dropped: "Blue Archive (video game)" and "blue archive"
-    both give "bluearchive".
+    Letters and digits only, lower-cased, with a leading "The" dropped and a
+    trailing parenthetical dropped only when it names the medium: "Blue
+    Archive (video game)" and "blue archive" both give "bluearchive". A
+    qualifier that distinguishes two works stays, so the American and British
+    Office do not collapse into one series question option.
     """
-    s = re.sub(r"\s*\([^)]*\)\s*$", "", series or "").strip()
+    s = _MEDIUM_NOTE.sub("", series or "").strip()
     s = re.sub(r"^the\s+", "", s, flags=re.I)
     key = "".join(ch for ch in s.lower() if ch.isalnum())
     return "" if key in _NO_SERIES else key
