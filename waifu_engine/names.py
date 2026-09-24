@@ -5,24 +5,56 @@ wikis give "Shimoe Koharu" (family name first), while English wikis and
 Gemini give "Koharu Shimoe". Compared letter by letter they differ, and one
 character ended up in the pool twice, splitting her own probability (73% and
 9% for the same person).
+
+A second split is the titled form. Wikipedia stores "Link" after dropping a
+disambiguation parenthetical; Fandom and other HTML indexes keep
+"Link (The Legend of Zelda)". Those rows used to share no key, so the
+posterior was cut in half and neither side reached the guess threshold.
+"Young Link" and "Toon Link" are different people: the qualifier is part of
+the name, not a trailing title, and it must stay distinct.
 """
 
 from __future__ import annotations
 
 import re
+from typing import Iterable
 
 # Word separators between name parts: whitespace, the Japanese middle dot and
 # full-width space, commas ("Shimoe, Koharu").
 _WORDS = re.compile(r"[\s・･·,　]+")
+# One trailing "(...)" note. Applied repeatedly so "(video game)" after a
+# series title peels off too. A note in the middle of the name is left alone.
+_TRAILING_PAREN = re.compile(r"^(?P<base>.*\S)\s*\((?P<note>[^)]*)\)\s*$")
 
 
-def name_keys(name: str) -> frozenset[str]:
-    """Keys under which two spellings of one character's name are equal.
+def _split_disambiguation(name: str) -> tuple[str, str]:
+    """Return ``(base name, distinguishing title note)``.
 
-    Two keys: the letters and digits in order ("spiderman" for "Spider-Man"
-    and "Spider Man"), and the name's words sorted ("koharushimoe" for either
-    order of "Koharu Shimoe"). Names match when any key is shared. Empty for
-    a name with no letters.
+    Medium-only notes ("anime", "video game") are discarded: they do not
+    name a different person. The first remaining trailing note is the work
+    title ("The Legend of Zelda"). "Young Link" has no parenthetical, so the
+    whole string stays the base and does not collapse into "Link".
+    """
+    base = (name or "").strip()
+    while True:
+        match = _TRAILING_PAREN.match(base)
+        if not match:
+            return base, ""
+        nxt = match.group("base").strip()
+        if not nxt:
+            return base, ""
+        base = nxt
+        note = match.group("note").strip()
+        if note and not _MEDIUM_NOTE.fullmatch(f"({note})"):
+            return base, note
+
+
+def _keys(name: str) -> frozenset[str]:
+    """Letter keys of a base name whose title note is already removed.
+
+    Two keys: letters in order ("spiderman") and words sorted
+    ("koharushimoe"), so either word order shares one. Empty when ``name``
+    has no letters.
     """
     words = [w for w in ("".join(ch for ch in part.lower() if ch.isalnum())
                          for part in _WORDS.split(name or "")) if w]
@@ -31,9 +63,46 @@ def name_keys(name: str) -> frozenset[str]:
     return frozenset({"".join(words), "".join(sorted(words))})
 
 
+def name_keys(name: str) -> frozenset[str]:
+    """Keys under which two spellings of one character's name are equal.
+
+    A trailing parenthetical is stripped first, so "Link" and
+    "Link (The Legend of Zelda)" share keys. Two different titles also share
+    the bare key ("Aqua (Kingdom Hearts)" and "Aqua (KonoSuba)");
+    ``same_character`` is what keeps those people apart. Empty for a name
+    with no letters.
+    """
+    base, _note = _split_disambiguation(name)
+    return _keys(base)
+
+
 def same_character(a: str, b: str) -> bool:
-    """Whether two names are spellings of one character (see ``name_keys``)."""
-    return bool(name_keys(a) & name_keys(b))
+    """Whether two names are one character.
+
+    Word order does not matter, and a bare name matches a titled form of
+    that same base. Both sides carrying different work titles do not match:
+    key intersection alone would merge every "Aqua (work)". A qualifier in
+    the name itself ("Young Link", "Toon Link") stays a different base.
+    """
+    base_a, note_a = _split_disambiguation(a)
+    base_b, note_b = _split_disambiguation(b)
+    if not (_keys(base_a) & _keys(base_b)):
+        return False
+    key_a, key_b = series_key(note_a), series_key(note_b)
+    if key_a and key_b and key_a != key_b:
+        return False
+    return True
+
+
+def already_seen(name: str, seen: Iterable[str]) -> bool:
+    """Whether ``name`` is the same character as any name in ``seen``.
+
+    Intersecting ``name_keys`` merges every titled form that shares a bare
+    name, including two different people. Pairwise ``same_character`` does
+    not: "Link" absorbs "Link (The Legend of Zelda)", and
+    "Aqua (Kingdom Hearts)" does not absorb "Aqua (KonoSuba)".
+    """
+    return any(same_character(name, other) for other in seen)
 
 
 # Placeholders sources use when they could not tell the series.

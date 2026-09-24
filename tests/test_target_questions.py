@@ -90,7 +90,9 @@ def test_shared_medium_lets_series_outrank_medium():
     ("movie", {"ripley", "buffy", "mystery"}),        # film and TV franchises cross over
     ("tv", {"ripley", "buffy", "mystery"}),
     ("anime", {"makima", "mystery"}),
-    ("other", {"mystery"}),                              # every known medium is ruled out
+    # "Something else" is not a hard filter. Wiping every known medium left
+    # only unknowns and the next unconstrained search drifted.
+    ("other", {"koharu", "hifumi", "klee", "ripley", "buffy", "makima", "mystery"}),
 ])
 def test_a_medium_pick_removes_known_other_media_but_never_unknowns(pick, alive):
     s = _session()

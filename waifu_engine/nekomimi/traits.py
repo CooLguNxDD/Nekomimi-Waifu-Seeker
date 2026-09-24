@@ -168,7 +168,11 @@ MEDIUM_VALUES = ("anime", "manga", "comic", "game", "movie", "tv")
 # Which candidate media each option of the "medium" question accepts. A pick
 # is a hard fact: candidates of a known, non-accepted medium are removed.
 # Movie and TV accept each other because franchises cross between them (Star
-# Wars); only soft evidence separates those two. "other" accepts no known medium.
+# Wars); only soft evidence separates those two. "other" ("Something else")
+# is an empty set on purpose: a known medium must not count as a crossover
+# onto that option. It is not a list of allowed media. ``_eliminate_by_medium``
+# treats an empty set as "no hard filter" — wiping every known medium used to
+# leave only unknowns and the next search drifted off the right character.
 MEDIUM_ACCEPTS: dict[str, frozenset[str]] = {
     "anime": frozenset({"anime", "manga"}),
     "game": frozenset({"game"}),

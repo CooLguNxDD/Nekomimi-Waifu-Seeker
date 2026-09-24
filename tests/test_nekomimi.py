@@ -675,6 +675,55 @@ def test_choice_support_gates_early_guess():
     assert engine._should_guess(s, None)
 
 
+def _support(s: GuessSession, leader_id: str) -> None:
+    """Two model judgments that clear the early-guess support bar."""
+    for qid, p in (("gender_female", 0.9), ("age_adult", 0.8)):
+        q = traits.QUESTIONS_BY_ID[qid]
+        s.evidence[qid] = (q, "yes")
+        s.match_cache[(leader_id, qid)] = p
+
+
+def test_a_stable_leader_guesses_below_the_confidence_bar():
+    """A crowded pool stalls a correct leader under 0.80. Two checks of a clear lead commit."""
+    s = sess_mod.new_session()
+    s.add_candidates([
+        {"id": "lead", "name": "Mikasa Ackerman"},
+        {"id": "b", "name": "Armin Arlert"},
+        {"id": "c", "name": "Eren Yeager"},
+        {"id": "d", "name": "Levi Ackerman"},
+    ])
+    s.by_id("lead").logodds = 2.2
+    s.by_id("b").logodds = 0.2
+    s.by_id("c").logodds = 0.1
+    _support(s, "lead")
+    s.turn = 6
+    ranked = s.posterior()
+    assert ranked[0][0].id == "lead"
+    assert engine.LEADER_POSTERIOR <= ranked[0][1] < engine.GUESS_CONFIDENCE
+    assert ranked[0][1] - ranked[1][1] >= engine.LEADER_MARGIN
+    assert not engine._should_guess(s, None)  # streak 1: a one-check spike waits
+    assert engine._should_guess(s, None)      # streak 2: the lead held
+
+
+def test_a_close_leader_does_not_guess_early():
+    s = sess_mod.new_session()
+    s.add_candidates([
+        {"id": "a", "name": "Asuka Langley"},
+        {"id": "b", "name": "Rei Ayanami"},
+        {"id": "c", "name": "Shinji Ikari"},
+        {"id": "d", "name": "Misato Katsuragi"},
+    ])
+    s.by_id("a").logodds = 1.0
+    s.by_id("b").logodds = 0.85
+    _support(s, "a")
+    s.turn = 8
+    ranked = s.posterior()
+    assert ranked[0][1] < engine.GUESS_CONFIDENCE
+    assert ranked[0][1] - ranked[1][1] < engine.LEADER_MARGIN
+    assert not engine._should_guess(s, None)
+    assert not engine._should_guess(s, None)
+
+
 def test_mined_colour_slugs_do_not_become_dynamic_questions():
     s = sess_mod.new_session()
     s.add_candidates([{"id": str(i), "name": f"C{i}", "blurb": "she has blue hair"}
