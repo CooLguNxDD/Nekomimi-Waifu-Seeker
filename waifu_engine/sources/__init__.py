@@ -274,24 +274,6 @@ def popular_characters(medium_hint: str | None, n: int) -> list[dict[str, Any]]:
     return out
 
 
-def _anilist_as_game(cand: dict[str, Any]) -> dict[str, Any]:
-    """Return ``cand`` labeled as a game.
-
-    AniList's non-manga bucket is anime, which is where a gacha character
-    with an anime adaptation is filed. The player already said game, so
-    leaving the label as anime would delete the hit on the medium question.
-    """
-    if cand.get("medium") not in (None, "", "anime", "unknown"):
-        return cand
-    out = dict(cand)
-    out["medium"] = "game"
-    tags = list(out.get("tags") or [])
-    if "game" not in tags:
-        tags.append("game")
-    out["tags"] = tags
-    return out
-
-
 def _trait_clue(facts: list[str]) -> str:
     """Visual phrases named across ``facts``, or "" when there is no combination.
 
@@ -445,19 +427,18 @@ def find_candidates(
             except Exception as exc:  # noqa: BLE001
                 web_search._note_error(f"wikipedia: {exc}")
 
-    # AniList adds gender, popularity and a real description. Game characters
-    # are filed under the anime adaptation, so a game hint used to skip the
-    # source entirely and a trait seed never saw Blue Archive students.
+    # AniList adds gender, popularity and a real description. It is queried
+    # for games too: a game hint used to skip it, so a name search never saw
+    # characters AniList files under an anime adaptation. The medium AniList
+    # reports is kept. Rewriting every anime row to "game" let unrelated
+    # anime characters survive the hard medium filter.
     with timing.span("fetch.anilist"):
         if specific and medium_hint in (None, "anime", "manga", "game") and len(found) < limit:
             for q in queries:
                 if len(found) >= limit:
                     break
                 try:
-                    anilist_hits = anilist.search_characters(q, limit=limit)
-                    if medium_hint == "game":
-                        anilist_hits = [_anilist_as_game(c) for c in anilist_hits]
-                    take(anilist_hits, "anilist")
+                    take(anilist.search_characters(q, limit=limit), "anilist")
                 except Exception as exc:  # noqa: BLE001
                     web_search._note_error(f"anilist: {exc}")
 

@@ -207,7 +207,7 @@ def test_broad_facts_skip_name_search_and_use_the_popular_pool(monkeypatch, quie
     assert called == []  # no name search, and no inline DuckDuckGo for broad traits
 
 
-def test_anilist_runs_for_a_game_and_keeps_the_game_medium(monkeypatch, quiet_sources):
+def test_anilist_runs_for_a_game_without_relabeling_anime(monkeypatch, quiet_sources):
     called = []
 
     def search(query, limit):
@@ -222,8 +222,8 @@ def test_anilist_runs_for_a_game_and_keeps_the_game_medium(monkeypatch, quiet_so
                                   limit=5, use_ddg=False)
     assert called
     mika = next(c for c in out if c["name"] == "Mika Misono")
-    assert mika["medium"] == "game"
-    assert "game" in mika["tags"]
+    assert mika["medium"] == "anime"
+    assert "game" not in mika["tags"]
 
 
 def test_popular_pool_stops_growing_at_its_cap(monkeypatch, quiet_sources):

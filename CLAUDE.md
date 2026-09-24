@@ -141,8 +141,8 @@ the pool already has a candidate who shows the seed's visual traits, and
 inline when the pool is empty or the only hits are junk (a Wikipedia page
 that merely shares a word with the seed, or a name in `exclude_names` that
 does not show the combination). Results are cached 15 min per facts. With no
-facts it is skipped (billed calls). AniList also runs for `medium=game`;
-those hits are labeled game, because AniList files them under the anime.
+facts it is skipped (billed calls). AniList also runs for `medium=game`.
+The medium it reports is kept: a game hint does not relabel anime rows.
 
 Answers to yes/no questions are **`yes` / `no` / `detail`**. `detail` does not answer the current
 yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and

@@ -130,6 +130,7 @@ def test_body_wings_are_not_a_wing_shaped_halo():
     assert not traits.has_body_wings(HANAE)
     assert not traits.has_body_wings(HANAKO)
     assert traits.has_body_wings("She has large white wings on her back.")
+    assert traits.has_body_wings("She has a halo and broad white wings on her back.")
     assert not traits.has_body_wings("Her halo has small white wings around a ring.")
     assert "wings" in web_search.mine_trait_slugs(MIKA)
     assert "wings" not in web_search.mine_trait_slugs(HANAE)
@@ -207,6 +208,21 @@ def test_initial_trait_seed_asks_for_inline_gemini(monkeypatch):
     seen.clear()
     engine.refresh_candidates(s)
     assert seen[0]["gemini_inline"] is False
+
+
+def test_a_negated_trait_is_required_to_be_absent():
+    mika = traits.clue_likelihood("pink hair and no wings", MIKA, ["pink"])
+    koharu = traits.clue_likelihood("pink hair and no wings", KOHARU, ["pink"])
+    assert mika is not None and mika < 0.2
+    assert koharu is not None and koharu >= 0.9
+    assert traits.clue_likelihood("without a halo", HANAKO, ["halo"]) <= 0.22
+    plain = (
+        "She has long black hair and dark eyes, and she wears a school uniform "
+        "with a ribbon. Her outfit is described down to the shoes and the bag."
+    )
+    assert traits.clue_likelihood("without a halo", plain, []) >= 0.8
+    assert traits.clue_likelihood(SEED, MIKA, ["pink"]) >= 0.9
+    assert traits.visual_search_phrases("pink hair and no wings") == ["pink hair"]
 
 
 def test_seed_plus_signs_become_search_words():

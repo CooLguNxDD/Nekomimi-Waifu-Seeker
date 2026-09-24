@@ -231,11 +231,22 @@ _WINGS_NEG = re.compile(
 )
 # Colour and size words are not enough: "small wings" in a halo sentence is
 # still the halo. Angel, feathered, a pair, or wings on the back are the body.
+# The back qualifier is matched in either order: "on her back are wings" and
+# "wings on her back". The second used to miss, and a halo in that same
+# sentence then classified real wings as decoration.
 _BODY_WING = re.compile(
     r"\b(?:angel|feathered|feather|bat|bird|fairy|dragon|demon|insect)\s+wings\b"
     r"|\bpair of\b(?:\W+\w+){0,4}\W+\bwings\b"
     r"|\bwings\b(?:\W+\w+){0,6}\W+\b(?:sprout|sprouting|grow|growing)\b"
-    r"|\bon (?:her|his|their) back\b(?:\W+\w+){0,8}\W+\bwings\b",
+    r"|\bon (?:her|his|their) back\b(?:\W+\w+){0,8}\W+\bwings\b"
+    r"|\bwings\b(?:\W+\w+){0,6}\W+\bon (?:her|his|their) back\b",
+    re.I,
+)
+# A few words in front of a player phrase. "no wings" / "without a halo" must
+# not be read as a request for that trait.
+_CLUE_NEG = re.compile(
+    r"\b(?:no|not|without|lacking|lacks|lack|doesn't|does\s+not|isn't|is\s+not|don't)\b"
+    r"(?:\W+\w+){0,3}\W*$",
     re.I,
 )
 _HALO_DECOR = re.compile(r"\b(?:halo|halos|winged halo|heart with wings)\b", re.I)
@@ -311,10 +322,34 @@ def _trait_observed(slug: str, blurb: str, tags: set[str]) -> bool | None:
     return False
 
 
-def _clue_slugs(text: str) -> list[str]:
-    """Visual trait slugs named in player text, in table order."""
+def _negated_before(text: str, start: int) -> bool:
+    """Whether the words just before ``start`` negate the phrase that begins there."""
+    window = text[max(0, start - 48):start]
+    return bool(_CLUE_NEG.search(window))
+
+
+def _visual_mentions(text: str) -> list[tuple[str, str, bool]]:
+    """``(slug, search phrase, negated)`` for each visual trait named in ``text``.
+
+    Negation is part of the clue. "pink hair and no wings" names both traits,
+    and the wings half is a request that the profile lack them.
+    """
     raw = text or ""
-    return [slug for slug, pattern, _search in _VISUAL_PHRASES if pattern.search(raw)]
+    found = []
+    for slug, pattern, search in _VISUAL_PHRASES:
+        match = pattern.search(raw)
+        if match:
+            found.append((slug, search, _negated_before(raw, match.start())))
+    return found
+
+
+def _clue_requirements(text: str) -> list[tuple[str, bool]]:
+    """``(slug, wanted)`` for player text. ``wanted`` is False when they negated it.
+
+    "no wings" is a requirement that the profile lack wings, not a request
+    for them. Scoring the word as a positive trait reversed the clue.
+    """
+    return [(slug, not negated) for slug, _search, negated in _visual_mentions(text)]
 
 
 # Seed phrases that should pull a bank question forward. Hair colour is one
@@ -335,13 +370,13 @@ def appearance_question_ids(text: str) -> list[str]:
 
 
 def visual_search_phrases(text: str) -> list[str]:
-    """Search words for the visual traits named in ``text``.
+    """Search words for the visual traits the player asked for.
 
     Kept beside a confirmed series so "Blue Archive" is not searched alone
-    after the player already said pink hair, a halo and wings.
+    after the player already said pink hair, a halo and wings. A negated
+    trait is left out: search engines treat "no wings" as a search for wings.
     """
-    raw = text or ""
-    return [search for _slug, pattern, search in _VISUAL_PHRASES if pattern.search(raw)]
+    return [search for _slug, search, negated in _visual_mentions(text) if not negated]
 
 
 def mined_visual_slugs(text: str) -> list[str]:
@@ -364,21 +399,25 @@ def clue_likelihood(clues: str, blurb: str, tags: list[str] | set[str] | None = 
     more than a fame prior (about 1.3 log-odds) or the popular lookalike wins.
     A profile that never describes appearance returns None so the noul stands.
     """
-    slugs = _clue_slugs(clues)
-    if not slugs:
+    reqs = _clue_requirements(clues)
+    if not reqs:
         return None
     have = set(tags or ())
-    statuses = [_trait_observed(slug, blurb, have) for slug in slugs]
+    statuses: list[bool | None] = []
+    for slug, wanted in reqs:
+        observed = _trait_observed(slug, blurb, have)
+        # None stays unknown. A negated trait matches when the profile lacks it.
+        statuses.append(None if observed is None else observed == wanted)
     if not any(status is not None for status in statuses):
         return None
     hits = sum(status is True for status in statuses)
     misses = sum(status is False for status in statuses)
-    if misses == 0 and hits == len(slugs):
-        return 0.96 if len(slugs) >= 2 else 0.86
+    if misses == 0 and hits == len(reqs):
+        return 0.96 if len(reqs) >= 2 else 0.86
     if misses == 0:
         return None
-    if len(slugs) >= 2:
-        return 0.04 + 0.10 * (hits / len(slugs))
+    if len(reqs) >= 2:
+        return 0.04 + 0.10 * (hits / len(reqs))
     return 0.22
 
 
