@@ -705,6 +705,33 @@ def test_a_stable_leader_guesses_below_the_confidence_bar():
     assert engine._should_guess(s, None)      # streak 2: the lead held
 
 
+def test_a_weak_lead_does_not_fill_the_streak():
+    """Narrow tops must not pre-fill the streak, so the first wide lead still waits."""
+    s = sess_mod.new_session()
+    s.add_candidates([
+        {"id": "lead", "name": "Mikasa Ackerman"},
+        {"id": "b", "name": "Armin Arlert"},
+        {"id": "c", "name": "Eren Yeager"},
+        {"id": "d", "name": "Levi Ackerman"},
+    ])
+    s.by_id("lead").logodds = 1.0
+    s.by_id("b").logodds = 0.85
+    _support(s, "lead")
+    s.turn = 8
+    for _ in range(3):
+        assert not engine._should_guess(s, None)
+    assert s.leader_streak == 0
+    s.by_id("lead").logodds = 2.2
+    s.by_id("b").logodds = 0.2
+    s.by_id("c").logodds = 0.1
+    ranked = s.posterior()
+    assert ranked[0][1] >= engine.LEADER_POSTERIOR
+    assert ranked[0][1] - ranked[1][1] >= engine.LEADER_MARGIN
+    assert ranked[0][1] < engine.GUESS_CONFIDENCE
+    assert not engine._should_guess(s, None)
+    assert s.leader_streak == 1
+
+
 def test_a_close_leader_does_not_guess_early():
     s = sess_mod.new_session()
     s.add_candidates([

@@ -991,18 +991,19 @@ def _leader_support(sess: GuessSession, leader: Candidate) -> list[float]:
     return support
 
 
-def _note_leader(sess: GuessSession, leader_id: str) -> None:
-    """Count how many checks in a row ``leader_id`` has topped the posterior.
+def _note_leader(sess: GuessSession, leader_id: str, qualifies: bool) -> None:
+    """Count consecutive checks where ``leader_id`` clears the stable-guess bar.
 
-    A one-answer spike must not become a guess. The streak is what lets a
-    leader who is stuck under ``GUESS_CONFIDENCE`` commit once the lead has
-    held, which is the crowded empty-seed case.
+    The streak used to grow whenever someone merely topped the pool. Weak
+    checks then filled ``LEADER_STREAK``, and the first later spike above
+    ``LEADER_POSTERIOR`` and ``LEADER_MARGIN`` guessed immediately. It grows
+    only while both thresholds hold, and resets when either fails.
     """
-    if sess.leader_id == leader_id:
+    if qualifies and sess.leader_id == leader_id:
         sess.leader_streak += 1
-    else:
-        sess.leader_id = leader_id
-        sess.leader_streak = 1
+        return
+    sess.leader_id = leader_id
+    sess.leader_streak = 1 if qualifies else 0
 
 
 def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bool:
@@ -1021,7 +1022,13 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
     if not ranked:
         return sess.turn >= MAX_TURNS
     leader, top_p = ranked[0]
-    _note_leader(sess, leader.id)
+    second = ranked[1][1] if len(ranked) > 1 else 0.0
+    # Count this check toward the stable-leader streak only when the lead is
+    # already wide enough to guess. A string of narrow tops must not pre-fill it.
+    _note_leader(
+        sess, leader.id,
+        top_p >= LEADER_POSTERIOR and top_p - second >= LEADER_MARGIN,
+    )
     if sess.turn >= MAX_TURNS:
         return True
     # The posterior is conditional on what search happened to find. A lone hit
@@ -1034,7 +1041,6 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
         return False
     if top_p >= GUESS_CONFIDENCE:
         return True
-    second = ranked[1][1] if len(ranked) > 1 else 0.0
     if (top_p >= LEADER_POSTERIOR and top_p - second >= LEADER_MARGIN
             and sess.leader_streak >= max(1, LEADER_STREAK)):
         return True

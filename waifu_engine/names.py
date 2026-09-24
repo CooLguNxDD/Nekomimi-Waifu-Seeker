@@ -81,15 +81,17 @@ def same_character(a: str, b: str) -> bool:
 
     Word order does not matter, and a bare name matches a titled form of
     that same base. Both sides carrying different work titles do not match:
-    key intersection alone would merge every "Aqua (work)". A qualifier in
-    the name itself ("Young Link", "Toon Link") stays a different base.
+    key intersection alone would merge every "Aqua (work)". Equivalent
+    titles do match, via ``same_series_key`` ("Re:Zero" and its full name).
+    A qualifier in the name itself ("Young Link", "Toon Link") stays a
+    different base.
     """
     base_a, note_a = _split_disambiguation(a)
     base_b, note_b = _split_disambiguation(b)
     if not (_keys(base_a) & _keys(base_b)):
         return False
     key_a, key_b = series_key(note_a), series_key(note_b)
-    if key_a and key_b and key_a != key_b:
+    if key_a and key_b and not same_series_key(key_a, key_b):
         return False
     return True
 

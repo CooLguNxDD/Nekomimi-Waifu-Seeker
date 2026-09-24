@@ -9,7 +9,7 @@ from email.message import Message
 from email.utils import format_datetime
 
 from waifu_engine import sources, web_search
-from waifu_engine.sources import _http, anilist
+from waifu_engine.sources import _http, anilist, gemini
 
 
 def _headers(retry_after: str | None = None) -> Message:
@@ -118,6 +118,22 @@ def test_spent_429_budget_skips_later_requests(monkeypatch):
     _http.clear_cache()
 
 
+def test_success_does_not_clear_a_cooldown_set_while_in_flight(monkeypatch):
+    _http.clear_cache()
+    _patch_sleep(monkeypatch)
+
+    def urlopen(req, timeout=None, context=None):
+        # A sibling request exhausted its 429 budget after this one passed
+        # the cooldown check. Success must not erase that newer cooldown.
+        _http._cool_down("en.wikipedia.org", 30)
+        return _Body(b'{"ok": true}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    assert _http.get_json("https://en.wikipedia.org/w/api.php", {"t": "inflight"}) == {"ok": True}
+    assert _http.host_blocked("https://en.wikipedia.org/w/api.php")
+    _http.clear_cache()
+
+
 def test_other_http_errors_are_not_retried(monkeypatch):
     _http.clear_cache()
     _patch_sleep(monkeypatch)
@@ -139,6 +155,9 @@ def test_find_candidates_stops_wikipedia_after_a_persistent_429(monkeypatch):
     monkeypatch.setattr(web_search, "_want_playwright", lambda: False)
     monkeypatch.setattr(web_search, "_enrich_on", lambda: False)
     monkeypatch.setattr(anilist, "search_characters", lambda *a, **k: [])
+    # An enabled Gemini key would otherwise place a live grounded call
+    # after the mocked Wikipedia and AniList fetches.
+    monkeypatch.setattr(gemini, "enabled", lambda: False)
     _http.clear_cache()
     _patch_sleep(monkeypatch)
     calls = []

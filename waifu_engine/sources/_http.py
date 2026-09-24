@@ -178,7 +178,9 @@ def _request(req: urllib.request.Request, key: str) -> Any | None:
     HTTP 429 used to return None on the first response, so Wikipedia looked
     empty and the next query in the same search hit the limit again. The
     status is retried with Retry-After (or a doubling wait). Once the budget
-    is spent the host cools down and later calls skip the network.
+    is spent the host cools down and later calls skip the network. A success
+    does not cancel that cooldown: a sibling request may have just started
+    it, and it expires by time only.
     """
     cached = _cache_get(key)
     if cached is not None:
@@ -213,8 +215,6 @@ def _request(req: urllib.request.Request, key: str) -> Any | None:
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
             _note_error(host, exc)
             return None
-        with _rate_lock:
-            _cool_until.pop(host, None)
         _cache_put(key, data)
         return data
 

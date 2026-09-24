@@ -40,6 +40,7 @@ def test_names_without_letters_have_no_key():
     ("Black Cat", "Black Cat (Marvel Comics)"),
     ("Hatsune Miku", "Hatsune Miku (anime)"),
     ("Koharu Shimoe", "Shimoe Koharu (Blue Archive)"),
+    ("Rem (Re:Zero)", "Rem (Re:Zero - Starting Life in Another World)"),
 ])
 def test_trailing_series_title_is_the_same_character(a, b):
     assert name_keys(a) & name_keys(b)
