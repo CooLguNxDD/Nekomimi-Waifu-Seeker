@@ -1,0 +1,26 @@
+# Category policy sets. Skip-on-yes and pin order stay in engine.py.
+# series_appearance flags mark separate look questions; hair_color is prepended
+# by the engine because appearance_question_ids() already pins it from the seed.
+# popular titles feed sources.popular_characters. Runtime never reads catalog.json.
+categories:
+  medium: { broad: true }
+  gender: { broad: true }
+  meta: { broad: true }
+  hair_color: { color_detail: true }
+  hair: { color_detail: true }
+  look_halo: { series_appearance: true }
+  look_wings: { series_appearance: true }
+  look_horns: { series_appearance: true }
+popular:
+  game:
+    - "Category:Female characters in video games"
+    - "Category:Male characters in video games"
+  comic:
+    - "Category:Marvel Comics superheroes"
+    - "Category:DC Comics superheroes"
+  movie:
+    - "Category:Female characters in film"
+    - "Category:Male characters in film"
+  tv:
+    - "Category:Female characters in television"
+    - "Category:Male characters in television"

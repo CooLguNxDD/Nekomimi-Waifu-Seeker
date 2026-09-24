@@ -27,31 +27,22 @@ from urllib.parse import urlparse
 
 from . import browser_search
 from .names import already_seen, name_keys, same_character
+from .nekomimi.lexicon import (
+    AGGREGATE_EXACT as _AGGREGATE_EXACT,
+    COLOR_WORDS as _COLOR_WORDS,
+    NAME_BLOCK as SERIES_BLOCK,
+    SERIES_CRUMBS as _SERIES_CRUMBS,
+    SERIES_MARKERS as _SERIES_MARKERS,
+    TRAIT_PATTERNS,
+)
 
 LISTICLE = re.compile(
     r"(top\s*\d+|\d+\s*best|best\s+\d+|ranked|list of|tier list|husbando material|certified|pinterest)",
     re.I,
 )
 
-SERIES_BLOCK = {
-    # anime / manga
-    "naruto", "one piece", "black clover", "demon slayer", "grand blue", "mob psycho",
-    "bungou stray dogs", "attack on titan", "my hero academia", "jujutsu kaisen",
-    "chainsaw man", "fairy tail", "hunter x hunter", "tokyo revengers", "dr stone",
-    "food wars", "vinland saga", "sword art online", "re zero", "re:zero",
-    "spy x family", "frieren", "oshi no ko", "cowboy bebop", "neon genesis evangelion",
-    "fullmetal alchemist", "death note", "dragon ball", "sailor moon", "bleach",
-    # games
-    "blue archive", "genshin impact", "honkai", "honkai star rail", "fate grand order",
-    "final fantasy", "street fighter", "tekken", "guilty gear", "persona", "nier automata",
-    "league of legends", "overwatch", "the legend of zelda", "super mario", "pokemon",
-    "elden ring", "dark souls", "arknights", "azur lane", "umamusume", "vocaloid",
-    # comics
-    "marvel comics", "dc comics", "justice league", "the avengers", "x men", "teen titans",
-    # noise
-    "discover pinterest", "all time", "you will fall", "progression",
-    "kokuhaku jikkou iinkai",
-}
+# Name block: lexicon/franchises.yml ``name_block``. ``_ok_person_name`` and the
+# plural-stem branch of ``is_aggregate_page`` both read ``SERIES_BLOCK``.
 
 MEDIUM_DOMAIN_HINTS: tuple[tuple[str, str], ...] = (
     ("myanimelist.net", "anime"),
@@ -301,66 +292,8 @@ def _guess_medium(title: str, href: str, body: str) -> str:
     return "unknown"
 
 
-# Longer Vocaloid aliases first so Crypton / Project Diva / Sekai pages
-# become Vocaloid before a later, broader marker in the same blurb can.
-_SERIES_MARKERS: tuple[tuple[str, str], ...] = (
-    ("project sekai", "Vocaloid"),
-    ("colorful stage", "Vocaloid"),
-    ("project diva", "Vocaloid"),
-    ("crypton future", "Vocaloid"),
-    ("vocaloid", "Vocaloid"),
-    ("blue archive", "Blue Archive"),
-        ("honkai: star rail", "Honkai: Star Rail"),
-        ("star rail", "Honkai: Star Rail"),
-        ("fate/grand order", "Fate/Grand Order"),
-        ("final fantasy", "Final Fantasy"),
-        ("street fighter", "Street Fighter"),
-        ("guilty gear", "Guilty Gear"),
-        ("league of legends", "League of Legends"),
-        ("elden ring", "Elden Ring"),
-        ("dark souls", "Dark Souls"),
-        ("the legend of zelda", "The Legend of Zelda"),
-        ("super mario", "Super Mario"),
-        ("pokemon", "Pokemon"),
-        ("persona", "Persona"),
-        ("nier", "NieR"),
-        ("overwatch", "Overwatch"),
-        ("arknights", "Arknights"),
-        ("azur lane", "Azur Lane"),
-        ("spider-man", "Spider-Man"),
-        ("spiderman", "Spider-Man"),
-        ("x-men", "X-Men"),
-        ("batman", "Batman"),
-        ("star wars", "Star Wars"),
-        ("the simpsons", "The Simpsons"),
-        ("simpsons", "The Simpsons"),
-        ("spy x family", "Spy x Family"),
-        ("frieren", "Frieren"),
-        ("oshi no ko", "Oshi no Ko"),
-        ("evangelion", "Neon Genesis Evangelion"),
-        ("cowboy bebop", "Cowboy Bebop"),
-        ("death note", "Death Note"),
-        ("dragon ball", "Dragon Ball"),
-        ("sailor moon", "Sailor Moon"),
-        ("bleach", "Bleach"),
-        ("genshin impact", "Genshin Impact"),
-        ("chainsaw man", "Chainsaw Man"),
-        ("attack on titan", "Attack on Titan"),
-        ("sword art online", "Sword Art Online"),
-        ("re:zero", "Re:Zero"),
-        ("one piece", "One Piece"),
-        ("naruto", "Naruto"),
-        ("jujutsu kaisen", "Jujutsu Kaisen"),
-        ("demon slayer", "Demon Slayer"),
-        ("tokyo revengers", "Tokyo Revengers"),
-        ("black clover", "Black Clover"),
-        ("fullmetal alchemist", "Fullmetal Alchemist"),
-        ("my hero academia", "My Hero Academia"),
-        ("assassination classroom", "Assassination Classroom"),
-        ("food wars", "Food Wars"),
-        ("dr. stone", "Dr. Stone"),
-        ("seven deadly sins", "Seven Deadly Sins"),
-)
+# Ordered franchise markers: lexicon/franchises.yml. ``_phrase_re`` is the
+# matcher; longer Vocaloid aliases stay first in that file.
 
 
 def _phrase_re(phrase: str) -> re.Pattern[str]:
@@ -394,13 +327,8 @@ def franchise_mentioned(franchise: str, text: str) -> bool:
     return bool(franchise) and bool(_phrase_re(franchise).search((text or "").lower()))
 
 
-# Category and parenthetical leftovers. "Internet meme characters" and
-# "Kaito (software)" are not franchises; neither is "headquartered in Sapporo".
-_SERIES_CRUMBS = {
-    "internet meme", "internet memes", "meme", "memes",
-    "software", "sapporo", "japanese", "japan",
-    "mascot", "mascots", "popular culture", "voice bank", "voice banks",
-}
+# Category crumbs: lexicon/franchises.yml. ``series_is_crumb`` is an exact
+# normalized string match; these are not regular expressions.
 
 
 def series_is_crumb(series: str) -> bool:
@@ -414,14 +342,8 @@ def _guess_series(text: str) -> str:
     return franchise_label(text) or "Web result"
 
 
-# Hair-colour words. A detail that is only these must not be searched as a
-# name: "teal aqua turquoise" retrieved a page titled Turquoise.
-_COLOR_WORDS = {
-    "teal", "aqua", "turquoise", "cyan", "mint", "lime", "violet", "purple",
-    "green", "grey", "gray", "silver", "white", "orange", "red", "pink",
-    "blue", "black", "brown", "gold", "golden", "blonde", "blond", "crimson",
-    "scarlet", "auburn", "magenta", "indigo",
-}
+# Colour words: lexicon/colors.yml. ``is_color_phrase`` still requires every
+# token to be in the set, so a colour-only detail is not searched as a name.
 
 
 def is_color_phrase(text: str) -> bool:
@@ -439,8 +361,8 @@ _AGGREGATE_NAME = re.compile(
 )
 # A path that ends at the roster itself: /characters, /wiki/X/Characters.
 _ROSTER_URL = re.compile(r"/characters?/?(?:[?#].*)?$")
-# Roster titles that are a franchise plus a plural, not a person.
-_AGGREGATE_EXACT = {"vocaloids", "fanloid", "fanloids", "vocaloid characters"}
+# Exact roster titles: lexicon/franchises.yml ``aggregate_exact``. The rest of
+# ``is_aggregate_page`` (regexes, plural stem against ``SERIES_BLOCK``) stays here.
 
 
 def is_aggregate_page(name: str, url: str = "", blurb: str = "") -> bool:
@@ -667,55 +589,8 @@ def enrich_candidates(candidates: list[dict[str, Any]], limit: int | None = None
     return n
 
 
-# Trait vocabulary mined out of snippets. Slugs line up with
-# ``nekomimi.traits`` tag names so evidence and questions share a vocabulary.
-TRAIT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("female", ("she", "her", "heroine", "woman", "girl", "female")),
-    ("male", ("he", "his", "him", "hero", "man", "boy", "male")),
-    ("protagonist", ("protagonist", "main character", "player character")),
-    ("antagonist", ("antagonist", "villain", "main enemy")),
-    ("playable", ("playable",)),
-    ("student", ("student", "high school", "academy")),
-    ("soldier", ("soldier", "knight", "mercenary", "warrior")),
-    ("mage", ("mage", "wizard", "witch", "sorcerer", "spellcaster")),
-    ("ninja", ("ninja", "shinobi", "assassin")),
-    ("idol", ("idol", "singer", "virtual singer")),
-    ("royalty", ("princess", "prince", "queen", "king", "noble")),
-    ("robot", ("android", "robot", "cyborg", "artificial intelligence")),
-    ("demon", ("demon", "devil", "oni", "vampire")),
-    ("god", ("goddess", "god", "deity")),
-    ("sword", ("sword", "katana", "blade")),
-    ("gun", ("gun", "pistol", "rifle", "firearm")),
-    ("magic", ("magic", "spell", "mana")),
-    ("tsundere", ("tsundere",)),
-    ("kuudere", ("kuudere", "stoic", "emotionless")),
-    ("yandere", ("yandere",)),
-    ("genki", ("cheerful", "energetic", "genki")),
-    ("blonde", ("blonde", "blond", "golden hair")),
-    ("black", ("black hair", "black-haired")),
-    ("white", ("white hair", "silver hair", "grey hair", "gray hair")),
-    ("red", ("red hair", "crimson hair", "redhead")),
-    ("blue", ("blue hair",)),
-    ("pink", ("pink hair",)),
-    ("brown", ("brown hair", "brown-haired")),
-    ("green", ("green hair", "green-haired")),
-    ("purple", ("purple hair", "violet hair", "purple-haired")),
-    # Eye colours are prefixed so they never collide with the hair slugs.
-    ("eyes-blue", ("blue eyes", "blue-eyed")),
-    ("eyes-red", ("red eyes", "crimson eyes", "red-eyed")),
-    ("eyes-green", ("green eyes", "green-eyed")),
-    ("eyes-gold", ("golden eyes", "gold eyes", "amber eyes", "yellow eyes")),
-    ("eyes-brown", ("brown eyes", "brown-eyed", "dark eyes")),
-    ("glasses", ("glasses", "spectacles")),
-    ("halo", ("halo", "halos")),
-    ("horns", ("horns", "horned")),
-    # Body wings only. A wing-shaped halo ("heart with wings") is not this tag;
-    # ``mine_trait_slugs`` drops it unless the blurb describes wings on the body.
-    ("wings", ("angel wings", "feathered wings")),
-    ("fantasy", ("fantasy", "kingdom", "magic world")),
-    ("scifi", ("sci-fi", "science fiction", "cyberpunk", "mecha", "spaceship")),
-    ("school", ("school", "classroom", "academy")),
-)
+# Trait markers: lexicon/traits.yml, compiled by ``_marker_re``. Wings stay
+# reconciled in ``mine_trait_slugs`` via ``traits.mined_visual_slugs``.
 
 
 @lru_cache(maxsize=512)

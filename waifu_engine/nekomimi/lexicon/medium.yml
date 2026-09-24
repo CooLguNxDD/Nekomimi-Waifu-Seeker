@@ -1,0 +1,18 @@
+# Medium accept map. Matchers stay in engine._eliminate_by_medium and
+# engine._known_choice. filter: false means do not filter (the "other"
+# sentinel), not an empty accept-list that deletes every known medium.
+media: [anime, manga, comic, game, movie, tv]
+accepts:
+  anime: { media: [anime, manga] }
+  game: { media: [game] }
+  comic: { media: [comic] }
+  movie: { media: [movie, tv] }
+  tv: { media: [tv, movie] }
+  other: { filter: false }
+search_suffix:
+  anime: anime character
+  manga: manga character
+  game: video game character
+  comic: comic book character
+  movie: film character
+  tv: TV series character
