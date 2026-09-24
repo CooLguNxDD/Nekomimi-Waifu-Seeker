@@ -238,7 +238,7 @@ def _focus_facts(sess: GuessSession, entries: list[tuple[str, float]]) -> list[s
          "confirmed_facts": list(keys.values())},
         {"focus": {
             "type": "choice",
-            "instructions": "Which confirmed fact most narrows down which specific character this is?",
+            "instructions": "Which fact most narrows down the character?",
             "criteria": {k: text[:80] for k, text in keys.items()},
         }},
     )
@@ -274,7 +274,7 @@ POOL_FITS_CANDIDATES = 5
 _POOL_FITS = {
     "pool_fits": {
         "type": "noul",
-        "instructions": "Does any character in `characters` fit every one of `confirmed_facts`?",
+        "instructions": "Does one `characters` entry fit `confirmed_facts`?",
         "criteria": {
             "true": "yes, at least one listed character fits all the confirmed facts",
             "false": "no, none of the listed characters fits all the confirmed facts",
@@ -587,13 +587,30 @@ def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
     return (pins + rest)[:CHOICE_WIDTH]
 
 
+# Round-level calls share one 512-token sequence, and the state is truncated
+# from the end. Ten full 600-character profiles plus the whole transcript
+# pushed the characters off the end of `pool_fits` / `ready_to_guess`.
+_LAYA_ROUND_PROFILE = 160
+_LAYA_ROUND_FACTS = 8
+_LAYA_ROUND_HISTORY = 6
+
+
 def _laya_state(sess: GuessSession, candidates: list[Candidate]) -> dict[str, Any]:
-    """Round-level state for Laya: goal, confirmed facts, history, given candidates."""
+    """Compact state for one round-level Laya call.
+
+    Characters come first, each as a short profile, so truncation cuts old
+    answers rather than the identities the question names. Per-candidate
+    ``match`` still uses the full profile; this budget is only the shared call.
+    """
+    facts = sess.constraints[-_LAYA_ROUND_FACTS:] or ["nothing confirmed yet"]
+    history = sess.history()[-_LAYA_ROUND_HISTORY:] or [
+        {"question": "none yet", "answer": "", "detail": ""},
+    ]
     return {
         "goal": GOAL,
-        "confirmed_facts": sess.constraints or ["nothing confirmed yet"],
-        "answer_history": sess.history() or [{"question": "none yet", "answer": "", "detail": ""}],
-        "characters": {c.name: c.profile() for c in candidates},
+        "characters": {c.name: c.profile(budget=_LAYA_ROUND_PROFILE) for c in candidates},
+        "confirmed_facts": facts,
+        "answer_history": history,
         "questions_asked": sess.turn,
     }
 
@@ -614,10 +631,7 @@ def _pick_question(sess: GuessSession) -> tuple[dict[str, Any], dict[str, Any] |
     questions = {
         "ready_to_guess": {
             "type": "noul",
-            "instructions": (
-                "Given `confirmed_facts` and `answer_history`, is there now enough "
-                "evidence to name one specific character with confidence?"
-            ),
+            "instructions": "Do `confirmed_facts` name one character?",
             "criteria": {
                 "true": "yes, the facts so far point at one specific character",
                 "false": "no, several different characters still fit the facts",

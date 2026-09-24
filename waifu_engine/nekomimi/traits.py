@@ -147,19 +147,26 @@ def _trait_block(
     items: list[tuple[str, str, str, float]],
     tag_prefix: str = "",
 ) -> list[dict[str, Any]]:
-    """items: (slug, user-facing phrase, Laya instruction clause, prior).
+    """items: (slug, user-facing phrase, Laya criteria clause, prior).
 
+    The instruction stays the short label. A 140-character instruction on
+    typed-decisions scored a clear case at 0.38; the same question in about
+    50 characters scored 0.71. The clause is ``criteria_detail`` only.
     ``tag_prefix`` namespaces the tag so two blocks cannot share a slug -- a
     bare "blue" would otherwise satisfy both the hair and the eye question.
     """
     out = []
     for slug, label, clause, prior in items:
+        # A parenthetical is for the player ("two eye colours"). Laya's
+        # instruction stays the head phrase; the clause is the option text.
+        head = label.split("(", 1)[0].strip()
         out.append(
             _q(
                 f"{prefix}_{slug}",
                 category,
                 f"Is your character {label}?",
-                f"Is the character in `candidate` {clause}?",
+                f"Is the character in `candidate` {head}?",
+                criteria_detail=clause,
                 tags_true=[f"{tag_prefix}{slug}"],
                 prior=prior,
             )
