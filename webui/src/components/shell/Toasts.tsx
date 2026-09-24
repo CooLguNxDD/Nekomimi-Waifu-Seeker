@@ -37,7 +37,7 @@ export function Toasts() {
     <div class="fixed bottom-4 right-4 flex max-w-sm flex-col gap-2">
       <For each={messages()}>
         {(toast) => (
-          <div class="rounded-[10px] border border-border bg-surface px-3 py-2 text-sm text-danger">
+          <div class="rounded-control border border-border bg-surface px-3 py-2 text-sm text-danger shadow-card">
             {toast.message}
           </div>
         )}

@@ -51,6 +51,14 @@ export interface NekomimiQuestion {
   options?: QuestionOption[];
 }
 
+/** A turn already on the session. The pending question has a null answer. */
+export interface AskedTurn {
+  qid?: string;
+  text?: string;
+  answer?: string | null;
+  detail?: string | null;
+}
+
 export interface NekomimiState {
   session_id?: string;
   stage?: "asking" | "guessing" | "done" | string;
@@ -65,5 +73,6 @@ export interface NekomimiState {
   winner?: CharacterCard | null;
   turns?: number;
   seed?: string;
+  asked?: AskedTurn[];
   error?: string;
 }

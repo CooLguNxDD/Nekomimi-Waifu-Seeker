@@ -1,5 +1,12 @@
 import { For, Show } from "solid-js";
+import { Motion, Presence } from "solid-motionone";
+import { AnswerHistory } from "@/components/nekomimi/AnswerHistory";
+import type { AnswerChipData } from "@/components/nekomimi/history";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/field";
+import { Avatar } from "@/components/ui/avatar";
+import { Progress } from "@/components/ui/progress";
+import { useReducedMotion } from "@/hooks/useReducedMotion";
 import type { CharacterCard, NekomimiQuestion } from "@/types/game";
 
 /** Yes/no or choice controls. A typed detail does not answer the current trait. */
@@ -8,104 +15,146 @@ export function QuestionCard(props: {
   candidatesAlive: number;
   laya: boolean;
   top: CharacterCard[];
+  history: AnswerChipData[];
+  showPool: boolean;
   busy: boolean;
-  onAnswer: (answer: string, detail?: string) => void;
+  onTogglePool: () => void;
+  onAnswer: (answer: string, detail?: string, label?: string) => void;
 }) {
   let detailInput: HTMLInputElement | undefined;
   let detail = "";
+  const reduced = useReducedMotion();
   const clearDetail = () => {
     detail = "";
     if (detailInput) detailInput.value = "";
   };
-  const answer = (value: string, extra?: string) => {
-    props.onAnswer(value, extra);
+  const answer = (value: string, extra?: string, label?: string) => {
+    props.onAnswer(value, extra, label);
     clearDetail();
   };
   const choice = () => props.question.kind === "choice" && props.question.options;
   const turn = () => props.question.turn ?? 0;
   const max = () => props.question.max_turns ?? 1;
+  const fade = () => (reduced() ? { opacity: 0 } : { opacity: 0, y: 8 });
 
   return (
-    <div>
-      <p class="text-sm text-muted">
-        Question {turn()} of up to {max()} · {props.candidatesAlive || 0} candidates in play ·{" "}
-        {props.laya ? "Laya" : "heuristics"}
-      </p>
-      <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-[#232833]">
-        <i
-          class="block h-full bg-accent"
-          style={{ width: `${Math.min(100, (turn() / max()) * 100)}%` }}
-        />
-      </div>
-      <h2 class="my-3 text-xl font-bold">{props.question.text}</h2>
+    <div class={props.busy ? "opacity-80" : ""}>
+      <Progress
+        value={turn()}
+        max={max()}
+        label={`Question ${turn()} of up to ${max()} · ${props.candidatesAlive || 0} candidates in play · ${props.laya ? "Laya" : "heuristics"}`}
+      />
+      <AnswerHistory chips={props.history} />
+      <Presence exitBeforeEnter>
+        <Show when={props.question} keyed>
+          {(question) => (
+            <Motion.h2
+              class="my-3 text-xl font-bold"
+              initial={fade()}
+              animate={{ opacity: 1, y: 0 }}
+              exit={fade()}
+              transition={{ duration: reduced() ? 0 : 0.22, easing: [0.16, 1, 0.3, 1] }}
+            >
+              {question().text}
+            </Motion.h2>
+          )}
+        </Show>
+      </Presence>
       <Show when={!props.candidatesAlive}>
-        <p id="emptyHint" class="mb-3 rounded-[10px] bg-[#2a2412] px-3 py-2 text-sm text-[#f1d58a]">
+        <p id="emptyHint" class="mb-3 rounded-control bg-amber-soft px-3 py-2 text-sm text-amber-ink">
           No candidates yet — search needs something specific. Type a series, franchise or name-like
           detail below (e.g. “Vocaloid”, “Final Fantasy”), or keep answering.
         </p>
       </Show>
-      <div class="flex flex-wrap gap-2">
+      <div class="sticky bottom-0 z-20 -mx-4 mt-3 border-t border-border bg-surface/95 px-4 py-3 backdrop-blur-md md:static md:mx-0 md:border-0 md:bg-transparent md:p-0 md:backdrop-blur-none">
+        <div class="flex max-h-[38vh] flex-wrap gap-2 overflow-y-auto">
+          <Show
+            when={choice()}
+            fallback={
+              <>
+                <Button disabled={props.busy} onClick={() => answer("yes", undefined, "Yes")}>
+                  Yes
+                </Button>
+                <Button tone="secondary" disabled={props.busy} onClick={() => answer("no", undefined, "No")}>
+                  No
+                </Button>
+              </>
+            }
+          >
+            <For each={props.question.options ?? []}>
+              {(opt) => (
+                <Button disabled={props.busy} onClick={() => answer(opt.key, undefined, opt.label)}>
+                  {opt.label}
+                </Button>
+              )}
+            </For>
+          </Show>
+        </div>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <Input
+            ref={detailInput}
+            type="text"
+            class="min-w-56 flex-1"
+            placeholder="Add a detail instead (e.g. she pilots a mech)"
+            onInput={(event) => {
+              detail = event.currentTarget.value;
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && detail.trim() && !props.busy) {
+                answer("detail", detail.trim(), detail.trim());
+              }
+            }}
+          />
+          <Button
+            tone="secondary"
+            disabled={props.busy}
+            onClick={() => {
+              const text = detail.trim();
+              if (!text) return;
+              answer("detail", text, text);
+            }}
+          >
+            Send detail
+          </Button>
+        </div>
+      </div>
+      <div class="mt-4">
+        <div class="flex items-center justify-between gap-3">
+          <p class="text-xs uppercase tracking-wide text-muted">Candidates</p>
+          <Button
+            tone="ghost"
+            size="sm"
+            aria-pressed={props.showPool}
+            onClick={() => props.onTogglePool()}
+          >
+            {props.showPool ? "Hide pool" : "Peek pool"}
+          </Button>
+        </div>
         <Show
-          when={choice()}
+          when={props.showPool}
           fallback={
-            <>
-              <Button disabled={props.busy} onClick={() => answer("yes")}>
-                Yes
-              </Button>
-              <Button tone="ghost" disabled={props.busy} onClick={() => answer("no")}>
-                No
-              </Button>
-            </>
+            <p class="mt-2 text-sm text-muted">
+              {props.top.length} names hidden. Peek when you want the odds.
+            </p>
           }
         >
-          <For each={props.question.options ?? []}>
-            {(opt) => (
-              <Button disabled={props.busy} onClick={() => answer(opt.key)}>
-                {opt.label}
-              </Button>
-            )}
-          </For>
+          <div class="mt-2 text-sm text-ink-soft">
+            <For each={props.top}>
+              {(candidate) => (
+                <div class="flex items-center justify-between gap-3 py-1">
+                  <span class="flex min-w-0 items-center gap-2">
+                    <Avatar name={candidate.name} imageUrl={candidate.image_url} />
+                    <span class="truncate">
+                      {candidate.name}
+                      {candidate.series ? ` — ${candidate.series}` : ""}
+                    </span>
+                  </span>
+                  <span class="shrink-0 tabular-nums">{Math.round((candidate.probability || 0) * 100)}%</span>
+                </div>
+              )}
+            </For>
+          </div>
         </Show>
-      </div>
-      <div class="mt-3 flex flex-wrap gap-2">
-        <input
-          ref={detailInput}
-          type="text"
-          class="min-w-56 flex-1 rounded-[10px] border border-[#333] bg-[#1a1d24] px-3 py-2 outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-          placeholder="Add a detail instead (e.g. she pilots a mech)"
-          onInput={(event) => {
-            detail = event.currentTarget.value;
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && detail.trim() && !props.busy) {
-              answer("detail", detail.trim());
-            }
-          }}
-        />
-        <Button
-          tone="ghost"
-          disabled={props.busy}
-          onClick={() => {
-            const text = detail.trim();
-            if (!text) return;
-            answer("detail", text);
-          }}
-        >
-          Send detail
-        </Button>
-      </div>
-      <div class="mt-3 text-sm text-[#b9bdc6]">
-        <For each={props.top}>
-          {(candidate) => (
-            <div class="flex justify-between gap-4 py-0.5">
-              <span>
-                {candidate.name}
-                {candidate.series ? ` — ${candidate.series}` : ""}
-              </span>
-              <span>{Math.round((candidate.probability || 0) * 100)}%</span>
-            </div>
-          )}
-        </For>
       </div>
     </div>
   );

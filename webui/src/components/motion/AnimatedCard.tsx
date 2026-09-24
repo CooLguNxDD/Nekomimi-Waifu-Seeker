@@ -1,16 +1,10 @@
-import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { Show } from "solid-js";
 import { Motion, Presence } from "solid-motionone";
+import { useReducedMotion } from "@/hooks/useReducedMotion";
 
 /** Fade a panel in. Reduced motion uses opacity only; otherwise a short slide. */
 export function AnimatedCard(props: { show: boolean; children: unknown }) {
-  const [reduced, setReduced] = createSignal(false);
-  onMount(() => {
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    setReduced(media.matches);
-    const onChange = () => setReduced(media.matches);
-    media.addEventListener("change", onChange);
-    onCleanup(() => media.removeEventListener("change", onChange));
-  });
+  const reduced = useReducedMotion();
 
   return (
     <Presence>

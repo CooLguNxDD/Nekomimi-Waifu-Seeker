@@ -9,8 +9,10 @@ export function Shell(props: { children: JSX.Element }) {
   const path = useRouterState({ select: (s) => s.location.pathname });
   const laya = () => (health.data?.laya?.loaded ? "Laya loaded" : "Heuristics");
 
+  const wide = () => path() === "/nekomimi";
+
   return (
-    <div class="mx-auto max-w-[720px] px-4 py-8">
+    <div class={`mx-auto px-4 py-8 ${wide() ? "max-w-5xl" : "max-w-[720px]"}`}>
       <header class="mb-6 flex items-end justify-between gap-4">
         <div>
           <h1 class="text-2xl font-semibold">Nekomimi-Waifu-Seeker</h1>
@@ -19,10 +21,10 @@ export function Shell(props: { children: JSX.Element }) {
         <p class="font-mono text-xs text-muted">{health.isError ? "API offline" : laya()}</p>
       </header>
       <nav class="mb-4 flex gap-3 text-sm">
-        <Link to="/" class={path() === "/" ? "text-amber" : "text-[#9db7ff]"}>
+        <Link to="/" class={`focus-ring rounded-control ${path() === "/" ? "text-amber" : "text-link"}`}>
           Determine
         </Link>
-        <Link to="/nekomimi" class={path() === "/nekomimi" ? "text-amber" : "text-[#9db7ff]"}>
+        <Link to="/nekomimi" class={`focus-ring rounded-control ${path() === "/nekomimi" ? "text-amber" : "text-link"}`}>
           Play Nekomimi
         </Link>
       </nav>
