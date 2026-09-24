@@ -16,8 +16,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from .. import timing
-from ..names import name_keys
-from . import anilist, gemini, wikipedia
+from ..names import already_seen, name_keys
+from . import _http, anilist, gemini, wikipedia
 
 __all__ = ["anilist", "gemini", "wikipedia", "find_candidates", "normalize_name"]
 
@@ -305,7 +305,7 @@ def _hit_shows_traits(cand: dict[str, Any], clue: str) -> bool:
 
 def _gemini_inline(
     found: dict[str, dict[str, Any]],
-    exclude_names: set[str],
+    exclude_names: set[str] | list[str],
     facts: list[str],
     forced: bool | None,
 ) -> bool:
@@ -362,29 +362,39 @@ def find_candidates(
     they are skipped, DuckDuckGo never runs inline, and the pool is topped up
     from ``popular_characters`` instead, up to ``pool_size`` (candidates
     still in play; defaults to ``len(exclude_names)``) of ``popular_limit()``.
+
+    A host that still answers 429 after retries is not queried again in this
+    search. Further sequential calls would come back empty and only make the
+    limit last longer.
     """
     from .. import web_search
 
     # How many names were already seen (in play or ruled out) -- a count of
-    # names, taken before they are expanded into keys.
-    n_seen = len(exclude_names or ())
-    # Every key of every name already seen, so either name order is excluded.
-    exclude_names = set().union(*(name_keys(n) for n in (exclude_names or set())))
+    # names, taken before any key expansion.
+    excluded = [n for n in (exclude_names or ()) if n]
+    n_seen = len(excluded)
     found: dict[str, dict[str, Any]] = {}
     web_search._begin_search()
 
     hits: dict[str, int] = {}
-    taken: set[str] = set()  # every name key already in ``found``
+    taken_names: list[str] = []
 
     def take(items: list[dict[str, Any]], source: str = "") -> None:
-        """Add hits whose name (in any spelling) is new; count them under ``source``."""
+        """Add hits whose character is new; count them under ``source``.
+
+        ``already_seen`` matches either word order and a trailing series
+        title, and keeps two different work titles of the same given name.
+        The dict is keyed by id so those two titles do not overwrite each
+        other: they share a bare ``name_keys`` entry.
+        """
         added = 0
         for cand in items:
-            keys = name_keys(cand.get("name", ""))
-            if not keys or keys & exclude_names or keys & taken:
+            name = cand.get("name", "")
+            keys = name_keys(name)
+            if not keys or already_seen(name, excluded) or already_seen(name, taken_names):
                 continue
-            found[min(keys)] = cand
-            taken.update(keys)
+            found[str(cand.get("id") or min(keys))] = cand
+            taken_names.append(name)
             added += 1
         if source:
             hits[source] = hits.get(source, 0) + added
@@ -416,10 +426,11 @@ def find_candidates(
                 pw_error = True
                 web_search._note_error(f"playwright: {exc}")
 
-    # Wikipedia: covers all four media and returns real prose.
+    # Wikipedia: covers all four media and returns real prose. Stop once the
+    # host is cooling down after a 429: the next query would be empty too.
     with timing.span("fetch.wikipedia"):
         for q in queries if specific else []:
-            if len(found) >= limit:
+            if len(found) >= limit or _http.host_blocked(wikipedia.API):
                 break
             try:
                 take(wikipedia.search_characters(q, limit=min(50, limit + n_seen)),
@@ -431,11 +442,13 @@ def find_candidates(
     # for games too: a game hint used to skip it, so a name search never saw
     # characters AniList files under an anime adaptation. The medium AniList
     # reports is kept. Rewriting every anime row to "game" let unrelated
-    # anime characters survive the hard medium filter.
+    # anime characters survive the hard medium filter. Same 429 stop as
+    # Wikipedia — the two hosts are independent, so one cooling does not
+    # skip the other.
     with timing.span("fetch.anilist"):
         if specific and medium_hint in (None, "anime", "manga", "game") and len(found) < limit:
             for q in queries:
-                if len(found) >= limit:
+                if len(found) >= limit or _http.host_blocked(anilist.ENDPOINT):
                     break
                 try:
                     take(anilist.search_characters(q, limit=limit), "anilist")
@@ -456,7 +469,7 @@ def find_candidates(
                 # Over-fetch by the names already seen (in play or ruled out),
                 # which ``take`` skips, so the free room can still be filled.
                 fresh = [c for c in popular_characters(medium_hint, room + n_seen)
-                         if not name_keys(c.get("name", "")) & exclude_names]
+                         if not already_seen(c.get("name", ""), excluded)]
                 take(fresh[:room], "popular")
             except Exception as exc:  # noqa: BLE001
                 web_search._note_error(f"popular: {exc}")
@@ -481,7 +494,7 @@ def find_candidates(
     # below puts trait matches first, so Mika is not cut off by "The Saint".
     # ``gate`` is called once; the engine memoises it with the DuckDuckGo gate.
     run_gemini = bool(facts and gemini.enabled() and gate())
-    inline = bool(run_gemini and _gemini_inline(found, exclude_names, facts, gemini_inline))
+    inline = bool(run_gemini and _gemini_inline(found, excluded, facts, gemini_inline))
     if run_gemini and (inline or len(found) < limit):
         if background_key and not inline and _gemini_background_on():
             with timing.span("fetch.gemini_background"):
@@ -496,7 +509,7 @@ def find_candidates(
     # Inline only when the player would otherwise have no candidates at all
     # and there is something specific to search for; broad traits alone get
     # nothing useful back, so they only ever search in the background.
-    inline_ok = specific and not found and not exclude_names
+    inline_ok = specific and not found and not excluded
     if need_ddg and background_key and not inline_ok and _ddg_background_on():
         with timing.span("fetch.ddg_background"):
             _bg_start(background_key, queries, limit)

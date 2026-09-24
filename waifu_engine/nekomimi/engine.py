@@ -64,8 +64,9 @@ from .traits import (
     yesno_visual_likelihood,
 )
 
-# The medium question's id. Its pick is a hard fact (``MEDIUM_ACCEPTS``):
-# candidates of a known, non-accepted medium are removed outright.
+# The medium question's id. A known medium is a hard fact (``MEDIUM_ACCEPTS``):
+# candidates of a known, non-accepted medium are removed outright. "other"
+# is not: an empty accept-set means no hard filter.
 MEDIUM_QID = "medium"
 # Laya's framing of the task, shared by every state it sees.
 GOAL = "Identify one anime, manga, comic, video game, movie or TV character."
@@ -78,6 +79,13 @@ MIN_QUESTIONS_BEFORE_GUESS = int(os.getenv("WAIFU_NEKOMINI_MIN_QUESTIONS", "5"))
 # Laya saying "ready" is not enough on its own -- with a flat posterior it
 # would guess a random candidate. Require a leader as well.
 READY_MIN_POSTERIOR = float(os.getenv("WAIFU_NEKOMINI_READY_POSTERIOR", "0.45"))
+# An empty seed fills the pool with famous characters, and a correct leader
+# then sits around 0.50–0.70 for the whole round — under 0.80, so the turn
+# cap arrived first (Mikasa). Guess earlier when that lead is stable and
+# clearly ahead of the runner-up. 0.80 remains the single-check bar.
+LEADER_POSTERIOR = float(os.getenv("WAIFU_NEKOMINI_LEADER_POSTERIOR", "0.50"))
+LEADER_MARGIN = float(os.getenv("WAIFU_NEKOMINI_LEADER_MARGIN", "0.15"))
+LEADER_STREAK = int(os.getenv("WAIFU_NEKOMINI_LEADER_STREAK", "2"))
 ONLINE = os.getenv("WAIFU_ONLINE_SEARCH", "1").lower() in {"1", "true", "yes"}
 # Facts offered to Laya when ranking which ones lead the search query, and how
 # many of the winners go into the focused query.
@@ -829,14 +837,19 @@ def _match_probabilities(
 
 
 def _eliminate_by_medium(sess: GuessSession, question: dict[str, Any], answer: str) -> int:
-    """A settled medium is a hard fact, not a nudge.
+    """Drop candidates whose known medium contradicts a settled pick.
 
     Once the player says "it's from a video game", an anime candidate
     is not merely less likely -- it is wrong, and leaving it in the pool lets it
-    soak up evidence from later questions.
+    soak up evidence from later questions. "Something else" is not that kind
+    of fact: its accept-set is empty, and treating empty as "accept nothing"
+    deleted every anime, game, comic, movie and TV row. Search then ran with
+    no medium hint and the pool drifted. Unknown media are never removed.
     """
-    accepts = MEDIUM_ACCEPTS.get(answer) if question["id"] == MEDIUM_QID else None
-    if accepts is None:
+    if question["id"] != MEDIUM_QID or answer == "other":
+        return 0
+    accepts = MEDIUM_ACCEPTS.get(answer)
+    if not accepts:
         return 0
     dropped = 0
     for cand in sess.alive_candidates():
@@ -978,22 +991,60 @@ def _leader_support(sess: GuessSession, leader: Candidate) -> list[float]:
     return support
 
 
+def _note_leader(sess: GuessSession, leader_id: str, qualifies: bool) -> None:
+    """Count consecutive checks where ``leader_id`` clears the stable-guess bar.
+
+    The streak used to grow whenever someone merely topped the pool. Weak
+    checks then filled ``LEADER_STREAK``, and the first later spike above
+    ``LEADER_POSTERIOR`` and ``LEADER_MARGIN`` guessed immediately. It grows
+    only while both thresholds hold, and resets when either fails.
+    """
+    if qualifies and sess.leader_id == leader_id:
+        sess.leader_streak += 1
+        return
+    sess.leader_id = leader_id
+    sess.leader_streak = 1 if qualifies else 0
+
+
 def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bool:
+    """Whether the evidence is strong enough to name a candidate.
+
+    Early guesses wait for ``MIN_QUESTIONS_BEFORE_GUESS`` and for at least
+    two model judgments averaging 0.6 — a lone search hit is posterior 1 and
+    must not guess. Past that bar, guess when the posterior clears
+    ``GUESS_CONFIDENCE``, or when the same candidate has led for
+    ``LEADER_STREAK`` checks at ``LEADER_POSTERIOR`` and ``LEADER_MARGIN``
+    ahead of the runner-up, or when Laya's ready_to_guess is confident and
+    the posterior is at least ``READY_MIN_POSTERIOR``. The turn cap guesses
+    even without that support.
+    """
     ranked = sess.posterior()
     if not ranked:
         return sess.turn >= MAX_TURNS
+    leader, top_p = ranked[0]
+    second = ranked[1][1] if len(ranked) > 1 else 0.0
+    # Count this check toward the stable-leader streak only when the lead is
+    # already wide enough to guess. A string of narrow tops must not pre-fill it.
+    _note_leader(
+        sess, leader.id,
+        top_p >= LEADER_POSTERIOR and top_p - second >= LEADER_MARGIN,
+    )
     if sess.turn >= MAX_TURNS:
         return True
     # The posterior is conditional on what search happened to find. A lone hit
     # has probability 1 even when it contradicts every clue. Require independent
     # model support before turning relative rank into an early guess.
-    support = _leader_support(sess, ranked[0][0])
+    support = _leader_support(sess, leader)
     if len(support) < 2 or sum(support) / len(support) < 0.6:
         return False
-    top_p = ranked[0][1]
-    if top_p >= GUESS_CONFIDENCE and sess.turn >= MIN_QUESTIONS_BEFORE_GUESS:
+    if sess.turn < MIN_QUESTIONS_BEFORE_GUESS:
+        return False
+    if top_p >= GUESS_CONFIDENCE:
         return True
-    if laya_answers and sess.turn >= MIN_QUESTIONS_BEFORE_GUESS and top_p >= READY_MIN_POSTERIOR:
+    if (top_p >= LEADER_POSTERIOR and top_p - second >= LEADER_MARGIN
+            and sess.leader_streak >= max(1, LEADER_STREAK)):
+        return True
+    if laya_answers and top_p >= READY_MIN_POSTERIOR:
         ready = laya_answers.get("ready_to_guess") or {}
         act = (ready.get("action") or {}).get("act_probability", 0.0)
         if float(ready.get("noul", 0.0)) >= 0.75 and float(act) >= 0.6:

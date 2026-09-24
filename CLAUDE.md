@@ -67,8 +67,9 @@ Consequences, in order of how often they get forgotten:
    already named (hair colour, halo, wings, horns) are pulled in front of that
    ranking, and the same appearance questions lead once a series is confirmed,
    because school/uniform/teen do not separate students from one school. A medium pick is
-   a hard filter (`traits.MEDIUM_ACCEPTS`; movie and TV accept each other,
-   "other" accepts no known medium; unknown media are never removed). Empty
+   a hard filter (`traits.MEDIUM_ACCEPTS`; movie and TV accept each other;
+   "other" / "Something else" is an empty accept-set and is **not** a hard
+   filter — it must not wipe known media; unknown media are never removed). Empty
    searches keep asking until the turn limit.
 2. `score_candidates` records evidence and evaluates **every eligible candidate**
    with an independent `match` noul call. Never gate evidence on `scoring_pool()`;
@@ -148,10 +149,15 @@ Answers to yes/no questions are **`yes` / `no` / `detail`**. `detail` does not a
 yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and
 refines search. The initial seed is evaluated the same way.
 
-Guess when any of: top posterior ≥ 0.80 after ≥ 5 questions; `ready_to_guess.noul`
-≥ 0.75 with `act_probability` ≥ 0.6; or turn ≥ `MAX_TURNS`. Early guesses also
-require at least two model judgments with mean answer likelihood ≥ 0.6. A lone
-search hit is not sufficient evidence. Up to 3 guesses.
+Guess when any of: top posterior ≥ 0.80 after ≥ 5 questions; the same candidate
+has led for ≥ 2 checks (`WAIFU_NEKOMINI_LEADER_STREAK`) at posterior ≥ 0.50
+(`WAIFU_NEKOMINI_LEADER_POSTERIOR`) and ≥ 0.15 ahead of the runner-up
+(`WAIFU_NEKOMINI_LEADER_MARGIN`); `ready_to_guess.noul`
+≥ 0.75 with `act_probability` ≥ 0.6 and posterior ≥ 0.45; or turn ≥ `MAX_TURNS`.
+Early guesses also require at least two model judgments with mean answer
+likelihood ≥ 0.6. A lone search hit is not sufficient evidence. Up to 3 guesses.
+The 0.80 bar stays the single-check gate; the stable-leader path is what commits
+a crowded empty-seed pool that otherwise sits at ~0.50–0.70 until the turn cap.
 
 **Every Laya path has a heuristic fallback** (`_tag_match`, `_split_quality`), so
 the loop plays with no weights installed — less sharply. Never let a Laya failure
@@ -193,7 +199,13 @@ text nodes (`{name}`), never `innerHTML`.
 | `WAIFU_NEKOMINI_MAX_GUESSES` | `3` | Guesses before giving up |
 | `WAIFU_NEKOMINI_TTL` | `1800` | Session lifetime, seconds |
 | `WAIFU_NEKOMINI_CHOICE_WIDTH` | `8` | Questions offered to Laya per turn |
-| `WAIFU_NEKOMINI_GUESS_CONFIDENCE` | `0.80` | Posterior needed to guess |
+| `WAIFU_NEKOMINI_GUESS_CONFIDENCE` | `0.80` | Posterior that guesses on a single check |
+| `WAIFU_NEKOMINI_LEADER_POSTERIOR` | `0.50` | Posterior a stable leader may guess at, below the single-check bar |
+| `WAIFU_NEKOMINI_LEADER_MARGIN` | `0.15` | How far that leader must lead the runner-up |
+| `WAIFU_NEKOMINI_LEADER_STREAK` | `2` | Consecutive guess-checks the same candidate must have led |
+| `WAIFU_HTTP_429_RETRIES` | `2` | Extra attempts after HTTP 429 before the host cools down |
+| `WAIFU_HTTP_429_BACKOFF` | `0.8` | Base wait (seconds) when Retry-After is absent; doubles each try |
+| `WAIFU_HTTP_429_CAP` | `8` | Max seconds to honour from one Retry-After or backoff |
 | `WAIFU_LAYA_HEAD_MAX_LEN` | `480` | Option-token budget |
 | `WAIFU_QUERY_LLM` | `0` | Let an LLM rewrite search queries (search strings only) |
 | `WAIFU_QUERY_LLM_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible endpoint (`https://api.openai.com/v1` for OpenAI) |

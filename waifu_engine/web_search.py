@@ -26,7 +26,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import browser_search
-from .names import name_keys, same_character
+from .names import already_seen, name_keys, same_character
 
 LISTICLE = re.compile(
     r"(top\s*\d+|\d+\s*best|best\s+\d+|ranked|list of|tier list|husbando material|certified|pinterest)",
@@ -690,14 +690,19 @@ def _take_candidate(
     exclude_ids: set[str],
     limit: int,
 ) -> bool:
-    """Add ``cand`` unless its id or name (either word order) is taken; True at ``limit``."""
+    """Add ``cand`` unless its id or name is already taken; True when ``found`` is at ``limit``.
+
+    Identity is ``names.same_character``: either word order, and a trailing
+    series title ("Link" / "Link (The Legend of Zelda)"), are one person.
+    "Young Link" is not. ``seen_names`` holds the raw names already taken.
+    """
     if not cand or cand["id"] in exclude_ids or cand["id"] in found:
         return False
-    keys = name_keys(cand.get("name", ""))
-    if not keys or keys & seen_names:
+    name = cand.get("name", "")
+    if not name_keys(name) or already_seen(name, seen_names):
         return False
     found[cand["id"]] = cand
-    seen_names |= keys
+    seen_names.add(name)
     return len(found) >= limit
 
 

@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..names import name_keys
+from ..names import already_seen, name_keys
 
 SESSION_TTL_SECONDS = int(os.getenv("WAIFU_NEKOMINI_TTL", "1800"))
 MAX_TURNS = int(os.getenv("WAIFU_NEKOMINI_MAX_TURNS", "20"))
@@ -138,6 +138,11 @@ class GuessSession:
     choice_cache: dict[tuple[str, str], dict[str, float]] = field(default_factory=dict)
     # Last good query-LLM rewrite, reused until a newer one lands.
     llm_queries: list[str] = field(default_factory=list)
+    # How many consecutive guess-checks this candidate has led. A crowded
+    # pool often stalls a correct leader under the 0.80 bar; the streak is
+    # what makes that lead commitable. See ``engine._should_guess``.
+    leader_id: str = ""
+    leader_streak: int = 0
 
     # -- candidate pool ------------------------------------------------
     def alive_candidates(self) -> list[Candidate]:
@@ -152,24 +157,25 @@ class GuessSession:
     def add_candidates(self, raws: list[dict[str, Any]]) -> int:
         """Add search hits not already in the pool; returns how many were added.
 
-        A hit is a duplicate if its id or its name (in either word order) is
-        already known, or it was rejected as a guess.
+        A hit is a duplicate if its id or its name (either word order, or a
+        trailing series title) is already known, or it was rejected as a guess.
         """
         known = {c.id for c in self.candidates}
         # The same character turns up under several URLs (wiki, MAL, fandom),
-        # and duplicates split their own posterior mass.
-        # Keys cover both name orders ("Koharu Shimoe" / "Shimoe Koharu").
-        seen_names: set[str] = set().union(*(name_keys(c.name) for c in self.candidates))
+        # and duplicates split their own posterior mass. Names, not key
+        # sets: "Link" absorbs "Link (The Legend of Zelda)", while
+        # "Young Link" and a different work's "Aqua (other)" stay.
+        seen_names = [c.name for c in self.candidates]
         added = 0
         live = self.alive_candidates()
         base = sorted(c.logodds for c in live)[len(live) // 2] if live else 0.0
         for raw in raws:
             if not raw.get("id") or raw["id"] in known or raw["id"] in self.rejected:
                 continue
-            keys = name_keys(raw.get("name", ""))
-            if not keys or keys & seen_names:
+            name = raw.get("name", "")
+            if not name_keys(name) or already_seen(name, seen_names):
                 continue
-            seen_names |= keys
+            seen_names.append(name)
             cand = Candidate.from_search(raw)
             # New arrivals start at the median of the live pool so they are not
             # instantly eliminated by evidence they were never scored against,

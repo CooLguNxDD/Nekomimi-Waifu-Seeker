@@ -34,6 +34,47 @@ def test_names_without_letters_have_no_key():
     assert name_keys("") == frozenset() and name_keys(" - ・ ") == frozenset()
 
 
+@pytest.mark.parametrize("a, b", [
+    ("Link", "Link (The Legend of Zelda)"),
+    ("Link", "Link (The Legend of Zelda) (video game)"),
+    ("Black Cat", "Black Cat (Marvel Comics)"),
+    ("Hatsune Miku", "Hatsune Miku (anime)"),
+    ("Koharu Shimoe", "Shimoe Koharu (Blue Archive)"),
+    ("Rem (Re:Zero)", "Rem (Re:Zero - Starting Life in Another World)"),
+])
+def test_trailing_series_title_is_the_same_character(a, b):
+    assert name_keys(a) & name_keys(b)
+    assert same_character(a, b)
+
+
+@pytest.mark.parametrize("a, b", [
+    ("Young Link", "Link"),
+    ("Toon Link", "Link"),
+    ("Young Link", "Toon Link"),
+    ("Young Link", "Link (The Legend of Zelda)"),
+    ("Toon Link", "Link (The Legend of Zelda)"),
+    ("Aqua (Kingdom Hearts)", "Aqua (KonoSuba)"),
+])
+def test_qualifiers_and_different_titles_stay_apart(a, b):
+    assert not same_character(a, b)
+
+
+def test_session_pool_merges_a_titled_form_and_keeps_young_link():
+    s = sess_mod.new_session()
+    added = s.add_candidates([
+        {"id": "bare", "name": "Link", "series": "The Legend of Zelda"},
+        {"id": "titled", "name": "Link (The Legend of Zelda)", "series": "The Legend of Zelda"},
+        {"id": "young", "name": "Young Link", "series": "The Legend of Zelda"},
+        {"id": "toon", "name": "Toon Link", "series": "The Legend of Zelda"},
+    ])
+    assert added == 3
+    assert {c.name for c in s.candidates} == {"Link", "Young Link", "Toon Link"}
+    assert s.add_candidates([
+        {"id": "kh", "name": "Aqua (Kingdom Hearts)"},
+        {"id": "ks", "name": "Aqua (KonoSuba)"},
+    ]) == 2
+
+
 def test_session_pool_rejects_the_other_name_order():
     s = sess_mod.new_session()
     added = s.add_candidates([
@@ -60,6 +101,26 @@ def test_search_merge_keeps_one_of_two_name_orders(monkeypatch):
     again = sources.find_candidates(["Blue Archive"], medium_hint="anime", limit=5,
                                     exclude_names={"Shimoe Koharu"})
     assert [c["name"] for c in again] == ["Hifumi Ajitani"]
+
+
+def test_search_merge_folds_a_titled_name_and_keeps_variants(monkeypatch):
+    monkeypatch.setattr(web_search, "_want_playwright", lambda: False)
+    monkeypatch.setattr(web_search, "_enrich_on", lambda: False)
+    monkeypatch.setattr(web_search, "_want_ddg_fill", lambda *a, **k: False)
+    monkeypatch.setattr(wikipedia, "search_characters",
+                        lambda q, limit: [{"id": "w", "name": "Link"}])
+    monkeypatch.setattr(anilist, "search_characters",
+                        lambda q, limit: [
+                            {"id": "a", "name": "Link (The Legend of Zelda)"},
+                            {"id": "b", "name": "Young Link"},
+                            {"id": "c", "name": "Toon Link"},
+                            {"id": "d", "name": "Aqua (Kingdom Hearts)"},
+                            {"id": "e", "name": "Aqua (KonoSuba)"},
+                        ])
+    out = sources.find_candidates(["Zelda"], medium_hint="game", limit=8)
+    assert [c["name"] for c in out] == [
+        "Link", "Young Link", "Toon Link", "Aqua (Kingdom Hearts)", "Aqua (KonoSuba)",
+    ]
 
 
 def test_ddg_merge_uses_the_same_identity():
