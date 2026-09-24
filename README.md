@@ -1,20 +1,25 @@
 # Nekomimi-Waifu-Seeker
 
-An **Nekomimi character guesser** for **anime, manga, comics and games**, plus the original one-shot feature matcher. Both are decided by **[Laya](https://huggingface.co/convaiinnovations/laya)** — a non-autoregressive decision model that answers typed questions (`choice` / `score` / `noul`) with calibrated probabilities. Laya never generates text; it only decides. Candidates come from Playwright (headless Chromium) first, then DuckDuckGo fills remaining slots. The game is **Nekomimi** at `/nekomimi` and `/api/nekomimi/*`.
+An **Nekomimi character guesser** for **anime, manga, comics, games, movies and TV series**, plus the original one-shot feature matcher. Both are decided by **[Laya](https://huggingface.co/convaiinnovations/laya)** — a non-autoregressive decision model that answers typed questions (`choice` / `score` / `noul`) with calibrated probabilities. Laya never generates text; it only decides. Candidates come from Playwright (headless Chromium) first, then DuckDuckGo fills remaining slots. The game is **Nekomimi** at `/nekomimi` and `/api/nekomimi/*`.
 
 ## Nekomimi mode
 
-Think of a character. The engine asks **Yes / No** and **multiple-choice** questions (hair colour, eye colour) — or you can type a detail instead of answering — and searches for matching characters after every answer. The runtime does not read `data/catalog.json`.
+Think of a character. The engine asks **Yes / No** and **multiple-choice**
+questions — including **where it's from** (anime/manga, game, comic, movie, TV)
+and **which series** (built from the leading candidates) when those split the
+pool best — or you can type a detail instead of answering — and searches for
+matching characters after every answer. The runtime does not read
+`data/catalog.json`.
 
 ```bash
 python -m waifu_engine.web
 # open http://127.0.0.1:7860/nekomimi
 ```
 
-The decision tree first establishes the medium, then selects questions by
-expected information gain over retrieved candidates. Empty searches lead to
-more questions, up to the turn limit. Laya evaluates each eligible
-character independently and also judges readiness:
+The decision tree selects questions by expected information gain over retrieved
+candidates; medium and series compete in that ranking rather than being forced
+first. Empty searches lead to more questions, up to the turn limit. Laya
+evaluates each eligible character independently and also judges readiness:
 
 | Laya question | Type | Decides |
 |---|---|---|
@@ -38,8 +43,9 @@ presented as facts to Laya. This costs one model call per eligible candidate per
 new trait, so large search result pools take longer than small ones.
 It guesses at 80% posterior, or
 after 20 questions, and gets up to 3 guesses. Questions live in
-`waifu_engine/nekomimi/traits.py` (~110 ACG traits) and are topped up with traits
-mined from the search snippets of the current pool.
+`waifu_engine/nekomimi/question_bank.json` (~110 ACG traits, expanded by
+`traits.py`) and are topped up with traits mined from the search snippets of
+the current pool.
 
 JSON API:
 
@@ -111,7 +117,57 @@ runtime. Disabling online search returns no candidates; it does not fall back
 to a fixed character list. In Nekomimi, supply a series, appearance, occupation,
 or another distinguishing detail to refine the next search.
 
+### Configuration file
+
+Settings can live in a `.env` file instead of the shell. Copy `.env.example`
+to `.env` and fill it in. It is git-ignored and loaded at startup, and real
+environment variables always win. The Google block:
+
+```bash
+GOOGLE_API_KEY=...                      # one key for both Gemini features
+WAIFU_GEMINI_MODEL=gemini-2.5-flash     # model for both
+WAIFU_GEMINI_SEARCH=1                   # search: grounded candidate search
+WAIFU_GEMINI_LLM=1                      # llm: query rewriting with Gemini
+# WAIFU_GEMINI_SEARCH_MODEL=...         # per-feature model overrides
+# WAIFU_GEMINI_LLM_MODEL=gemini-2.5-flash-lite
+```
+
+`/healthz` shows which Gemini features are on and which model each uses.
+
+### Optional Gemini search grounding
+
+Gemini with the Google Search tool can be added as a search engine. It is
+asked to list characters matching the player's facts, and it runs the Google
+searches itself. Unlike the name searches, it finds characters from traits
+alone ("female, video game, silver hair"), so it helps most in rounds with no
+seed. Its answers are ordinary candidates that Laya scores. It never picks
+questions or guesses.
+
+```bash
+pip install -e .[gemini]            # google-genai
+export GEMINI_API_KEY=...           # or GOOGLE_API_KEY
+WAIFU_GEMINI_SEARCH=1 python -m waifu_engine.web
+```
+
+Each grounded call is billed and takes a few seconds, so Gemini:
+- only runs when Laya's `pool_fits` says the current candidates don't fit;
+- runs in the background once the round has candidates (hits join the next
+  turn; log line `gemini background ... found=N`), inline only when nothing is
+  in play;
+- caches results for 15 minutes per set of facts, and is skipped with no facts.
+
+`WAIFU_GEMINI_MODEL` (default `gemini-2.5-flash`) picks the model. `/healthz`
+shows `gemini.enabled`, and the timing line shows `hits=gemini:N` /
+`gemini_bg:N` and any `err=gemini: ...` (e.g. quota). The Docker images don't
+install `google-genai`; add it there if you want Gemini in a container.
+
 ### Optional query LLM
+
+The rewriter has two backends. `WAIFU_GEMINI_LLM=1` uses Gemini through the
+same key as Gemini search (JSON output, thinking kept to the minimum). Otherwise
+it uses any OpenAI-compatible server, as below. Either way the gating is the
+same: typed text only, only when Laya says search is stuck, and in the
+background.
 
 Search strings come from templates by default. A small chat model can rewrite
 the player's confirmed facts into better search phrases instead. It writes
@@ -200,7 +256,8 @@ The same numbers come back in each API response as `timing`. Set
 
 ## Notes
 
-- Scope covers anime, manga, comics and games.
+- Scope covers anime, manga, comics, games, movies and TV series. Film and TV
+  coverage is thinner (no AniList; Wikipedia categories and Gemini search).
 - High-cardinality Laya choice sets are weaker; we shortlist first (~8) then decide.
 - Prefer `USE_TF=0` if Transformers hangs while probing TensorFlow.
 - CPU-only here (AMD RDNA2, no CUDA): ~26s one-time model load, ~1.2s per batch of 10 questions.

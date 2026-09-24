@@ -39,7 +39,7 @@ NEKOMIMI_PAGE = """<!doctype html>
 </head>
 <body>
   <h1>Nekomimi</h1>
-  <p class="sub">Think of a character from an <b>anime</b>, <b>comic</b> or <b>game</b>. Answer each question &mdash; yes/no or pick an option &mdash; or type a detail to help. Laya decides what to ask next.</p>
+  <p class="sub">Think of a character from an <b>anime</b>, <b>manga</b>, <b>comic</b>, <b>game</b>, <b>movie</b> or <b>TV series</b>. Answer each question &mdash; yes/no or pick an option &mdash; or type a detail to help. Laya decides what to ask next.</p>
 
   <div id="intro" class="card">
     <div class="row">

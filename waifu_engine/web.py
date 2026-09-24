@@ -13,6 +13,7 @@ from .nekomimi import laya_client
 from .nekomimi import session as nekomimi_session
 from .nekomimi_page import NEKOMIMI_PAGE
 from . import query_llm
+from .sources import gemini
 from .decide import determine
 
 _YES = {"1", "true", "yes"}
@@ -190,7 +191,9 @@ def decide_form(
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "laya": laya_client.status(), "query_llm": query_llm.status()}
+    """Liveness plus the state of each model-backed piece (Laya, query LLM, Gemini)."""
+    return {"status": "ok", "laya": laya_client.status(), "query_llm": query_llm.status(),
+            "gemini": gemini.status()}
 
 
 @app.get("/nekomimi", response_class=HTMLResponse)

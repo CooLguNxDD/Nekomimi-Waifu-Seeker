@@ -5,7 +5,9 @@ Python + FastAPI. Two modes over the same candidate machinery:
 1. **Determine** (`/`, CLI) — one-shot: free-text features → online shortlist → Laya picks a winner.
 2. **Nekomimi** (`/nekomimi`) — interactive: engine asks yes/no questions, narrows a live candidate pool, guesses.
 
-Scope is **ACG**: Anime, Manga, Comics, Games (including visual novels and gacha). Not anime-only.
+Scope is **ACG plus film and TV**: Anime, Manga, Comics, Games (including visual
+novels and gacha), Movies and TV series. Not anime-only. Media values are
+`traits.MEDIUM_VALUES` (`anime`, `manga`, `comic`, `game`, `movie`, `tv`).
 
 ## The one constraint that shapes everything
 
@@ -23,10 +25,10 @@ Every answer also carries `action.act_probability`.
 
 Consequences, in order of how often they get forgotten:
 
-- **Question text never comes from the model.** All questions live in
-  `waifu_engine/nekomimi/traits.py`. Do not put question wording in prompt
-  strings scattered through the code, and do not add a generative model to
-  write them.
+- **Question text never comes from the model.** Question wording lives in
+ `waifu_engine/nekomimi/question_bank.json`. `traits.py` expands that template
+ into the runtime bank. Do not put question wording in prompt strings
+ scattered through the code, and do not add a generative model to write them.
 - `criteria` keys are the option labels; `choice` returns one of those keys.
 - The result key is **`probabilities`**, not `probs`.
 - Option strings are packed into the decision head. If a `choice` has many long
@@ -39,23 +41,32 @@ Consequences, in order of how often they get forgotten:
 | Path | Role |
 |---|---|
 | `waifu_engine/nekomimi/laya_client.py` | Process-wide `Agent` singleton. `ask(state, questions)` → answers or `None`. Never raises. `preload()` (load + warm-up, run by `web.py`'s lifespan before the port opens), `status()` (read-only, served at `/healthz`). `python -m` it to bake weights. |
-| `waifu_engine/nekomimi/traits.py` | ~110 ACG trait questions + `ANSWER_WEIGHT` + `make_dynamic()` for mined traits |
+| `waifu_engine/nekomimi/question_bank.json` | Question template: yes/no rows, choice rows, and `trait_block` groups |
+| `waifu_engine/nekomimi/traits.py` | Expands the JSON template, plus `ANSWER_WEIGHT` and `make_dynamic()` for mined traits |
 | `waifu_engine/nekomimi/session.py` | `Candidate`, `GuessSession`, log-odds pool, in-process store + TTL |
 | `waifu_engine/nekomimi/engine.py` | The turn loop: `start`, `submit_answer`, `submit_guess_result`, `state_payload` |
 | `waifu_engine/nekomimi_page.py` | Static HTML/JS for `/nekomimi` |
 | `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
 | `waifu_engine/sources/` | Playwright HTML indexes, then AniList + Wikipedia; DuckDuckGo (`web_search.ddg_quick`, capped) fills remaining slots, in the background per session (`background_key`) and only when `ddg_gate()` agrees |
-| `waifu_engine/query_llm.py` | Optional OpenAI-compatible query rewriter (default local `Qwen/Qwen3.6-35B-A3B`). `prefetch` (one background worker) / `peek` (non-blocking) / `rewrite` (blocking, tooling only). Never raises. Off unless `WAIFU_QUERY_LLM=1` |
+| `waifu_engine/google_config.py` | Google GenAI settings + the one shared `genai.Client`: key, per-feature switches (`search_enabled`, `llm_enabled`), models (`WAIFU_GEMINI_MODEL`, per-feature overrides), minimal `thinking_config` |
+| `waifu_engine/sources/gemini.py` | Optional Gemini + Google Search grounding source. `search_characters(facts, medium)` → candidates. Never raises. Off unless `WAIFU_GEMINI_SEARCH=1` and `GEMINI_API_KEY`/`GOOGLE_API_KEY` |
+| `waifu_engine/envfile.py` | Dependency-free `.env` loader, run from `waifu_engine/__init__.py`; fills only unset variables. `.env.example` lists the settings. Tests set `WAIFU_ENV_FILE=0` (`tests/conftest.py`) |
+| `waifu_engine/query_llm.py` | Optional query rewriter: Gemini (`WAIFU_GEMINI_LLM=1`) or any OpenAI-compatible server (default local `Qwen/Qwen3.6-35B-A3B`). `prefetch` (one background worker) / `peek` (non-blocking) / `rewrite` (blocking, tooling only). Never raises. Off unless `WAIFU_QUERY_LLM=1` |
 | `waifu_engine/timing.py` | Per-request spans. `@traced` on `start`/`submit_answer`/`submit_guess_result`/`determine` logs one `[waifu]` line (slowest first) and sets `payload["timing"]`. `span()` is a no-op outside a trace |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
 | `waifu_engine/search.py`, `catalog.py` | Online shortlist ranking; catalog helpers remain for tooling but runtime never loads the catalog |
 
 ## The turn contract
 
-1. Establish the medium, then `_pick_question` chooses by mutual information
-   (answer entropy minus within-candidate uncertainty); Laya only answers
-   `ready_to_guess`. Empty searches keep asking until the turn limit.
+1. `_pick_question` chooses by mutual information (answer entropy minus
+   within-candidate uncertainty); Laya only answers `ready_to_guess`. The
+   `medium` choice ("Where is your character from?": anime/manga, game, comic,
+   movie, TV, something else) and dynamic "Which series?" compete in that
+   ranking like any other question — neither is forced first. A medium pick is
+   a hard filter (`traits.MEDIUM_ACCEPTS`; movie and TV accept each other,
+   "other" accepts no known medium; unknown media are never removed). Empty
+   searches keep asking until the turn limit.
 2. `score_candidates` records evidence and evaluates **every eligible candidate**
    with an independent `match` noul call. Never gate evidence on `scoring_pool()`;
    that top-10 list is only a readiness summary.
@@ -79,6 +90,15 @@ options including `other`) are answered with an option key. Each candidate gets
 its own Laya `choice` call; `probabilities[picked]` is the likelihood (cached in
 `choice_cache`). Heuristic fallback weights a tag hit at most 1.5× uniform.
 Early-guess support for choice evidence is `p_pick / (p_pick + best_other)`.
+
+"Which series?" (`engine._series_question`, wording in `traits.series_question`)
+is a dynamic choice over the leading candidates' series (`names.series_key`,
+up to 6 plus "Another series"), ranked by information gain like any question,
+asked at most twice (the second time only after "Another series"). Known
+medium/series are scored from data (`_known_choice`), no model call; only
+candidates without them go to Laya. A picked series is a search fact that sets
+`specific=True`. Option labels are scraped text: `_series_label` sanitises
+them, and the page renders them with `textContent`.
 
 Before each search, one Laya `choice` call (`focus`) ranks the positive facts;
 the top three lead the query. A near-uniform answer (< 1.5/n) is ignored in
@@ -105,6 +125,13 @@ top characters for anime/manga, Wikipedia game/comic character categories;
 live, never `catalog.json`) up to `WAIFU_POPULAR_POOL` candidates in play.
 `_http` records network failures (`last_search_meta()["errors"]`); the timing
 line shows per-source `hits=` and `err=`.
+
+Gemini search grounding (`sources.gemini`) finds characters from the facts
+themselves, so it works on broad button facts where name searches cannot. It
+shares the memoised `ddg_gate` (Laya `pool_fits`), runs in the background
+(`_GEMINI_BG`, its own worker, capped by `WAIFU_GEMINI_BG_MAX_PENDING`) whenever
+the session has candidates, and inline only when the pool would be empty.
+Results are cached 15 min per facts. With no facts it is skipped (billed calls).
 
 Answers to yes/no questions are **`yes` / `no` / `detail`**. `detail` does not answer the current
 yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and
@@ -168,10 +195,20 @@ interpolate them into HTML unescaped — `web.py` uses `html.escape`, and the
 | `WAIFU_DDG_TIMEOUT` | `5` | Per-request DuckDuckGo timeout |
 | `WAIFU_DDG_BG_MAX_PENDING` | `4` | Background DuckDuckGo fills queued or running at once; extra ones are dropped |
 | `WAIFU_DDG_BACKGROUND` | `1` | Fill with DuckDuckGo off the request thread (`0` = inline, capped) |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | Gemini API key for both Gemini features; both stay off without one |
+| `WAIFU_GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model for search and llm |
+| `WAIFU_GEMINI_SEARCH` | `0` | Use Gemini with Google Search grounding as a candidate source (billed) |
+| `WAIFU_GEMINI_SEARCH_MODEL` | `WAIFU_GEMINI_MODEL` | Search model; must support the Google Search tool |
+| `WAIFU_GEMINI_LLM` | `0` | Use Gemini as the query LLM instead of the OpenAI-compatible server (billed) |
+| `WAIFU_GEMINI_LLM_MODEL` | `WAIFU_GEMINI_MODEL` | Query-LLM model (a lite model is enough) |
+| `WAIFU_GEMINI_TIMEOUT` | `15` | Seconds per grounded request |
+| `WAIFU_GEMINI_BACKGROUND` | `1` | Run Gemini off the request thread when the pool has candidates (`0` = inline) |
+| `WAIFU_GEMINI_BG_MAX_PENDING` | `2` | Background Gemini searches queued or running at once; extra ones are dropped |
 | `WAIFU_POPULAR_POOL` | `24` | Popular candidates kept in play on a cold start (each costs a `match` call per answer) |
 | `WAIFU_TIMING_LOG` | `1` | Log one timing line per request (`payload["timing"]` is always filled) |
 | `WAIFU_LAYA_PRELOAD` | `1` | Load Laya at app startup (`0` = on first request) |
 | `WAIFU_LAYA_REQUIRED` | `0` | Fail startup if Laya does not load (set in the Laya Docker image) |
+| `WAIFU_ENV_FILE` | `.env` | Env file loaded at import (`0` = off); real env vars win |
 | `USE_TF` | — | Set `0`; Transformers hangs probing TensorFlow |
 | `HF_HOME` | — | Weight cache (`/data/hf` in Docker) |
 
@@ -190,19 +227,30 @@ DuckDuckGo.
 
 ## Rules
 
-1. New questions go in `traits.py`, nowhere else.
-2. Tag slugs in `traits.py` and `web_search.TRAIT_PATTERNS` share one vocabulary
+1. New questions go in `question_bank.json`, nowhere else. `traits.py` only expands that template.
+2. Tag slugs in `question_bank.json` and `web_search.TRAIT_PATTERNS` share one vocabulary
    — add to both or evidence and questions stop lining up.
-3. Trait matching is whole-word regex. Plain substring matching once made `"he"`
+3. Candidate identity is `names.name_keys` everywhere (search merge, DDG merge,
+   session pool): names match in either word order, because Japanese names
+   come family-first ("Shimoe Koharu") and given-first ("Koharu Shimoe"), and
+   a duplicate splits its own probability. Don't compare raw name strings.
+4. Trait matching is whole-word regex. Plain substring matching once made `"he"`
    fire on `"the"` and tagged every character male.
-4. Laya calls go through `laya_client.ask`. Do not construct `Router` or call
+5. Laya calls go through `laya_client.ask`. Do not construct `Router` or call
    `laya.load` anywhere else.
-5. The query LLM (`query_llm.py`) writes **search strings only** — never
+6. The query LLM (`query_llm.py`, either backend: Gemini or OpenAI-compatible) writes **search strings only** — never
    question text, never decisions. Its input is player facts only; never send
    it scraped names or blurbs. Tests stub its HTTP; never call a real endpoint.
-6. The query LLM must never block a turn by default, and must not be called
+7. The query LLM must never block a turn by default, and must not be called
    per answer: only for new typed text, and only when Laya says search is stuck.
-7. Every function you add or change gets a docstring, including private
+8. Gemini (`sources/gemini.py`) is a **candidate source only**: it lists
+   characters, never writes question text, never makes decisions. Its reply is
+   untrusted web content (parse defensively, render with `textContent`). Its
+   prompt holds player facts only, never scraped names or blurbs -- the one
+   exception is a series label the player confirmed, after `_series_label`
+   sanitising. Tests use a
+   fake client; never call the real API.
+9. Every function you add or change gets a docstring, including private
    helpers: one line saying what it returns or does, plus the non-obvious
    *why* (a measured failure, a constraint) when there is one. CodeRabbit's
    pre-merge check requires 80% docstring coverage over the functions a PR

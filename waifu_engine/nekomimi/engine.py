@@ -4,7 +4,8 @@ Laya never writes text; it decides. Per turn:
 
 * **which question to ask is ours**, by expected information gain over the
   candidate posterior -- Laya's ``choice`` over question ids came back
-  near-uniform and was dropped;
+  near-uniform and was dropped. "Where is your character from?" and
+  "Which series?" compete in that ranking; neither is forced first;
 * one call for ``ready_to_guess`` (noul, is the evidence enough to name a
   character);
 * one call **per candidate** for ``match`` (noul, does this candidate satisfy
@@ -34,6 +35,7 @@ import threading
 from typing import Any
 
 from .. import query_llm, sources, timing, web_search
+from ..names import same_series_key, series_key
 from . import laya_client
 from .session import (
     MAX_GUESSES,
@@ -45,22 +47,24 @@ from .session import (
 )
 from .traits import (
     ANSWER_WEIGHT,
+    MAX_SERIES_OPTIONS,
+    MEDIUM_ACCEPTS,
+    MEDIUM_VALUES,
     QUESTION_BANK,
     QUESTIONS_BY_ID,
     clue_question,
     is_choice,
     make_dynamic,
     noul_criteria,
+    series_question,
     valid_answers,
 )
 
-# Which candidate media each medium question accepts. Used to eliminate
-# outright rather than down-weight once the user settles the medium.
-_MEDIUM_QUESTIONS: dict[str, frozenset[str]] = {
-    "medium_game": frozenset({"game"}),
-    "medium_anime": frozenset({"anime", "manga"}),
-    "medium_comic": frozenset({"comic"}),
-}
+# The medium question's id. Its pick is a hard fact (``MEDIUM_ACCEPTS``):
+# candidates of a known, non-accepted medium are removed outright.
+MEDIUM_QID = "medium"
+# Laya's framing of the task, shared by every state it sees.
+GOAL = "Identify one anime, manga, comic, video game, movie or TV character."
 
 # How many bank questions Laya chooses between each turn. Laya is weak on
 # wide choice sets, so the bank is pre-filtered by entropy first.
@@ -92,15 +96,11 @@ def _session_lock(sess: GuessSession) -> threading.Lock:
 
 
 def _medium_hint(sess: GuessSession) -> str | None:
+    """The medium the player picked (``anime``/``game``/``comic``/``movie``/``tv``),
+    or None before the medium question is answered or after "Something else"."""
     for a in sess.asked:
-        if a.get("answer") != "yes":
-            continue
-        if a["qid"] == "medium_game":
-            return "game"
-        if a["qid"] == "medium_anime":
-            return "anime"
-        if a["qid"] == "medium_comic":
-            return "comic"
+        if a["qid"] == MEDIUM_QID and a.get("answer") in MEDIUM_ACCEPTS:
+            return None if a["answer"] == "other" else a["answer"]
     return None
 
 
@@ -150,7 +150,7 @@ def _focus_facts(sess: GuessSession, entries: list[tuple[str, float]]) -> list[s
                else [entries[0], *entries[-(FOCUS_OPTIONS - 1):]])
     keys = {f"fact_{i}": text for i, (text, _) in enumerate(offered, start=1)}
     answers = laya_client.ask(
-        {"goal": "Identify one anime, comic or video game character.",
+        {"goal": GOAL,
          "confirmed_facts": list(keys.values())},
         {"focus": {
             "type": "choice",
@@ -296,7 +296,7 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
                 ddg_gate=None if initial else stuck,
                 # Only typed text (or an LLM rewrite of it) can match names;
                 # broad button facts fall back to the popular pool.
-                specific=bool(_free_text(sess) or rewritten),
+                specific=bool(_free_text(sess) or rewritten or _confirmed_series(sess)),
                 pool_size=len(sess.alive_candidates()),
             )
     except Exception as exc:  # noqa: BLE001 - search is best effort
@@ -366,7 +366,8 @@ def _split_quality(question: dict[str, Any], candidates: Any) -> float:
     if is_choice(question):
         # Same quantity over n outcomes; a multiple-choice question can be
         # worth more than one bit, which is why it replaces a run of yes/nos.
-        dists = [(_tag_choice(question, c, strength=6.0), w / total) for c, w in pairs]
+        dists = [(_known_choice(question, c) or _tag_choice(question, c, strength=6.0), w / total)
+                 for c, w in pairs]
         mix = {k: sum(d[k] * w for d, w in dists) for k in question["options"]}
         return max(0.0, _entropy_n(mix) - sum(w * _entropy_n(d) for d, w in dists))
 
@@ -375,12 +376,7 @@ def _split_quality(question: dict[str, Any], candidates: Any) -> float:
             return 0.0
         return -p * math.log2(p) - (1.0 - p) * math.log2(1.0 - p)
 
-    media = _MEDIUM_QUESTIONS.get(question["id"])
-    predictions = [
-        (float(c.medium in media) if media and c.medium not in ("", "unknown")
-         else _tag_match(question, c), w / total)
-        for c, w in pairs
-    ]
+    predictions = [(_tag_match(question, c), w / total) for c, w in pairs]
     p_yes = sum(p * w for p, w in predictions)
     return max(0.0, entropy(p_yes) - sum(w * entropy(p) for p, w in predictions))
 
@@ -419,28 +415,32 @@ def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
 
 
 def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
-    """Top-N questions worth asking, highest expected information gain first."""
+    """Top-N questions worth asking, highest expected information gain first.
+
+    Medium ("Where is your character from?") and series ("Which series?")
+    compete in the same ranking as every other question. Forcing medium first
+    burned a turn when the pool already shared one medium; series already
+    ranked by information gain, but only after that forced medium turn.
+    """
     asked = sess.asked_ids()
     settled = sess.settled_categories()
     weighted = _weighted(sess)
+    series = _series_question(sess)
     pool = [
         q
-        for q in QUESTION_BANK + _dynamic_questions(sess)
+        for q in QUESTION_BANK + _dynamic_questions(sess) + ([series] if series else [])
         if q["id"] not in asked and q["category"] not in settled
     ]
     if not pool:
         pool = [q for q in QUESTION_BANK if q["id"] not in asked]
-    # Establish a search domain before ranking a small, biased result set.
-    domains = [q for q in pool if q["id"] in _MEDIUM_QUESTIONS]
-    if _medium_hint(sess) is None and domains:
-        return domains[:CHOICE_WIDTH]
     pool.sort(key=lambda q: _split_quality(q, weighted), reverse=True)
     return pool[:CHOICE_WIDTH]
 
 
 def _laya_state(sess: GuessSession, candidates: list[Candidate]) -> dict[str, Any]:
+    """Round-level state for Laya: goal, confirmed facts, history, given candidates."""
     return {
-        "goal": "Identify one anime, comic or video game character.",
+        "goal": GOAL,
         "confirmed_facts": sess.constraints or ["nothing confirmed yet"],
         "answer_history": sess.history() or [{"question": "none yet", "answer": "", "detail": ""}],
         "characters": {c.name: c.profile() for c in candidates},
@@ -494,6 +494,107 @@ def _tag_match(question: dict[str, Any], cand: Candidate) -> float:
            for t in question["tags_true"]):
         return 0.7
     return 0.5
+
+
+def _is_series_question(question: dict[str, Any]) -> bool:
+    """Whether ``question`` is a "Which series?" question (its options carry keys)."""
+    return any("series_key" in o for o in (question.get("options") or {}).values())
+
+
+def _known_choice(question: dict[str, Any], cand: Candidate) -> dict[str, float] | None:
+    """Option distribution fixed by data the candidate already carries, or None.
+
+    Medium question: a known medium puts most of the mass on its own option,
+    a little on crossover options (movie/TV). Series question: a known series puts 0.9 on its option, or on
+    "Another series" when it is not listed. Either way no model call is
+    needed; candidates without the data go to Laya instead.
+    """
+    options = list(question.get("options") or {})
+    if not options:
+        return None
+    if question.get("id") == MEDIUM_QID:
+        if cand.medium not in MEDIUM_VALUES:
+            return None
+        # The candidate's own medium gets most of the mass; an option that only
+        # accepts it as a crossover (movie <-> TV) gets a smaller share, so
+        # "Movie" still ranks film characters above TV ones.
+        own = "anime" if cand.medium == "manga" else cand.medium
+        cross = [k for k in options
+                 if k != own and cand.medium in MEDIUM_ACCEPTS.get(k, ())]
+        rest = [k for k in options if k != own and k not in cross]
+        dist = {own: 0.8 if cross else 0.96}
+        dist.update({k: 0.16 / len(cross) for k in cross})
+        dist.update({k: 0.04 / len(rest) for k in rest})
+        return dist
+    if _is_series_question(question):
+        key = series_key(cand.series)
+        if not key:
+            return None
+        hits = [k for k, o in question["options"].items()
+                if same_series_key(key, o.get("series_key", ""))][:1] or ["other"]
+    else:
+        return None
+    rest = [k for k in options if k not in hits]
+    on, off = 0.9, 0.1
+    if not rest:
+        return {k: 1.0 / len(hits) for k in hits}
+    dist = {k: on / len(hits) for k in hits}
+    dist.update({k: off / len(rest) for k in rest})
+    return dist
+
+
+_SERIES_LABEL = re.compile(r"[^\w\s:'&.!/-]")
+
+
+def _series_label(series: str) -> str:
+    """A series name safe to show as a button: scraped text, so only letters,
+    digits, spaces and ``:'&.!-/`` survive, capped at 40 characters."""
+    label = " ".join(_SERIES_LABEL.sub("", series or "").split())
+    return label[:40].rstrip()
+
+
+def _confirmed_series(sess: GuessSession) -> str:
+    """The series the player picked in a "Which series?" question, or ""."""
+    for a in sess.asked:
+        option = (a.get("options") or {}).get(a.get("answer") or "")
+        if option and option.get("series_key"):
+            return option.get("fact", "")
+    return ""
+
+
+def _series_question(sess: GuessSession) -> dict[str, Any] | None:
+    """A "Which series?" question over the leading candidates' series, or None.
+
+    Live candidates are grouped by series (``names.series_key``), weighted by
+    posterior, and the top groups become options. Asked at most twice: the
+    second time only after "Another series", without the series already
+    offered. Needs at least two series to be worth asking.
+    """
+    series_asked = [a for a in sess.asked if a["qid"].startswith("series")]
+    if _confirmed_series(sess) or len(series_asked) >= 2:
+        return None
+    if series_asked and series_asked[-1].get("answer") != "other":
+        return None
+    offered = [o["series_key"] for a in series_asked
+               for o in (a.get("options") or {}).values() if o.get("series_key")]
+    groups: list[dict[str, Any]] = []
+    for cand, p in sess.posterior():
+        key = series_key(cand.series)
+        label = _series_label(cand.series)
+        if not key or not label or any(same_series_key(key, k) for k in offered):
+            continue
+        group = next((g for g in groups if same_series_key(key, g["key"])), None)
+        if group is None:
+            group = {"key": key, "weight": 0.0, "labels": {}}
+            groups.append(group)
+        group["weight"] += p
+        group["labels"][label] = group["labels"].get(label, 0) + 1
+    if len(groups) < 2:
+        return None
+    groups.sort(key=lambda g: g["weight"], reverse=True)
+    picked = [(g["key"], max(g["labels"], key=g["labels"].get))
+              for g in groups[:MAX_SERIES_OPTIONS]]
+    return series_question("series" if not series_asked else "series_2", picked)
 
 
 def _tag_choice(question: dict[str, Any], cand: Candidate,
@@ -595,19 +696,18 @@ def _match_probabilities(
 def _eliminate_by_medium(sess: GuessSession, question: dict[str, Any], answer: str) -> int:
     """A settled medium is a hard fact, not a nudge.
 
-    Once the user says "yes, it is a video game character", an anime candidate
+    Once the player says "it's from a video game", an anime candidate
     is not merely less likely -- it is wrong, and leaving it in the pool lets it
     soak up evidence from later questions.
     """
-    if question["category"] != "medium" or question["id"] not in _MEDIUM_QUESTIONS:
+    accepts = MEDIUM_ACCEPTS.get(answer) if question["id"] == MEDIUM_QID else None
+    if accepts is None:
         return 0
-    medium = _MEDIUM_QUESTIONS[question["id"]]
     dropped = 0
     for cand in sess.alive_candidates():
-        if cand.medium in ("", "unknown"):
-            continue
-        matches = cand.medium in medium
-        if (answer == "yes" and not matches) or (answer == "no" and matches):
+        if cand.medium not in MEDIUM_VALUES:
+            continue  # unknown medium: never eliminated
+        if cand.medium not in accepts:
             cand.alive = False
             cand.logodds = -math.inf
             dropped += 1
@@ -641,25 +741,25 @@ def _rescore_candidates(sess: GuessSession) -> None:
         c.logodds = popularity_prior(c.popularity)
     for qid, (question, answer) in sess.evidence.items():
         if is_choice(question):
-            missing = [c for c in live if (c.id, qid) not in sess.choice_cache]
+            # Known medium/series is data, not a judgment: no model call.
+            known = {c.id: d for c in live if (d := _known_choice(question, c))}
+            missing = [c for c in live
+                       if c.id not in known and (c.id, qid) not in sess.choice_cache]
             dists = _choice_probabilities(missing, question)
             if dists:
                 sess.laya_used = True
                 sess.choice_cache.update({(cid, qid): d for cid, d in dists.items()})
             for c in live:
-                dist = sess.choice_cache.get((c.id, qid)) or _tag_choice(question, c)
+                dist = (known.get(c.id) or sess.choice_cache.get((c.id, qid))
+                        or _tag_choice(question, c))
                 c.logodds += math.log(min(0.98, max(0.02, dist.get(answer, 0.0))))
             continue
-        media = _MEDIUM_QUESTIONS.get(qid)
-        missing = [c for c in live if (c.id, qid) not in sess.match_cache
-                   and not (media and c.medium not in ("", "unknown"))]
+        missing = [c for c in live if (c.id, qid) not in sess.match_cache]
         probs = _match_probabilities(missing, question)
         if probs:
             sess.laya_used = True
             sess.match_cache.update({(cid, qid): p for cid, p in probs.items()})
         for c in live:
-            if media and c.medium not in ("", "unknown"):
-                continue  # known medium already applied as a hard constraint
             p = sess.match_cache.get((c.id, qid))
             if p is None:
                 # A failed model call must not make noisy tags stronger evidence

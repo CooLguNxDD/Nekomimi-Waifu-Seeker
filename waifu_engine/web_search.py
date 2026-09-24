@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import browser_search
+from .names import name_keys, same_character
 
 LISTICLE = re.compile(
     r"(top\s*\d+|\d+\s*best|best\s+\d+|ranked|list of|tier list|husbando material|certified|pinterest)",
@@ -72,7 +73,10 @@ MEDIUM_TEXT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("comic", ("comic book", "marvel", "dc comics", "superhero", "graphic novel",
                "webtoon", "issue #")),
     ("manga", ("manga", "light novel", "shonen", "shoujo", "seinen")),
-    ("anime", ("anime", "seiyuu", "voice actor", "studio ghibli", "tv series")),
+    ("anime", ("anime", "seiyuu", "voice actor", "studio ghibli")),
+    # After the ACG hints: an anime TV series stays "anime".
+    ("movie", ("film", "movie", "box office", "pixar", "disney animated")),
+    ("tv", ("tv series", "television series", "sitcom", "netflix series", "hbo")),
 )
 
 STOP = {
@@ -151,8 +155,6 @@ def _enrich_limit() -> int:
         return 8
 
 
-def _name_key(name: str) -> str:
-    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
 
 
 def _want_ddg_fill(
@@ -280,13 +282,21 @@ def _clean_name(title: str) -> str:
 
 
 def _guess_medium(title: str, href: str, body: str) -> str:
+    """Medium implied by a search hit, or ``unknown``.
+
+    A domain that hosts one medium wins. IMDb hosts film and television, so
+    it is not in that map: labeling every IMDb hit a movie scored TV
+    characters at 0.16 on a TV answer. Markers are whole words, the same
+    rule as trait slugs — ``film`` matched ``filmed`` and ``hbo`` matched
+    ``neighbor``, and a mislabeled candidate was then eliminated.
+    """
     low_href = (href or "").lower()
     for domain, medium in MEDIUM_DOMAIN_HINTS:
         if domain in low_href:
             return medium
     low = f"{title} {body}".lower()
     for medium, markers in MEDIUM_TEXT_HINTS:
-        if any(m in low for m in markers):
+        if any(_marker_re(m).search(low) for m in markers):
             return medium
     return "unknown"
 
@@ -658,13 +668,14 @@ def _take_candidate(
     exclude_ids: set[str],
     limit: int,
 ) -> bool:
+    """Add ``cand`` unless its id or name (either word order) is taken; True at ``limit``."""
     if not cand or cand["id"] in exclude_ids or cand["id"] in found:
         return False
-    key = _name_key(cand.get("name", ""))
-    if not key or key in seen_names:
+    keys = name_keys(cand.get("name", ""))
+    if not keys or keys & seen_names:
         return False
     found[cand["id"]] = cand
-    seen_names.add(key)
+    seen_names |= keys
     return len(found) >= limit
 
 
@@ -753,6 +764,8 @@ def search_characters_multiround(
     rounds: int = 3,
     per_round: int = 8,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """One-shot mode's search: up to ``rounds`` widening rounds, merged by
+    id and name. Returns (candidates, per-round logs)."""
     rounds = max(1, min(int(rounds), 5))
     merged: dict[str, dict[str, Any]] = {}
     logs: list[dict[str, Any]] = []
@@ -864,7 +877,7 @@ def search_characters_multiround(
                 prev = merged.get(cand["id"])
                 if prev is None:
                     # Name already taken by a Playwright hit — keep the first source.
-                    if _name_key(cand["name"]) in {_name_key(c["name"]) for c in merged.values()}:
+                    if any(same_character(cand["name"], c["name"]) for c in merged.values()):
                         continue
                     merged[cand["id"]] = cand
                     added += 1

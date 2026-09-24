@@ -19,10 +19,14 @@ dependencies = [
 laya = ["laya>=0.3.0"]
 dml = ["onnxruntime-directml", "onnx"]
 playwright = ["playwright>=1.49"]
-dev = ["pytest>=8.0"]
+gemini = ["google-genai>=1.51.0"]
+dev = ["pytest>=8.0", "google-genai>=1.51.0"]
 
 [project.scripts]
 waifu-engine = "waifu_engine.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["waifu_engine*"]
+
+[tool.setuptools.package-data]
+"waifu_engine.nekomimi" = ["question_bank.json"]

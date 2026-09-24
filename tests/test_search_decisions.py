@@ -223,9 +223,14 @@ def test_popular_characters_follow_the_medium(monkeypatch):
     members = {"Category:Female characters in video games": ["Lara Croft", "Samus Aran"],
                "Category:Male characters in video games": ["Mario", "Link"],
                "Category:Marvel Comics superheroes": ["Spider-Man"],
-               "Category:DC Comics superheroes": ["Batman"]}
+               "Category:DC Comics superheroes": ["Batman"],
+               "Category:Female characters in film": ["Ellen Ripley"],
+               "Category:Male characters in film": ["Indiana Jones"],
+               "Category:Female characters in television": ["Buffy Summers"],
+               "Category:Male characters in television": ["Walter White"]}
     monkeypatch.setattr(wikipedia, "category_members", lambda cat, limit=100: members[cat])
-    media = {"Spider-Man": "comic", "Batman": "comic"}
+    media = {"Spider-Man": "comic", "Batman": "comic", "Ellen Ripley": "movie",
+             "Indiana Jones": "movie", "Buffy Summers": "tv", "Walter White": "tv"}
     views = {"Samus Aran": 900, "Mario": 500, "Link": 400, "Lara Croft": 300}
     monkeypatch.setattr(wikipedia, "pages_by_title", lambda titles: [
         {"id": t, "name": t, "medium": media.get(t, "game"), "popularity": views.get(t, 1)}
@@ -235,8 +240,9 @@ def test_popular_characters_follow_the_medium(monkeypatch):
     assert {c["name"] for c in games} == {"Lara Croft", "Samus Aran", "Mario", "Link"}
     assert [c["name"] for c in games][0] == "Samus Aran"  # most viewed first
     mixed = sources.popular_characters(None, 8)
-    assert {c["medium"] for c in mixed} == {"anime", "game", "comic"}
+    assert {c["medium"] for c in mixed} == {"anime", "game", "comic", "movie", "tv"}
     assert len(mixed) <= 8
+    assert {c["name"] for c in sources.popular_characters("tv", 2)} == {"Buffy Summers", "Walter White"}
 
 
 def test_network_errors_are_recorded_not_mistaken_for_no_results(monkeypatch, quiet_sources):

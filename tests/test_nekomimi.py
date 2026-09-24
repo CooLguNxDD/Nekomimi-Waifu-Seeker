@@ -135,9 +135,11 @@ def test_logit_is_clamped():
 
 def test_settled_category_is_not_asked_again():
     s = _fresh_session()
-    s.asked.append({"qid": "medium_game", "text": "?", "category": "medium", "answer": "yes"})
+    s.asked.append({"qid": "medium", "text": "?", "category": "medium_kind", "answer": "game",
+                    "kind": "choice", "options": traits.QUESTIONS_BY_ID["medium"]["options"]})
+    s.asked.append({"qid": "medium_vn", "text": "?", "category": "medium", "answer": "yes"})
     picked = engine.candidate_questions(s)
-    assert all(q["category"] != "medium" for q in picked)
+    assert picked and all(q["category"] not in ("medium", "medium_kind") for q in picked)
 
 
 def test_question_ranking_prefers_even_splits():
@@ -152,29 +154,35 @@ def test_question_ranking_prefers_even_splits():
 
 def test_yes_answer_promotes_matching_candidates():
     s = _fresh_session()
-    q = traits.QUESTIONS_BY_ID["medium_game"]
-    engine.score_candidates(s, q, "yes")
-    assert s.by_id("c_mario").logodds > s.by_id("c_makima").logodds
+    engine.score_candidates(s, traits.QUESTIONS_BY_ID["gender_female"], "yes")
+    assert s.by_id("c_miku").logodds > s.by_id("c_mario").logodds
 
 
 def test_no_answer_demotes_matching_candidates():
     s = _fresh_session()
-    q = traits.QUESTIONS_BY_ID["medium_game"]
-    engine.score_candidates(s, q, "no")
-    assert s.by_id("c_mario").logodds < s.by_id("c_makima").logodds
+    engine.score_candidates(s, traits.QUESTIONS_BY_ID["gender_female"], "no")
+    assert s.by_id("c_miku").logodds < s.by_id("c_mario").logodds
 
 
 def test_detail_answer_carries_no_weight():
     s = _fresh_session()
     before = [c.logodds for c in s.candidates]
-    engine.score_candidates(s, traits.QUESTIONS_BY_ID["medium_game"], "detail")
+    engine.score_candidates(s, traits.QUESTIONS_BY_ID["medium"], "detail")
     assert [c.logodds for c in s.candidates] == before
 
 
 # --- full loop -------------------------------------------------------
 
 
-def _answer_as(target_tags: set[str], question_id: str) -> str:
+_TARGET_SERIES = {frozenset(c["tags"]): c["series"] for c in POOL}
+
+
+def _answer_as(target_tags: set[str], question_id: str, question: dict | None = None) -> str:
+    """Answer as the target would: tags decide yes/no and choice options; a
+    series question is answered from the target's series (``_TARGET_SERIES``)."""
+    if question_id.startswith("series") and question:
+        target = _TARGET_SERIES.get(frozenset(target_tags), "")
+        return next((o["key"] for o in question["options"] if o["label"] == target), "other")
     q = traits.QUESTIONS_BY_ID.get(question_id)
     if q is None:
         return "no"
@@ -184,7 +192,10 @@ def _answer_as(target_tags: set[str], question_id: str) -> str:
 
 
 def _reply(state: dict, yesno: str) -> str:
-    """``yesno`` for yes/no questions; "other" for a multiple-choice question."""
+    """``yesno`` for yes/no questions; "game" for the medium question (the
+    fixture pool is mostly games) and "other" for any other choice question."""
+    if state["question"]["qid"] == "medium":
+        return "game"
     return "other" if state["question"].get("kind") == "choice" else yesno
 
 
@@ -196,7 +207,7 @@ def test_loop_converges_on_the_target():
     for _ in range(engine.MAX_TURNS + 2):
         if state["stage"] != "asking":
             break
-        state = engine.submit_answer(s, _answer_as(target, state["question"]["qid"]))
+        state = engine.submit_answer(s, _answer_as(target, state["question"]["qid"], state["question"]))
     assert state["stage"] == "guessing"
     assert state["guess"]["name"] == "Mario"
 
@@ -281,15 +292,15 @@ def test_question_ranking_is_information_gain():
     s = _fresh_session()
     # Every candidate is tagged with its medium, so "is it a video game
     # character" splits the pool and beats a trait nothing is tagged with.
-    splitter = engine._split_quality(traits.QUESTIONS_BY_ID["medium_game"], s.posterior())
+    splitter = engine._split_quality(traits.QUESTIONS_BY_ID["medium"], s.posterior())
     dud = engine._split_quality(traits.QUESTIONS_BY_ID["eyes_heterochromia"], s.posterior())
     assert splitter > dud
-    assert 0.0 <= dud <= splitter <= 1.0
+    assert 0.0 <= dud < splitter  # a multi-choice split can exceed one bit
 
 
 def test_medium_answer_eliminates_contradicting_candidates():
     s = _fresh_session()
-    engine.score_candidates(s, traits.QUESTIONS_BY_ID["medium_game"], "yes")
+    engine.score_candidates(s, traits.QUESTIONS_BY_ID["medium"], "game")
     alive = {c.name for c in s.alive_candidates()}
     assert "Mario" in alive
     assert "Makima" not in alive  # anime
@@ -353,7 +364,7 @@ def test_refresh_replays_history_and_filters_medium_before_model(monkeypatch):
         return {"match": {"noul": 0.8}}
 
     monkeypatch.setattr(laya_client, "ask", fake_ask)
-    engine.score_candidates(s, traits.QUESTIONS_BY_ID["medium_game"], "yes")
+    engine.score_candidates(s, traits.QUESTIONS_BY_ID["medium"], "game")
     engine.score_candidates(s, traits.QUESTIONS_BY_ID["gender_female"], "yes")
     assert len(calls) == 2
     monkeypatch.setattr(engine, "ONLINE", True)
@@ -432,7 +443,7 @@ def test_full_round_with_900_candidates_and_model_judgments(monkeypatch):
     state = engine.start()
     s = sess_mod.get_session(state["session_id"])
     while state["stage"] == "asking":
-        state = engine.submit_answer(s, _answer_as(target_tags, state["question"]["qid"]))
+        state = engine.submit_answer(s, _answer_as(target_tags, state["question"]["qid"], state["question"]))
     assert evaluated
     assert state["stage"] == "guessing"
     assert state["guess"]["name"] == "Mario"
@@ -450,10 +461,10 @@ def test_empty_search_continues_and_target_can_arrive_after_answer(monkeypatch):
     monkeypatch.setattr(engine.sources, "find_candidates", search)
     state = engine.start()
     assert state["stage"] == "asking"
-    assert state["question"]["qid"] == "medium_game"
+    assert state["question"]["qid"] == "medium"
     s = sess_mod.get_session(state["session_id"])
     assert not s.candidates
-    state = engine.submit_answer(s, "yes")
+    state = engine.submit_answer(s, "game")
     assert len(calls) == 2
     assert calls[-1][1] == "game"
     assert s.by_id("c_mario") is not None
@@ -521,12 +532,12 @@ def test_search_driven_round_discovers_target_from_later_detail(monkeypatch):
     state = engine.start()
     s = sess_mod.get_session(state["session_id"])
     assert s.by_id("c_mario") is None
-    state = engine.submit_answer(s, "yes")  # game; the first anime hit is removed
+    state = engine.submit_answer(s, "game")  # the first anime hit is removed
     assert state["stage"] == "asking"
     state = engine.submit_answer(s, "detail", "Italian plumber")
     assert s.by_id("c_mario") is not None
     while state["stage"] == "asking":
-        state = engine.submit_answer(s, _answer_as(target_tags, state["question"]["qid"]))
+        state = engine.submit_answer(s, _answer_as(target_tags, state["question"]["qid"], state["question"]))
     assert state["guess"]["name"] == "Mario"
     assert state["guess_number"] == 1
     assert len(queries) == 1 + sum(bool(a["answer"]) for a in s.asked)
@@ -633,7 +644,7 @@ def test_choice_payload_lists_options():
     payload = engine._question_payload(s, traits.QUESTIONS_BY_ID["eye_color"])
     assert payload["kind"] == "choice"
     assert {"key": "other", "label": "Other"} in payload["options"]
-    assert engine._question_payload(s, traits.QUESTIONS_BY_ID["medium_game"])["kind"] == "yesno"
+    assert engine._question_payload(s, traits.QUESTIONS_BY_ID["gender_female"])["kind"] == "yesno"
 
 
 def test_choice_support_gates_early_guess():
