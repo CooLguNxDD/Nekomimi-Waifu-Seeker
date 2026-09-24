@@ -103,9 +103,22 @@ GENERIC_SERIES = {
     "animated film", "animated television", "teenage", "adoption in", "orphan",
 }
 
+# A publisher is not the work. Taking the longest "<series> characters"
+# category made every Marvel page "Marvel Comics", so the series question
+# could not offer Spider-Man separately from Abomination.
+_PUBLISHER_SERIES = {
+    "marvel comics", "dc comics", "image comics", "dark horse comics",
+    "dark horse",
+}
+
 
 def _series_of(title: str, categories: list[str], extract: str) -> str:
-    """Prefer a "<series> characters" category; the prose fallback guesses badly."""
+    """Prefer a specific "<series> characters" category over a publisher bucket.
+
+    The prose fallback guesses badly, and the longest category used to be
+    "Marvel Comics superheroes", which glued unrelated Marvel characters into
+    one series. A publisher-only page stays "Unknown" so it is not that chip.
+    """
     named = []
     for c in categories:
         m = re.match(r"Category:(.+?) (?:characters|superheroes|supervillains)$", c, re.I)
@@ -119,7 +132,7 @@ def _series_of(title: str, categories: list[str], extract: str) -> str:
             flags=re.I,
         ).strip()
         low = series.lower()
-        if low.startswith("fictional") or low in GENERIC_SERIES:
+        if low.startswith("fictional") or low in GENERIC_SERIES or low in _PUBLISHER_SERIES:
             continue
         named.append(series)
     if named:
@@ -127,13 +140,17 @@ def _series_of(title: str, categories: list[str], extract: str) -> str:
         return max(named, key=len)
     m = re.search(r"\(([^)]+)\)$", title)
     if m and "character" not in m.group(1).lower():
-        return m.group(1)
+        note = m.group(1).strip()
+        if note.lower() not in _PUBLISHER_SERIES:
+            return note
     m = re.search(
         r"\b(?:from|in) (?:the )?(?:video game |comic book |manga |anime )?"
         r"(?:series |franchise )?([A-Z][\w'&:.-]*(?:\s+[A-Z][\w'&:.-]*){0,3})",
         extract[:300],
     )
-    return m.group(1) if m else "Unknown"
+    if m and m.group(1).lower() not in _PUBLISHER_SERIES:
+        return m.group(1)
+    return "Unknown"
 
 
 def _clean_title(title: str) -> str:
