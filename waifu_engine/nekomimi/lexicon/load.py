@@ -373,6 +373,83 @@ def build_categories(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_characters(doc: dict[str, Any]) -> dict[str, Any]:
+    """Return identity rows, headliner rows, and non-character titles.
+
+    Identity names are whole spellings of one person. Headliner phrases are
+    player-text markers; the engine applies the prior. A duplicate id, phrase,
+    or spelling raises so two people cannot silently share a key.
+    """
+    _require_keys(
+        doc, "characters.yml",
+        {"identities", "headliners", "non_characters"},
+        {"identities", "headliners", "non_characters"},
+    )
+    identities_raw = doc["identities"]
+    if not isinstance(identities_raw, list) or not identities_raw:
+        raise LexiconError("characters.yml identities must be a non-empty list")
+    identities: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    for index, row in enumerate(identities_raw):
+        where = f"characters.yml identities[{index}]"
+        if not isinstance(row, dict):
+            raise LexiconError(f"{where} must be a mapping")
+        _require_keys(row, where, {"id", "names"}, {"id", "names"})
+        slug = row["id"]
+        if not isinstance(slug, str) or not slug.strip():
+            raise LexiconError(f"{where}.id must be a string")
+        if slug in seen_ids:
+            raise LexiconError(f"characters.yml has duplicate id {slug!r}")
+        seen_ids.add(slug)
+        names = _str_list(row["names"], f"{where}.names", unique=True)
+        if len(names) < 2:
+            raise LexiconError(f"{where} needs at least two spellings")
+        for name in names:
+            key = " ".join(name.lower().split())
+            if key in seen_names:
+                raise LexiconError(f"characters.yml repeats spelling {name!r}")
+            seen_names.add(key)
+        identities.append({"id": slug, "canonical": names[0], "names": tuple(names)})
+    head_raw = doc["headliners"]
+    if not isinstance(head_raw, list) or not head_raw:
+        raise LexiconError("characters.yml headliners must be a non-empty list")
+    headliners: list[dict[str, Any]] = []
+    seen_franchise: set[str] = set()
+    seen_phrase: set[str] = set()
+    for index, row in enumerate(head_raw):
+        where = f"characters.yml headliners[{index}]"
+        if not isinstance(row, dict):
+            raise LexiconError(f"{where} must be a mapping")
+        _require_keys(row, where, {"franchise", "phrases", "names"}, {"franchise", "phrases", "names"})
+        franchise = row["franchise"]
+        if not isinstance(franchise, str) or not franchise.strip():
+            raise LexiconError(f"{where}.franchise must be a string")
+        if franchise in seen_franchise:
+            raise LexiconError(f"characters.yml repeats franchise {franchise!r}")
+        seen_franchise.add(franchise)
+        phrases = _str_list(row["phrases"], f"{where}.phrases", unique=True)
+        names = _str_list(row["names"], f"{where}.names", unique=True)
+        folded: list[str] = []
+        for phrase in phrases:
+            key = " ".join(phrase.lower().split())
+            if key in seen_phrase:
+                raise LexiconError(f"characters.yml repeats headliner phrase {phrase!r}")
+            seen_phrase.add(key)
+            folded.append(key)
+        headliners.append({
+            "franchise": franchise,
+            "phrases": tuple(folded),
+            "names": tuple(names),
+        })
+    blocked = _str_list(doc["non_characters"], "characters.yml non_characters", unique=True)
+    return {
+        "identities": tuple(identities),
+        "headliners": tuple(headliners),
+        "non_characters": tuple(blocked),
+    }
+
+
 def load_lexicon() -> dict[str, Any]:
     """Load and validate every lexicon file. Called once at import."""
     return {
@@ -381,4 +458,5 @@ def load_lexicon() -> dict[str, Any]:
         "franchises": build_franchises(load_document("franchises.yml")),
         "traits": build_traits(load_document("traits.yml")),
         "categories": build_categories(load_document("categories.yml")),
+        "characters": build_characters(load_document("characters.yml")),
     }

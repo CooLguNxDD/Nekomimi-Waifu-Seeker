@@ -24,10 +24,27 @@ def test_spellings_of_one_character_match(a, b):
 @pytest.mark.parametrize("a, b", [
     ("Rem", "Ram"),
     ("Asuka Langley Soryu", "Asuka Kazama"),
+    ("Asuka Langley Soryu", "Kyoko Zeppelin Soryu"),
+    ("Soryu", "Kyoko Zeppelin Soryu"),
+    ("Wonder Woman", "Nubia"),
     ("Mario", "Luigi"),
 ])
 def test_different_characters_stay_apart(a, b):
     assert not same_character(a, b)
+
+
+@pytest.mark.parametrize("a, b", [
+    ("Asuka Langley Soryu", "Asuka Langley Sohryu"),
+    ("Asuka Langley Soryu", "Asuka Langley Sōryū"),
+    ("Asuka Langley Soryu", "Asuka Shikinami Langley"),
+    ("Asuka Langley", "Soryu"),
+    ("Shikinami", "Asuka Langley Soryu"),
+    ("Wonder Woman", "Diana Prince"),
+    ("Diana of Themyscira", "Wonder Woman"),
+    ("Princess Diana of Themyscira", "Diana Prince"),
+])
+def test_known_alias_scatters_are_one_character(a, b):
+    assert same_character(a, b)
 
 
 def test_names_without_letters_have_no_key():

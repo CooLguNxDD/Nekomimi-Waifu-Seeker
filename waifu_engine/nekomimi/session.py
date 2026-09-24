@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..names import already_seen, name_keys
+from ..names import already_seen, canonical_name, identity_id, name_keys, same_character
 
 SESSION_TTL_SECONDS = int(os.getenv("WAIFU_NEKOMINI_TTL", "1800"))
 MAX_TURNS = int(os.getenv("WAIFU_NEKOMINI_MAX_TURNS", "20"))
@@ -143,6 +143,9 @@ class GuessSession:
     # what makes that lead commitable. See ``engine._should_guess``.
     leader_id: str = ""
     leader_streak: int = 0
+    # Id of a rejected guess that still shares a work with the live pool.
+    # The next turn asks one trait that separates them, then clears this.
+    recovery_from: str = ""
 
     # -- candidate pool ------------------------------------------------
     def alive_candidates(self) -> list[Candidate]:
@@ -154,20 +157,92 @@ class GuessSession:
                 return c
         return None
 
+    def _absorb_raw(self, cand: Candidate, raw: dict[str, Any]) -> None:
+        """Fold a duplicate hit into ``cand`` so a second spelling keeps its tags.
+
+        Diana Prince's page often carries the royalty tag that the Wonder
+        Woman page lacks. Dropping the duplicate used to drop that evidence
+        with it. The display name becomes the lexicon canonical spelling.
+        """
+        extra = [tag for tag in (raw.get("tags") or []) if tag not in cand.tags]
+        if extra:
+            cand.tags = [*cand.tags, *extra]
+        cand.popularity = max(cand.popularity, int(raw.get("popularity") or 0))
+        blurb = raw.get("blurb") or ""
+        if len(blurb) > len(cand.blurb):
+            cand.blurb = blurb
+        if not cand.image_url and raw.get("image_url"):
+            cand.image_url = raw.get("image_url")
+        if not cand.source_url and raw.get("source_url"):
+            cand.source_url = raw.get("source_url")
+        series = raw.get("series") or ""
+        if series and series not in {"Unknown", "Web result"} and cand.series in {"", "Unknown", "Web result"}:
+            cand.series = series
+        medium = raw.get("medium") or ""
+        if medium and medium != "unknown" and cand.medium in {"", "unknown"}:
+            cand.medium = medium
+        canon = canonical_name(cand.name) or canonical_name(raw.get("name") or "")
+        if canon:
+            cand.name = canon
+
+    def _absorb_other(self, keeper: Candidate, other: Candidate) -> None:
+        """Fold a live alias row into ``keeper`` (tags, fame, blurb, links)."""
+        self._absorb_raw(keeper, {
+            "name": other.name,
+            "tags": other.tags,
+            "popularity": other.popularity,
+            "blurb": other.blurb,
+            "image_url": other.image_url,
+            "source_url": other.source_url,
+            "series": other.series,
+            "medium": other.medium,
+        })
+
+    def collapse_identities(self) -> int:
+        """Merge live rows that the alias table says are one person.
+
+        Returns how many extra rows were folded in. Search returns Soryu,
+        Sohryu, Shikinami and bare Langley as separate hits; each used to
+        hold its own posterior, so Kyoko's single row outranked every fragment.
+        A lone fragment is renamed to the canonical spelling.
+        """
+        groups: dict[str, list[Candidate]] = {}
+        for cand in self.alive_candidates():
+            iid = identity_id(cand.name)
+            if iid:
+                groups.setdefault(iid, []).append(cand)
+        folded = 0
+        for group in groups.values():
+            canon = canonical_name(group[0].name)
+            keeper = next((c for c in group if canon and c.name == canon), None)
+            if keeper is None:
+                keeper = max(group, key=lambda c: (c.popularity, len(c.name)))
+            for other in group:
+                if other is keeper:
+                    continue
+                self._absorb_other(keeper, other)
+                other.alive = False
+                other.logodds = -math.inf
+                folded += 1
+            if canon:
+                keeper.name = canon
+        return folded
+
     def add_candidates(self, raws: list[dict[str, Any]]) -> int:
         """Add search hits not already in the pool; returns how many were added.
 
-        A hit is a duplicate if its id or its name (either word order, or a
-        trailing series title) is already known, or it was rejected as a guess.
-        List, category, and disambiguation pages are dropped so a roster such
-        as VOCALOIDs cannot lead the pool.
+        A hit is a duplicate if its id or its name (either word order, a
+        trailing series title, or a known alias) is already known, or it was
+        rejected as a guess. Alias duplicates donate their tags to the row
+        already in the pool. List, category, franchise and species pages are
+        dropped so a roster or an "Evangelion" article cannot lead the pool.
         """
         known = {c.id for c in self.candidates}
         # The same character turns up under several URLs (wiki, MAL, fandom),
         # and duplicates split their own posterior mass. Names, not key
         # sets: "Link" absorbs "Link (The Legend of Zelda)", while
         # "Young Link" and a different work's "Aqua (other)" stay.
-        from ..web_search import is_aggregate_page
+        from ..web_search import is_non_character
 
         seen_names = [c.name for c in self.candidates]
         added = 0
@@ -177,14 +252,33 @@ class GuessSession:
             if not raw.get("id") or raw["id"] in known or raw["id"] in self.rejected:
                 continue
             name = raw.get("name", "")
-            if not name_keys(name) or already_seen(name, seen_names):
+            if not name_keys(name):
                 continue
-            # List and category pages (VOCALOIDs, Vocaloid/Characters) must
-            # not enter the pool, or they lead the posterior and get guessed.
-            if is_aggregate_page(name, raw.get("source_url") or "", raw.get("blurb") or ""):
+            # List, category, franchise and species pages must not enter the
+            # pool, or they lead the posterior and get guessed.
+            if is_non_character(name, raw.get("source_url") or "", raw.get("blurb") or ""):
+                continue
+            match = next((c for c in self.candidates if same_character(name, c.name)), None)
+            if match is not None:
+                if match.id in self.rejected or not match.alive:
+                    iid = identity_id(name)
+                    keeper = next(
+                        (c for c in self.alive_candidates()
+                         if iid and identity_id(c.name) == iid and c.id not in self.rejected),
+                        None,
+                    )
+                    if keeper is not None:
+                        self._absorb_raw(keeper, raw)
+                else:
+                    self._absorb_raw(match, raw)
+                continue
+            if already_seen(name, seen_names):
                 continue
             seen_names.append(name)
             cand = Candidate.from_search(raw)
+            canon = canonical_name(name)
+            if canon:
+                cand.name = canon
             # New arrivals start at the median of the live pool so they are not
             # instantly eliminated by evidence they were never scored against,
             # plus a small bonus for fame.
@@ -192,6 +286,7 @@ class GuessSession:
             self.candidates.append(cand)
             known.add(cand.id)
             added += 1
+        self.collapse_identities()
         return added
 
     def scoring_pool(self) -> list[Candidate]:
@@ -200,15 +295,16 @@ class GuessSession:
         return live[:MAX_SCORED_CANDIDATES]
 
     def posterior(self) -> list[tuple[Candidate, float]]:
-        """Live candidates by probability, with list and category pages left out.
+        """Live candidates by probability, with non-characters left out.
 
-        A roster page that slipped into the pool must not be the guess.
+        A roster, franchise article, or species page that slipped into the
+        pool must not be the guess and must not soak probability mass.
         """
-        from ..web_search import is_aggregate_page
+        from ..web_search import is_non_character
 
         live = [
             c for c in self.alive_candidates()
-            if not is_aggregate_page(c.name, c.source_url or "", c.blurb)
+            if not is_non_character(c.name, c.source_url or "", c.blurb)
         ]
         if not live:
             return []

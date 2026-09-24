@@ -20,7 +20,10 @@ import re
 from typing import Iterable
 
 # Publisher keys: lexicon/franchises.yml. ``series_key`` is the matcher.
+# Identity rows: lexicon/characters.yml. ``identity_id`` is the matcher.
+from .nekomimi.lexicon import CHARACTER_IDENTITIES as _CHARACTER_IDENTITIES
 from .nekomimi.lexicon import PUBLISHER_KEYS as _PUBLISHER_KEYS
+from .nekomimi.lexicon.load import LexiconError
 
 # Word separators between name parts: whitespace, the Japanese middle dot and
 # full-width space, commas ("Shimoe, Koharu").
@@ -66,6 +69,53 @@ def _keys(name: str) -> frozenset[str]:
     return frozenset({"".join(words), "".join(sorted(words))})
 
 
+def index_identities(rows: Iterable[dict]) -> tuple[dict[str, str], dict[str, str]]:
+    """Map each alias key to one identity id, and each id to its display name.
+
+    A key shared by two ids raises. ``same_character`` would otherwise glue
+    two people together the way a bare substring once glued every "Soryu".
+    """
+    by_key: dict[str, str] = {}
+    canonical: dict[str, str] = {}
+    for row in rows:
+        slug = row["id"]
+        canonical[slug] = row["canonical"]
+        for alias in row["names"]:
+            base, _note = _split_disambiguation(alias)
+            keys = _keys(base)
+            if not keys:
+                raise LexiconError(f"characters.yml identity {slug} has no letters in {alias!r}")
+            for key in keys:
+                prev = by_key.get(key)
+                if prev is not None and prev != slug:
+                    raise LexiconError(
+                        f"characters.yml key {key!r} is both {prev} and {slug}"
+                    )
+                by_key[key] = slug
+    return by_key, canonical
+
+
+_IDENTITY_BY_KEY, _CANONICAL_BY_ID = index_identities(_CHARACTER_IDENTITIES)
+
+
+def identity_id(name: str) -> str:
+    """Lexicon id shared by known spellings of one person, or ``""``.
+
+    "Asuka Langley Sohryu" and bare "Soryu" are one id. "Kyoko Zeppelin Soryu"
+    is not: the alias is the whole name, not a surname inside a longer one.
+    """
+    base, _note = _split_disambiguation(name)
+    found = {_IDENTITY_BY_KEY[key] for key in _keys(base) if key in _IDENTITY_BY_KEY}
+    if len(found) == 1:
+        return next(iter(found))
+    return ""
+
+
+def canonical_name(name: str) -> str:
+    """Display name for a known alias, or ``""`` when ``name`` is not in the table."""
+    return _CANONICAL_BY_ID.get(identity_id(name), "")
+
+
 def name_keys(name: str) -> frozenset[str]:
     """Keys under which two spellings of one character's name are equal.
 
@@ -87,8 +137,12 @@ def same_character(a: str, b: str) -> bool:
     key intersection alone would merge every "Aqua (work)". Equivalent
     titles do match, via ``same_series_key`` ("Re:Zero" and its full name).
     A qualifier in the name itself ("Young Link", "Toon Link") stays a
-    different base.
+    different base. Known scatters (Soryu / Sohryu / Shikinami, Wonder Woman
+    / Diana Prince) match through ``identity_id`` even when the tokens differ.
     """
+    id_a, id_b = identity_id(a), identity_id(b)
+    if id_a and id_a == id_b:
+        return True
     base_a, note_a = _split_disambiguation(a)
     base_b, note_b = _split_disambiguation(b)
     if not (_keys(base_a) & _keys(base_b)):

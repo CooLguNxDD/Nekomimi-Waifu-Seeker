@@ -22,15 +22,17 @@ import re
 import threading
 import time
 from functools import lru_cache
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from . import browser_search
-from .names import already_seen, name_keys, same_character
+from .names import already_seen, name_keys, same_character, series_key
 from .nekomimi.lexicon import (
     AGGREGATE_EXACT as _AGGREGATE_EXACT,
     COLOR_WORDS as _COLOR_WORDS,
+    HEADLINERS as _HEADLINERS,
     NAME_BLOCK as SERIES_BLOCK,
+    NON_CHARACTERS as _NON_CHARACTERS,
     SERIES_CRUMBS as _SERIES_CRUMBS,
     SERIES_MARKERS as _SERIES_MARKERS,
     TRAIT_PATTERNS,
@@ -327,6 +329,60 @@ def franchise_mentioned(franchise: str, text: str) -> bool:
     return bool(franchise) and bool(_phrase_re(franchise).search((text or "").lower()))
 
 
+def _headliner_hits() -> tuple[tuple[int, re.Pattern[str], str, tuple[str, ...]], ...]:
+    """Phrase patterns sorted longest-first so "final fantasy vii" beats a shorter title."""
+    flat: list[tuple[int, re.Pattern[str], str, tuple[str, ...]]] = []
+    for row in _HEADLINERS:
+        names = tuple(row["names"])
+        for phrase in row["phrases"]:
+            flat.append((len(phrase), _phrase_re(phrase), row["franchise"], names))
+    flat.sort(key=lambda item: item[0], reverse=True)
+    return tuple(flat)
+
+
+_HEADLINER_HITS = _headliner_hits()
+
+
+def headliner_from_texts(texts: Iterable[str]) -> tuple[str, tuple[str, ...]] | None:
+    """Return ``(franchise, title names)`` for the longest headliner phrase in ``texts``.
+
+    Player text only. A blurb that mentions the work must not select it: that
+    is how a crossover used to join the wrong cast.
+    """
+    best: tuple[int, str, tuple[str, ...]] | None = None
+    for text in texts:
+        low = (text or "").lower()
+        if not low:
+            continue
+        for length, pattern, franchise, names in _HEADLINER_HITS:
+            if best is not None and length <= best[0]:
+                break
+            if pattern.search(low):
+                best = (length, franchise, names)
+                break
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def headliner_label(text: str) -> str:
+    """Franchise display name named in ``text``, or ``""`` when none matches."""
+    hit = headliner_from_texts([text])
+    return hit[0] if hit else ""
+
+
+# Page titles that are a work or a species, not a person. series_key folds case.
+_NON_CHARACTER_KEYS = frozenset(key for name in _NON_CHARACTERS if (key := series_key(name)))
+# First sentence of a franchise or species article. Bare "series" is not
+# enough: "is a series regular" and "is the protagonist of the anime series"
+# are still people. "series of" / "franchise" / "species" are the page.
+_WORK_OR_SPECIES = re.compile(
+    r"\b(?:is|are)\s+(?:a|an|the)\s+(?:[a-z0-9-]+\s+){0,4}"
+    r"(?:species|franchise|series\s+of)\b",
+    re.I,
+)
+
+
 # Category crumbs: lexicon/franchises.yml. ``series_is_crumb`` is an exact
 # normalized string match; these are not regular expressions.
 
@@ -363,6 +419,23 @@ _AGGREGATE_NAME = re.compile(
 _ROSTER_URL = re.compile(r"/characters?/?(?:[?#].*)?$")
 # Exact roster titles: lexicon/franchises.yml ``aggregate_exact``. The rest of
 # ``is_aggregate_page`` (regexes, plural stem against ``SERIES_BLOCK``) stays here.
+
+
+def is_non_character(name: str, url: str = "", blurb: str = "") -> bool:
+    """Whether this hit is a work, species, list, or category rather than one person.
+
+    "Evangelion" and "Angels" soaked the Asuka posterior and were eligible to
+    be guessed. List pages stay out through ``is_aggregate_page``. A title on
+    the non-character list is out even when the blurb is empty. The opening
+    sentence is checked too, because a franchise page can be titled with a
+    name that is not on that list yet.
+    """
+    if is_aggregate_page(name, url, blurb):
+        return True
+    if series_key(name) in _NON_CHARACTER_KEYS:
+        return True
+    head = re.split(r"(?<=[.!?])\s", (blurb or "").strip(), maxsplit=1)[0][:240]
+    return bool(head) and bool(_WORK_OR_SPECIES.search(head))
 
 
 def is_aggregate_page(name: str, url: str = "", blurb: str = "") -> bool:

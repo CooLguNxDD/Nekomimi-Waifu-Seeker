@@ -1,0 +1,66 @@
+# Known character identities and franchise headliners.
+# Matching stays in names.py and engine.py. This file is only the lists.
+# A name matches an identity as a whole spelling (either word order), never
+# as a substring: "Kyoko Zeppelin Soryu" is not the alias "Soryu".
+identities:
+  - id: asuka-langley-soryu
+    names:
+      - Asuka Langley Soryu
+      - Asuka Langley Sohryu
+      - Asuka Langley Souryu
+      - Asuka Langley Souryuu
+      - Asuka Langley Soryuu
+      - Asuka Langley Sōryū
+      - Asuka Langley Sôryû
+      - Asuka Langley
+      - Asuka Shikinami Langley
+      - Asuka Shikinami
+      - Soryu
+      - Sohryu
+      - Souryu
+      - Souryuu
+      - Shikinami
+  - id: wonder-woman
+    names:
+      - Wonder Woman
+      - Diana Prince
+      - Diana of Themyscira
+      - Princess Diana of Themyscira
+
+# phrases: player text that names the work (whole phrase, longest wins).
+# names: title characters. Supporting cast must not outrank these when the
+# player named the work. "final fantasy" alone is not here: only VII's lead
+# is Cloud, and a shorter marker would boost him inside every numbered entry.
+headliners:
+  - franchise: Neon Genesis Evangelion
+    phrases:
+      - neon genesis evangelion
+      - evangelion
+    names:
+      - Shinji Ikari
+      - Asuka Langley Soryu
+      - Rei Ayanami
+  - franchise: Final Fantasy VII
+    phrases:
+      - final fantasy vii
+      - final fantasy 7
+      - ffvii
+      - ff7
+    names:
+      - Cloud Strife
+  - franchise: Wonder Woman
+    phrases:
+      - wonder woman
+      - diana prince
+      - diana of themyscira
+    names:
+      - Wonder Woman
+
+# Exact page titles that are a work, a species, or a group. Guessing filters
+# these even when the blurb never says "list of".
+non_characters:
+  - Evangelion
+  - Neon Genesis Evangelion
+  - Angels
+  - Final Fantasy
+  - Final Fantasy VII
