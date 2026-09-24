@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from .. import timing
-from ..names import already_seen, name_keys
+from ..names import name_keys, plain_duplicate
 from ..nekomimi.lexicon import POPULAR_CATEGORIES, SEARCH_SUFFIX as _MEDIUM_SUFFIX
 from . import _http, anilist, gemini, wikipedia
 
@@ -430,8 +430,9 @@ def find_candidates(
     def take(items: list[dict[str, Any]], source: str = "") -> None:
         """Add hits whose character is new; count them under ``source``.
 
-        ``already_seen`` matches either word order and a trailing series
+        ``plain_duplicate`` matches either word order and a trailing series
         title, and keeps two different work titles of the same given name.
+        A different lexicon spelling is kept so the session can absorb it.
         The dict is keyed by id so those two titles do not overwrite each
         other: they share a bare ``name_keys`` entry.
         """
@@ -439,7 +440,9 @@ def find_candidates(
         for cand in items:
             name = cand.get("name", "")
             keys = name_keys(name)
-            if not keys or already_seen(name, excluded) or already_seen(name, taken_names):
+            # Identity aliases (Diana Prince beside Wonder Woman) stay in the
+            # list so the session can absorb their tags. Same spellings drop.
+            if not keys or plain_duplicate(name, excluded) or plain_duplicate(name, taken_names):
                 continue
             if web_search.is_aggregate_page(
                 name, cand.get("source_url") or "", cand.get("blurb") or ""
@@ -525,7 +528,7 @@ def find_candidates(
                 # Over-fetch by the names already seen (in play or ruled out),
                 # which ``take`` skips, so the free room can still be filled.
                 fresh = [c for c in popular_characters(medium_hint, room + n_seen)
-                         if not already_seen(c.get("name", ""), excluded)]
+                         if not plain_duplicate(c.get("name", ""), excluded)]
                 take(fresh[:room], "popular")
             except Exception as exc:  # noqa: BLE001
                 web_search._note_error(f"popular: {exc}")

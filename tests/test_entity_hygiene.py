@@ -310,6 +310,64 @@ def test_franchise_page_cannot_be_the_guess():
     assert not web_search.is_non_character("Cloud Strife")
 
 
+def test_protagonist_of_a_franchise_stays_a_character():
+    """A person who belongs to a franchise is not the franchise page.
+
+    The word gap before "franchise" used to swallow "of", so "protagonist of
+    the Metroid franchise" and "member of the Saiyan species" were quarantined.
+    "species of" is a creature, not that page.
+    """
+    assert not web_search.is_non_character(
+        "Samus Aran", "",
+        "Samus Aran is the protagonist of the Metroid franchise.",
+    )
+    assert not web_search.is_non_character(
+        "Vegeta", "",
+        "Vegeta is a member of the Saiyan species.",
+    )
+    assert not web_search.is_non_character(
+        "Pikachu", "",
+        "Pikachu is a species of Pokémon.",
+    )
+    assert web_search.is_non_character(
+        "Metroid", "", "Metroid is a Japanese media franchise.",
+    )
+    assert web_search.is_non_character(
+        "Saiyans", "", "The Saiyans are a fictional species.",
+    )
+    assert web_search.is_non_character(
+        "Metroid", "", "Metroid is a series of video games.",
+    )
+
+
+def test_namesake_from_another_work_is_not_absorbed():
+    """Kingdom Hearts Aqua must not take a KonoSuba blurb or tags.
+
+    ``same_character`` is true for bare "Aqua" and "Aqua (KonoSuba)". Absorb
+    still requires one lexicon id, or series fields that do not name two works.
+    """
+    sess = sess_mod.new_session()
+    added = sess.add_candidates([
+        {"id": "kh", "name": "Aqua", "series": "Kingdom Hearts", "medium": "game",
+         "tags": ["blue"], "blurb": "A Keyblade wielder.", "popularity": 100},
+        {"id": "ks", "name": "Aqua (KonoSuba)", "series": "KonoSuba", "medium": "anime",
+         "tags": ["mage"],
+         "blurb": "A goddess with a much longer blurb from the other work.",
+         "popularity": 9000},
+    ])
+    assert added == 1
+    row = sess.by_id("kh")
+    assert row.tags == ["blue"]
+    assert row.blurb == "A Keyblade wielder."
+    assert row.popularity == 100
+    assert sess.add_candidates([
+        {"id": "ks2", "name": "Aqua", "series": "KonoSuba", "tags": ["mage"],
+         "blurb": "Another longer KonoSuba blurb that must not replace the first."},
+    ]) == 0
+    assert row.tags == ["blue"]
+    assert row.blurb == "A Keyblade wielder."
+
+
 def test_wonder_woman_and_ff7_resolve_without_breaking_mario():
     """Series-other text names those works. "mario" is still the whole clue only."""
     eva = sess_mod.new_session()

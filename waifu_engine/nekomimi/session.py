@@ -15,7 +15,15 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..names import already_seen, canonical_name, identity_id, name_keys, same_character
+from ..names import (
+    already_seen,
+    canonical_name,
+    identity_id,
+    name_keys,
+    same_character,
+    same_series,
+    series_key,
+)
 
 SESSION_TTL_SECONDS = int(os.getenv("WAIFU_NEKOMINI_TTL", "1800"))
 MAX_TURNS = int(os.getenv("WAIFU_NEKOMINI_MAX_TURNS", "20"))
@@ -39,6 +47,23 @@ def popularity_prior(popularity: int | float | None) -> float:
     return min(POPULARITY_CAP, POPULARITY_WEIGHT * math.log10(1.0 + float(popularity)))
 
 
+
+
+def _may_absorb(existing: Candidate, raw: dict[str, Any]) -> bool:
+    """Whether a duplicate hit may fold its tags into ``existing``.
+
+    A shared lexicon id still folds when the series labels differ (Diana
+    Prince under Wonder Woman, the title row under DC Comics). Two known
+    series that are not the same work do not: Kingdom Hearts Aqua must not
+    take a KonoSuba blurb. An unknown series does not contradict.
+    """
+    iid = identity_id(raw.get("name") or "")
+    if iid and iid == identity_id(existing.name):
+        return True
+    left, right = series_key(existing.series), series_key(raw.get("series") or "")
+    if not left or not right:
+        return True
+    return same_series(existing.series, raw.get("series") or "")
 
 
 def answer_label(asked: dict[str, Any]) -> str:
@@ -260,6 +285,11 @@ class GuessSession:
                 continue
             match = next((c for c in self.candidates if same_character(name, c.name)), None)
             if match is not None:
+                # Bare "Aqua" matches "Aqua (KonoSuba)" by name. Absorb only
+                # when they are one lexicon identity, or the series fields
+                # do not name two works. Otherwise drop the hit.
+                if not _may_absorb(match, raw):
+                    continue
                 if match.id in self.rejected or not match.alive:
                     iid = identity_id(name)
                     keeper = next(
@@ -267,7 +297,7 @@ class GuessSession:
                          if iid and identity_id(c.name) == iid and c.id not in self.rejected),
                         None,
                     )
-                    if keeper is not None:
+                    if keeper is not None and _may_absorb(keeper, raw):
                         self._absorb_raw(keeper, raw)
                 else:
                     self._absorb_raw(match, raw)

@@ -145,3 +145,50 @@ def test_ddg_merge_uses_the_same_identity():
     web_search._take_candidate(found, seen, {"id": "1", "name": "Koharu Shimoe"}, set(), 5)
     web_search._take_candidate(found, seen, {"id": "2", "name": "Shimoe Koharu"}, set(), 5)
     assert list(found) == ["1"]
+
+
+def test_alias_spelling_reaches_the_session(monkeypatch):
+    """Diana Prince is not an ordinary duplicate of Wonder Woman.
+
+    Dropping her at the source used to throw away royalty tags before
+    ``GuessSession.add_candidates`` could absorb them. The same spelling is
+    still one row.
+    """
+    monkeypatch.setattr(web_search, "_want_playwright", lambda: False)
+    monkeypatch.setattr(web_search, "_enrich_on", lambda: False)
+    monkeypatch.setattr(web_search, "_want_ddg_fill", lambda *a, **k: False)
+    monkeypatch.setattr(wikipedia, "search_characters",
+                        lambda q, limit: [{"id": "ww", "name": "Wonder Woman", "tags": ["female"]}])
+    monkeypatch.setattr(anilist, "search_characters",
+                        lambda q, limit: [
+                            {"id": "diana", "name": "Diana Prince", "tags": ["royalty"]},
+                            {"id": "ww2", "name": "Wonder Woman", "tags": ["lasso"]},
+                        ])
+    out = sources.find_candidates(["Wonder Woman"], limit=5)
+    assert [c["name"] for c in out] == ["Wonder Woman", "Diana Prince"]
+    again = sources.find_candidates(
+        ["Wonder Woman"], limit=5, exclude_names={"Wonder Woman"},
+    )
+    assert [c["name"] for c in again] == ["Diana Prince"]
+    found, seen = {}, set()
+    web_search._take_candidate(found, seen, {"id": "ww", "name": "Wonder Woman"}, set(), 5)
+    assert web_search._take_candidate(
+        found, seen, {"id": "diana", "name": "Diana Prince", "tags": ["royalty"]}, set(), 5,
+    ) is False
+    assert set(found) == {"ww", "diana"}
+    web_search._take_candidate(found, seen, {"id": "ww2", "name": "Wonder Woman"}, set(), 5)
+    assert "ww2" not in found
+
+
+def test_identity_index_is_built_after_medium_notes():
+    """Parenthetical aliases are split with ``_MEDIUM_NOTE``, which must exist first."""
+    import inspect
+
+    from waifu_engine import names
+
+    src = inspect.getsource(names)
+    assert src.index("_MEDIUM_NOTE = re.compile") < src.index(
+        "_IDENTITY_BY_KEY, _CANONICAL_BY_ID = index_identities"
+    )
+    assert names._split_disambiguation("Asuka (Rebuild)") == ("Asuka", "Rebuild")
+    assert names._split_disambiguation("Link (video game)") == ("Link", "")

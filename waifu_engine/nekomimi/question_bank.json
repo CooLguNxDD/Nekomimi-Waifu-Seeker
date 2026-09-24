@@ -378,7 +378,7 @@
       "id": "role_sidekick",
       "category": "role",
       "text": "Is your character a sidekick or supporting cast?",
-      "instructions": "Is the character in `candidate` a sidekick?",
+      "instructions": "Is `candidate` a sidekick or supporting cast?",
       "criteria_detail": "a sidekick or supporting-cast member rather than a lead",
       "tags_true": [
         "support",
@@ -1194,7 +1194,7 @@
       "id": "setting_apocalypse",
       "category": "setting",
       "text": "Is your character's world post-apocalyptic or at war?",
-      "instructions": "Is the character in `candidate` from a war setting?",
+      "instructions": "Is `candidate` post-apocalyptic or at war?",
       "criteria_detail": "set in a post-apocalyptic world or an ongoing war",
       "tags_true": [
         "apocalypse",

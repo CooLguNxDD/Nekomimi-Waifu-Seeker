@@ -95,9 +95,6 @@ def index_identities(rows: Iterable[dict]) -> tuple[dict[str, str], dict[str, st
     return by_key, canonical
 
 
-_IDENTITY_BY_KEY, _CANONICAL_BY_ID = index_identities(_CHARACTER_IDENTITIES)
-
-
 def identity_id(name: str) -> str:
     """Lexicon id shared by known spellings of one person, or ``""``.
 
@@ -164,6 +161,39 @@ def already_seen(name: str, seen: Iterable[str]) -> bool:
     return any(same_character(name, other) for other in seen)
 
 
+def alias_evidence(name: str, seen: Iterable[str]) -> bool:
+    """Whether ``name`` is a new lexicon spelling of someone already in ``seen``.
+
+    Source dedupe drops ordinary duplicates. Diana Prince is not one of
+    those: her page holds tags the Wonder Woman row lacks, and the session
+    absorb is what folds them in. A repeat of a spelling already in ``seen``
+    is still a duplicate, even when another alias is sitting beside it.
+    """
+    iid = identity_id(name)
+    if not iid:
+        return False
+    keys = name_keys(name)
+    same_spelling = False
+    other_spelling = False
+    for other in seen:
+        if identity_id(other) != iid:
+            continue
+        if name_keys(other) == keys:
+            same_spelling = True
+        else:
+            other_spelling = True
+    return other_spelling and not same_spelling
+
+
+def plain_duplicate(name: str, seen: Iterable[str]) -> bool:
+    """Whether ``name`` should be dropped before the session can absorb it.
+
+    Identity aliases are kept. Word-order repeats and titled forms of the
+    same spelling are not.
+    """
+    return already_seen(name, seen) and not alias_evidence(name, seen)
+
+
 # Placeholders sources use when they could not tell the series.
 _NO_SERIES = {"", "webresult", "unknown", "none"}
 
@@ -174,6 +204,9 @@ _MEDIUM_NOTE = re.compile(
     r"tv series|television series|visual novel)\)\s*$",
     re.I,
 )
+# After ``_MEDIUM_NOTE``: ``index_identities`` splits parentheticals, and a
+# note such as "Asuka (Rebuild)" would raise NameError if this ran first.
+_IDENTITY_BY_KEY, _CANONICAL_BY_ID = index_identities(_CHARACTER_IDENTITIES)
 
 
 def series_key(series: str) -> str:

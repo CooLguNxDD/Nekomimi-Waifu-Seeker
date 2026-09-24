@@ -26,7 +26,7 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from . import browser_search
-from .names import already_seen, identity_id, name_keys, same_character, series_key
+from .names import identity_id, name_keys, plain_duplicate, same_character, series_key
 from .nekomimi.lexicon import (
     AGGREGATE_EXACT as _AGGREGATE_EXACT,
     CHARACTER_IDENTITIES as _CHARACTER_IDENTITIES,
@@ -469,10 +469,12 @@ def headliner_label(text: str) -> str:
 _NON_CHARACTER_KEYS = frozenset(key for name in _NON_CHARACTERS if (key := series_key(name)))
 # First sentence of a franchise or species article. Bare "series" is not
 # enough: "is a series regular" and "is the protagonist of the anime series"
-# are still people. "series of" / "franchise" / "species" are the page.
+# are still people. The gap must not consume "of", or "protagonist of the
+# Metroid franchise" and "member of the Saiyan species" look like articles.
+# "species of" is a creature ("Pikachu is a species of Pokémon"), not the page.
 _WORK_OR_SPECIES = re.compile(
-    r"\b(?:is|are)\s+(?:a|an|the)\s+(?:[a-z0-9-]+\s+){0,4}"
-    r"(?:species|franchise|series\s+of)\b",
+    r"\b(?:is|are)\s+(?:a|an|the)\s+(?:(?!of\b)[a-z0-9-]+\s+){0,4}"
+    r"(?:franchise|series\s+of|species(?!\s+of\b))\b",
     re.I,
 )
 
@@ -863,14 +865,15 @@ def _take_candidate(
 ) -> bool:
     """Add ``cand`` unless its id or name is already taken; True when ``found`` is at ``limit``.
 
-    Identity is ``names.same_character``: either word order, and a trailing
+    Identity is ``names.plain_duplicate``: either word order, and a trailing
     series title ("Link" / "Link (The Legend of Zelda)"), are one person.
-    "Young Link" is not. ``seen_names`` holds the raw names already taken.
+    "Young Link" is not. A different lexicon spelling is kept for the session
+    absorb. ``seen_names`` holds the raw names already taken.
     """
     if not cand or cand["id"] in exclude_ids or cand["id"] in found:
         return False
     name = cand.get("name", "")
-    if not name_keys(name) or already_seen(name, seen_names):
+    if not name_keys(name) or plain_duplicate(name, seen_names):
         return False
     found[cand["id"]] = cand
     seen_names.add(name)

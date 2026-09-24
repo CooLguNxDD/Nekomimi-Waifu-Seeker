@@ -26,10 +26,18 @@ def test_match_instructions_stay_near_the_measured_length():
     assert "two different eye colours" in eyes["criteria"]["true"]
 
 
-def test_default_checkpoint_stays_typed_decisions():
-    """English noul at temperature 1.98 flattened character scores."""
-    assert laya_client.SUBFOLDER == "typed-decisions"
-    assert laya_client.MAX_LEN == 512
+def test_default_checkpoint_stays_typed_decisions(monkeypatch):
+    """English noul at temperature 1.98 flattened character scores.
+
+    An empty ``WAIFU_LAYA_SUBFOLDER`` is a set variable, so the default in
+    ``getenv`` would not apply. Reload after unsetting it.
+    """
+    import importlib
+
+    monkeypatch.delenv("WAIFU_LAYA_SUBFOLDER", raising=False)
+    reloaded = importlib.reload(laya_client)
+    assert reloaded.SUBFOLDER == "typed-decisions"
+    assert reloaded.MAX_LEN == 512
 
 
 def test_round_state_leads_with_short_profiles():
