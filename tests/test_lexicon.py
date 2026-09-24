@@ -195,6 +195,18 @@ def test_missing_file_bad_type_and_duplicate_id_raise():
         build_franchises(dup_phrase)
 
 
+def test_duplicate_nested_key_is_rejected():
+    """A repeated nested mapping key fails the load instead of keeping the last value."""
+    text = (
+        "accepts:\n"
+        "  anime: { media: [anime, manga] }\n"
+        "  game: { media: [game] }\n"
+        "  anime: { media: [game] }\n"
+    )
+    with pytest.raises(LexiconError, match=r"medium\.yml has duplicate key accepts\.anime"):
+        parse_document(text, "medium.yml")
+
+
 def test_question_bank_stays_json():
     """The question catalog is not converted to YAML."""
     text = files("waifu_engine.nekomimi").joinpath("question_bank.json").read_text(encoding="utf-8")

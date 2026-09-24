@@ -1,8 +1,9 @@
 """Load package-local lexicon YAML.
 
-PyYAML ``safe_load`` is the only parser. A missing file, a bad type, or a
-duplicate id raises ``LexiconError`` at import. An empty fallback would drop
-every franchise marker and look like a search bug.
+PyYAML's safe loader is the only parser, wrapped so a repeated mapping key
+raises. A missing file, a bad type, a duplicate key, or a duplicate id raises
+``LexiconError`` at import. An empty fallback would drop every franchise
+marker and look like a search bug.
 """
 
 from __future__ import annotations
@@ -19,16 +20,76 @@ class LexiconError(ValueError):
     """A lexicon file is missing, mistyped, or inconsistent."""
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe loader that rejects a mapping key the second time it appears.
+
+    ``yaml.safe_load`` keeps the last value of a repeated key, so a duplicated
+    ``accepts.anime`` would change medium filtering without a load error.
+    """
+
+    def __init__(self, stream: Any):
+        """Remember the file name and the key path currently being built."""
+        super().__init__(stream)
+        self.document_name = ""
+        self._key_path: list[str] = []
+
+
+def _path_segment(key: Any) -> str:
+    """Return ``key`` as one segment of a dotted path."""
+    return key if isinstance(key, str) else repr(key)
+
+
+def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.Node, deep: bool = False) -> dict[Any, Any]:
+    """Build one mapping and raise ``LexiconError`` on a repeated key.
+
+    Nested mappings push the key onto ``loader._key_path``, so the message
+    names the file and the full path (``accepts.anime``), not only the leaf.
+    """
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        segment = _path_segment(key)
+        path = ".".join([*loader._key_path, segment])
+        try:
+            repeated = key in mapping
+        except TypeError as exc:
+            where = loader.document_name or "lexicon"
+            raise LexiconError(f"lexicon file {where} has an unhashable key at {path}") from exc
+        if repeated:
+            where = loader.document_name or "lexicon"
+            raise LexiconError(f"lexicon file {where} has duplicate key {path}")
+        loader._key_path.append(segment)
+        try:
+            value = loader.construct_object(value_node, deep=deep)
+        finally:
+            loader._key_path.pop()
+        mapping[key] = value
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 def parse_document(text: str, name: str) -> dict[str, Any]:
     """Parse ``text`` as one lexicon mapping.
 
-    ``safe_load`` rejects ``!!python`` tags. A non-mapping root raises rather
-    than returning an empty map.
+    The loader rejects ``!!python`` tags and duplicate mapping keys, including
+    nested ones. A non-mapping root raises rather than returning an empty map.
     """
+    loader = _UniqueKeyLoader(text)
+    loader.document_name = name
     try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise LexiconError(f"lexicon file {name} is not valid YAML: {exc}") from exc
+        try:
+            data = loader.get_single_data()
+        except LexiconError:
+            raise
+        except yaml.YAMLError as exc:
+            raise LexiconError(f"lexicon file {name} is not valid YAML: {exc}") from exc
+    finally:
+        loader.dispose()
     if not isinstance(data, dict):
         raise LexiconError(f"lexicon file {name} must be a mapping")
     return data
