@@ -4,7 +4,8 @@ Laya never writes text; it decides. Per turn:
 
 * **which question to ask is ours**, by expected information gain over the
   candidate posterior -- Laya's ``choice`` over question ids came back
-  near-uniform and was dropped;
+  near-uniform and was dropped. "Where is your character from?" and
+  "Which series?" compete in that ranking; neither is forced first;
 * one call for ``ready_to_guess`` (noul, is the evidence enough to name a
   character);
 * one call **per candidate** for ``match`` (noul, does this candidate satisfy
@@ -414,13 +415,16 @@ def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
 
 
 def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
-    """Top-N questions worth asking, highest expected information gain first."""
+    """Top-N questions worth asking, highest expected information gain first.
+
+    Medium ("Where is your character from?") and series ("Which series?")
+    compete in the same ranking as every other question. Forcing medium first
+    burned a turn when the pool already shared one medium; series already
+    ranked by information gain, but only after that forced medium turn.
+    """
     asked = sess.asked_ids()
     settled = sess.settled_categories()
     weighted = _weighted(sess)
-    # Establish a search domain before ranking a small, biased result set.
-    if MEDIUM_QID not in asked:
-        return [QUESTIONS_BY_ID[MEDIUM_QID]]
     series = _series_question(sess)
     pool = [
         q
