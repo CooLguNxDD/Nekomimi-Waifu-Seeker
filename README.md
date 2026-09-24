@@ -1,6 +1,28 @@
 # Nekomimi-Waifu-Seeker
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CooLguNxDD/Nekomimi-Waifu-Seeker/blob/main/notebooks/nekomimi_colab.ipynb)
+
 An **Nekomimi character guesser** for **anime, manga, comics, games, movies and TV series**, plus the original one-shot feature matcher. Both are decided by **[Laya](https://huggingface.co/convaiinnovations/laya)** — a non-autoregressive decision model that answers typed questions (`choice` / `score` / `noul`) with calibrated probabilities. Laya never generates text; it only decides. Candidates come from Playwright (headless Chromium) first, then DuckDuckGo fills remaining slots. The game is **Nekomimi** at `/nekomimi` and `/api/nekomimi/*`.
+
+## Try it on Colab
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CooLguNxDD/Nekomimi-Waifu-Seeker/blob/main/notebooks/nekomimi_colab.ipynb)
+
+`notebooks/nekomimi_colab.ipynb` runs this repo on a Colab **L4**. It clones `main`, installs the Python dependencies, builds the SolidJS UI, optionally rewrites search queries with Ollama, and publishes the app with ngrok.
+
+Use an L4 runtime, then run the cells from the top. The server cell prints a public `/nekomimi` URL. That tunnel has no login, so anyone with the link can play. If `GOOGLE_API_KEY` is set, those visits can run Gemini Search and bill that key.
+
+Before the first cell, add secrets in the Colab sidebar (the key icon). The notebook loads them with `google.colab.userdata`. Tokens stay in Colab secrets.
+
+| Secret | Required | Purpose |
+|---|---|---|
+| `NGROK_TOKEN` | yes | ngrok authtoken for the public URL |
+| `HF_TOKEN` | no | Hugging Face token; faster download of the Laya weights |
+| `GOOGLE_API_KEY` | no | Gemini search grounding when the key is set (`WAIFU_GEMINI_SEARCH`) |
+
+The web page is the built bundle in `waifu_engine/webui_dist`. The notebook runs `cd webui && npm ci && npm run build` (the Docker UI stage; `npm install && npm run build` is the same step from a checkout) before `python -m waifu_engine.web`. Until that bundle exists, `/nekomimi` returns 503.
+
+Laya asks the questions and makes the guesses. Ollama is only the optional query rewriter (`WAIFU_QUERY_LLM=1`). The notebook edits the cloned `query_llm.py` so that copy sends `reasoning_effort=none` when `WAIFU_QUERY_LLM_THINKING=0`. Ollama honours that field; the `chat_template_kwargs` switch in this repo is the one vLLM honours.
 
 ## Nekomimi mode
 
