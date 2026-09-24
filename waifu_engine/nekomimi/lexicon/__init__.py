@@ -13,6 +13,7 @@ _MEDIUM = _LEXICON["medium"]
 _FRANCHISES = _LEXICON["franchises"]
 _TRAITS = _LEXICON["traits"]
 _CATEGORIES = _LEXICON["categories"]
+_CHARACTERS = _LEXICON["characters"]
 
 # medium.yml — engine._eliminate_by_medium / _known_choice. Empty other is no filter.
 MEDIUM_VALUES = _MEDIUM["media"]
@@ -44,11 +45,19 @@ HAIR_CATEGORIES = _CATEGORIES["color_detail"]
 SERIES_APPEARANCE = _CATEGORIES["series_appearance"]
 POPULAR_CATEGORIES = _CATEGORIES["popular"]
 
+# characters.yml — names.identity_id, web_search.headliner_label / is_non_character.
+CHARACTER_IDENTITIES = _CHARACTERS["identities"]
+HEADLINERS = _CHARACTERS["headliners"]
+NON_CHARACTERS = _CHARACTERS["non_characters"]
+
 __all__ = [
     "AGGREGATE_EXACT",
     "BROAD_CATEGORIES",
+    "CHARACTER_IDENTITIES",
     "COLOR_WORDS",
     "EXACT_ALIASES",
+    "HEADLINERS",
+    "NON_CHARACTERS",
     "GENERIC_SERIES",
     "HAIR_CATEGORIES",
     "LexiconError",

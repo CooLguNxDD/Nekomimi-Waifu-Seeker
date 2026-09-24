@@ -22,15 +22,18 @@ import re
 import threading
 import time
 from functools import lru_cache
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from . import browser_search
-from .names import already_seen, name_keys, same_character
+from .names import identity_id, name_keys, plain_duplicate, same_character, series_key
 from .nekomimi.lexicon import (
     AGGREGATE_EXACT as _AGGREGATE_EXACT,
+    CHARACTER_IDENTITIES as _CHARACTER_IDENTITIES,
     COLOR_WORDS as _COLOR_WORDS,
+    HEADLINERS as _HEADLINERS,
     NAME_BLOCK as SERIES_BLOCK,
+    NON_CHARACTERS as _NON_CHARACTERS,
     SERIES_CRUMBS as _SERIES_CRUMBS,
     SERIES_MARKERS as _SERIES_MARKERS,
     TRAIT_PATTERNS,
@@ -327,6 +330,155 @@ def franchise_mentioned(franchise: str, text: str) -> bool:
     return bool(franchise) and bool(_phrase_re(franchise).search((text or "").lower()))
 
 
+def _headliner_hits() -> tuple[tuple[int, re.Pattern[str], str, tuple[str, ...]], ...]:
+    """Phrase patterns sorted longest-first so "final fantasy vii" beats a shorter title."""
+    flat: list[tuple[int, re.Pattern[str], str, tuple[str, ...]]] = []
+    for row in _HEADLINERS:
+        names = tuple(row["names"])
+        for phrase in row["phrases"]:
+            flat.append((len(phrase), _phrase_re(phrase), row["franchise"], names))
+    flat.sort(key=lambda item: item[0], reverse=True)
+    return tuple(flat)
+
+
+_HEADLINER_HITS = _headliner_hits()
+
+
+def headliner_from_texts(texts: Iterable[str]) -> tuple[str, tuple[str, ...]] | None:
+    """Return ``(franchise, title names)`` for the longest headliner phrase in ``texts``.
+
+    Player text only. A blurb that mentions the work must not select it: that
+    is how a crossover used to join the wrong cast.
+    """
+    best: tuple[int, str, tuple[str, ...]] | None = None
+    for text in texts:
+        low = (text or "").lower()
+        if not low:
+            continue
+        for length, pattern, franchise, names in _HEADLINER_HITS:
+            if best is not None and length <= best[0]:
+                break
+            if pattern.search(low):
+                best = (length, franchise, names)
+                break
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+_NAME_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _name_tokens(name: str) -> set[str]:
+    """Lower-case words of ``name``. Used to tell a spelling from a second name."""
+    return set(_NAME_WORD.findall((name or "").lower()))
+
+
+def disambiguating_alias(name: str, franchise: str) -> str:
+    """Shortest lexicon alias of ``name`` whose words are not already in ``name``.
+
+    A mantle title is also the character ("Wonder Woman"), so a search for
+    that string ranks later holders. "Diana Prince" shares no words with the
+    title. Romanisations ("Sohryu") still share words with the primary name
+    and are not a second person, so they are not returned.
+    """
+    primary = _name_tokens(name)
+    if len(primary) < 1:
+        return ""
+    slug = identity_id(name)
+    if not slug:
+        return ""
+    aliases: tuple[str, ...] = ()
+    for row in _CHARACTER_IDENTITIES:
+        if row["id"] == slug:
+            aliases = row["names"]
+            break
+    work = _name_tokens(franchise)
+    best = ""
+    best_key: tuple[int, int] | None = None
+    for alias in aliases:
+        tokens = _name_tokens(alias)
+        if len(tokens) < 2 or tokens & primary:
+            continue
+        if work and work <= tokens:
+            continue
+        key = (len(tokens), len(alias))
+        if best_key is None or key < best_key:
+            best, best_key = alias, key
+    return best
+
+
+def title_character_queries(texts: Iterable[str]) -> list[str]:
+    """Character names to send a name search, or ``[]`` when no headliner matches.
+
+    AniList searches names and sorts by favourites. A trait sentence
+    ("Neon Genesis Evangelion female character") does not name Asuka, and the
+    favourites sort then fills the pool with unrelated leads.
+    """
+    hit = headliner_from_texts(texts)
+    if not hit:
+        return []
+    franchise, names = hit
+    out: list[str] = []
+    for name in names:
+        if name not in out:
+            out.append(name)
+        alias = disambiguating_alias(name, franchise)
+        if alias and alias not in out:
+            out.append(alias)
+    return out
+
+
+def fulltext_pin_parts(texts: Iterable[str]) -> list[str]:
+    """Work label, a sole title name, and any personal alias, for full-text search.
+
+    Every later query has to keep this lead. The newest trait alone retrieves
+    co-cast and other mantle pages. Several co-leads are not all AND-ed into
+    the Wikipedia string (that misses a page about only one of them); each
+    name is searched on its own by ``title_character_queries``.
+    """
+    hit = headliner_from_texts(texts)
+    label = ""
+    names: tuple[str, ...] = ()
+    if hit:
+        label, names = hit
+    if not label:
+        for text in texts:
+            label = franchise_label(text or "")
+            if label:
+                break
+    if not label:
+        return []
+    parts = [label]
+    if len(names) == 1 and _name_tokens(names[0]) - _name_tokens(label):
+        parts.append(names[0])
+    for name in names:
+        alias = disambiguating_alias(name, label)
+        if alias and alias not in parts:
+            parts.append(alias)
+    return parts
+
+
+def headliner_label(text: str) -> str:
+    """Franchise display name named in ``text``, or ``""`` when none matches."""
+    hit = headliner_from_texts([text])
+    return hit[0] if hit else ""
+
+
+# Page titles that are a work or a species, not a person. series_key folds case.
+_NON_CHARACTER_KEYS = frozenset(key for name in _NON_CHARACTERS if (key := series_key(name)))
+# First sentence of a franchise or species article. Bare "series" is not
+# enough: "is a series regular" and "is the protagonist of the anime series"
+# are still people. The gap must not consume "of", or "protagonist of the
+# Metroid franchise" and "member of the Saiyan species" look like articles.
+# "species of" is a creature ("Pikachu is a species of Pokémon"), not the page.
+_WORK_OR_SPECIES = re.compile(
+    r"\b(?:is|are)\s+(?:a|an|the)\s+(?:(?!of\b)[a-z0-9-]+\s+){0,4}"
+    r"(?:franchise|series\s+of|species(?!\s+of\b))\b",
+    re.I,
+)
+
+
 # Category crumbs: lexicon/franchises.yml. ``series_is_crumb`` is an exact
 # normalized string match; these are not regular expressions.
 
@@ -363,6 +515,23 @@ _AGGREGATE_NAME = re.compile(
 _ROSTER_URL = re.compile(r"/characters?/?(?:[?#].*)?$")
 # Exact roster titles: lexicon/franchises.yml ``aggregate_exact``. The rest of
 # ``is_aggregate_page`` (regexes, plural stem against ``SERIES_BLOCK``) stays here.
+
+
+def is_non_character(name: str, url: str = "", blurb: str = "") -> bool:
+    """Whether this hit is a work, species, list, or category rather than one person.
+
+    "Evangelion" and "Angels" soaked the Asuka posterior and were eligible to
+    be guessed. List pages stay out through ``is_aggregate_page``. A title on
+    the non-character list is out even when the blurb is empty. The opening
+    sentence is checked too, because a franchise page can be titled with a
+    name that is not on that list yet.
+    """
+    if is_aggregate_page(name, url, blurb):
+        return True
+    if series_key(name) in _NON_CHARACTER_KEYS:
+        return True
+    head = re.split(r"(?<=[.!?])\s", (blurb or "").strip(), maxsplit=1)[0][:240]
+    return bool(head) and bool(_WORK_OR_SPECIES.search(head))
 
 
 def is_aggregate_page(name: str, url: str = "", blurb: str = "") -> bool:
@@ -639,10 +808,25 @@ def _feature_seed_queries(query: str) -> list[str]:
     ]
 
 
+def _joined_constraints(constraints: list[str]) -> str:
+    """Newest facts, with a resolved work put back in front of the window.
+
+    The last-six slice dropped a series answered early, and full-text search
+    then ran on the newest trait alone.
+    """
+    raw = [c.strip() for c in constraints if c and c.strip()]
+    facts = raw[-6:]
+    have = {fact.lower() for fact in facts}
+    lead = [
+        part for part in fulltext_pin_parts(raw)
+        if part.lower() not in have and not any(part.lower() in fact.lower() for fact in facts)
+    ]
+    return " ".join([*lead, *facts])[:180].strip()
+
+
 def _constraint_queries(constraints: list[str], medium_hint: str | None = None) -> list[str]:
     """Build searches from the facts confirmed so far in a guessing session."""
-    facts = [c.strip() for c in constraints if c and c.strip()][-6:]
-    base = " ".join(facts)[:180].strip()
+    base = _joined_constraints(constraints)
     if not base:
         base = "popular character"
     media = [medium_hint] if medium_hint and medium_hint != "unknown" else ["anime", "game", "comic"]
@@ -668,8 +852,8 @@ def _constraint_queries(constraints: list[str], medium_hint: str | None = None) 
 
 
 def _constraint_query_text(constraints: list[str]) -> str:
-    facts = [c.strip() for c in constraints if c and c.strip()][-6:]
-    return " ".join(facts)[:180].strip() or "popular character"
+    """The same joined text ``_constraint_queries`` searches, without a site scope."""
+    return _joined_constraints(constraints) or "popular character"
 
 
 def _take_candidate(
@@ -681,14 +865,15 @@ def _take_candidate(
 ) -> bool:
     """Add ``cand`` unless its id or name is already taken; True when ``found`` is at ``limit``.
 
-    Identity is ``names.same_character``: either word order, and a trailing
+    Identity is ``names.plain_duplicate``: either word order, and a trailing
     series title ("Link" / "Link (The Legend of Zelda)"), are one person.
-    "Young Link" is not. ``seen_names`` holds the raw names already taken.
+    "Young Link" is not. A different lexicon spelling is kept for the session
+    absorb. ``seen_names`` holds the raw names already taken.
     """
     if not cand or cand["id"] in exclude_ids or cand["id"] in found:
         return False
     name = cand.get("name", "")
-    if not name_keys(name) or already_seen(name, seen_names):
+    if not name_keys(name) or plain_duplicate(name, seen_names):
         return False
     found[cand["id"]] = cand
     seen_names.add(name)

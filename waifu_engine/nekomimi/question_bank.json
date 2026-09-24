@@ -14,7 +14,8 @@
       "kind": "yesno",
       "id": "{prefix}_{slug}",
       "text": "Is your character {label}?",
-      "instructions": "Is the character in `candidate` {clause}?",
+      "instructions": "Is the character in `candidate` {label}?",
+      "criteria_detail": "{clause}",
       "tags_true": "{tag_prefix}{slug}"
     }
   },
@@ -213,7 +214,8 @@
       "id": "species_robot",
       "category": "species",
       "text": "Is your character a robot, android or AI?",
-      "instructions": "Is the character in `candidate` a robot, android, cyborg or artificial intelligence?",
+      "instructions": "Is the character in `candidate` a robot?",
+      "criteria_detail": "a robot, android, cyborg or artificial intelligence",
       "tags_true": [
         "robot",
         "android",
@@ -226,7 +228,8 @@
       "id": "species_demon",
       "category": "species",
       "text": "Is your character a demon, devil or monster?",
-      "instructions": "Is the character in `candidate` a demon, devil, oni, vampire or monster?",
+      "instructions": "Is the character in `candidate` a demon or monster?",
+      "criteria_detail": "a demon, devil, oni, vampire or monster",
       "tags_true": [
         "demon",
         "vampire",
@@ -239,7 +242,8 @@
       "id": "species_god",
       "category": "species",
       "text": "Is your character a god or deity?",
-      "instructions": "Is the character in `candidate` a god, goddess, deity or divine being?",
+      "instructions": "Is the character in `candidate` a god?",
+      "criteria_detail": "a god, goddess, deity or divine being",
       "tags_true": [
         "god",
         "deity"
@@ -265,7 +269,8 @@
       "id": "species_alien",
       "category": "species",
       "text": "Is your character an alien or from another world?",
-      "instructions": "Is the character in `candidate` an alien, extraterrestrial, or a native of another world or dimension?",
+      "instructions": "Is the character in `candidate` an alien?",
+      "criteria_detail": "an alien, extraterrestrial, or a native of another world or dimension",
       "tags_true": [
         "alien",
         "isekai"
@@ -277,7 +282,8 @@
       "id": "species_undead",
       "category": "species",
       "text": "Is your character undead or a ghost?",
-      "instructions": "Is the character in `candidate` undead, a ghost, a spirit or a revenant?",
+      "instructions": "Is the character in `candidate` undead?",
+      "criteria_detail": "undead, a ghost, a spirit or a revenant",
       "tags_true": [
         "undead",
         "ghost"
@@ -289,7 +295,8 @@
       "id": "role_protagonist",
       "category": "role",
       "text": "Is your character the main protagonist?",
-      "instructions": "Is the character in `candidate` the main protagonist or lead of their work?",
+      "instructions": "Is the character in `candidate` the protagonist?",
+      "criteria_detail": "the main protagonist or lead of their work",
       "tags_true": [
         "protagonist",
         "main"
@@ -305,7 +312,8 @@
       "id": "role_antagonist",
       "category": "role",
       "text": "Is your character a villain or antagonist?",
-      "instructions": "Is the character in `candidate` a villain, antagonist or main enemy?",
+      "instructions": "Is the character in `candidate` a villain?",
+      "criteria_detail": "a villain, antagonist or main enemy",
       "tags_true": [
         "antagonist",
         "villain"
@@ -345,7 +353,8 @@
       "id": "role_rival",
       "category": "role",
       "text": "Is your character the protagonist's rival?",
-      "instructions": "Is the character in `candidate` a rival or foil to the protagonist?",
+      "instructions": "Is the character in `candidate` a rival?",
+      "criteria_detail": "a rival or foil to the protagonist",
       "tags_true": [
         "rival"
       ],
@@ -356,7 +365,8 @@
       "id": "role_mentor",
       "category": "role",
       "text": "Is your character a mentor or teacher figure?",
-      "instructions": "Is the character in `candidate` a mentor, master or teacher to the protagonist?",
+      "instructions": "Is the character in `candidate` a mentor?",
+      "criteria_detail": "a mentor, master or teacher to the protagonist",
       "tags_true": [
         "mentor",
         "teacher"
@@ -368,7 +378,8 @@
       "id": "role_sidekick",
       "category": "role",
       "text": "Is your character a sidekick or supporting cast?",
-      "instructions": "Is the character in `candidate` a sidekick or supporting-cast member rather than a lead?",
+      "instructions": "Is `candidate` a sidekick or supporting cast?",
+      "criteria_detail": "a sidekick or supporting-cast member rather than a lead",
       "tags_true": [
         "support",
         "sidekick"
@@ -380,7 +391,8 @@
       "id": "role_dies",
       "category": "role",
       "text": "Does your character die in their story?",
-      "instructions": "Does the character in `candidate` die at some point in their source work?",
+      "instructions": "Does the character in `candidate` die?",
+      "criteria_detail": "die at some point in their source work",
       "tags_true": [
         "dies"
       ],
@@ -391,7 +403,8 @@
       "id": "role_leader",
       "category": "role",
       "text": "Does your character lead a group or organization?",
-      "instructions": "Does the character in `candidate` lead a team, guild, crew, squad or organization?",
+      "instructions": "Does the character in `candidate` lead a group?",
+      "criteria_detail": "lead a team, guild, crew, squad or organization",
       "tags_true": [
         "leader",
         "captain"
@@ -616,7 +629,8 @@
       "id": "look_mask",
       "category": "look",
       "text": "Does your character wear a mask or helmet?",
-      "instructions": "Does the character in `candidate` regularly wear a mask, helmet or face covering?",
+      "instructions": "Does the character in `candidate` wear a mask?",
+      "criteria_detail": "regularly wear a mask, helmet or face covering",
       "tags_true": [
         "mask",
         "helmet"
@@ -628,7 +642,8 @@
       "id": "look_armor",
       "category": "look",
       "text": "Does your character wear armor?",
-      "instructions": "Does the character in `candidate` wear armour or a combat suit as their usual outfit?",
+      "instructions": "Does the character in `candidate` wear armour?",
+      "criteria_detail": "wear armour or a combat suit as their usual outfit",
       "tags_true": [
         "armor",
         "knight"
@@ -663,7 +678,8 @@
       "id": "look_short",
       "category": "look",
       "text": "Is your character notably short or small?",
-      "instructions": "Is the character in `candidate` described as notably short, small or child-sized?",
+      "instructions": "Is the character in `candidate` notably short?",
+      "criteria_detail": "described as notably short, small or child-sized",
       "tags_true": [
         "small",
         "chibi"
@@ -675,7 +691,8 @@
       "id": "look_scar",
       "category": "look",
       "text": "Does your character have a visible scar or tattoo?",
-      "instructions": "Does the character in `candidate` have a signature visible scar, tattoo or marking?",
+      "instructions": "Does the character in `candidate` have a visible marking?",
+      "criteria_detail": "have a signature visible scar, tattoo or marking",
       "tags_true": [
         "scar",
         "tattoo"
@@ -721,7 +738,8 @@
       "id": "age_child",
       "category": "age",
       "text": "Is your character a child?",
-      "instructions": "Is the character in `candidate` a child, under roughly 13 years old?",
+      "instructions": "Is the character in `candidate` a child?",
+      "criteria_detail": "a child, under roughly 13 years old",
       "tags_true": [
         "child"
       ],
@@ -732,7 +750,8 @@
       "id": "age_teen",
       "category": "age",
       "text": "Is your character a teenager?",
-      "instructions": "Is the character in `candidate` a teenager, roughly 13-19 years old?",
+      "instructions": "Is the character in `candidate` a teenager?",
+      "criteria_detail": "a teenager, roughly 13-19 years old",
       "tags_true": [
         "teen",
         "student"
@@ -1042,7 +1061,8 @@
       "id": "fame_mascot",
       "category": "fame",
       "text": "Is your character the mascot or face of their franchise?",
-      "instructions": "Is the character in `candidate` the mascot, cover character or face of their franchise?",
+      "instructions": "Is the character in `candidate` the franchise face?",
+      "criteria_detail": "the mascot, cover character or face of their franchise",
       "tags_true": [
         "mascot"
       ],
@@ -1053,7 +1073,8 @@
       "id": "era_old",
       "category": "era",
       "text": "Did your character first appear before the year 2000?",
-      "instructions": "Did the character in `candidate` first appear before the year 2000?",
+      "instructions": "Did the character in `candidate` debut before 2000?",
+      "criteria_detail": "first appear before the year 2000",
       "tags_true": [
         "retro"
       ],
@@ -1064,7 +1085,8 @@
       "id": "era_recent",
       "category": "era",
       "text": "Did your character first appear in the last ten years?",
-      "instructions": "Did the character in `candidate` first appear within the last ten years?",
+      "instructions": "Did the character in `candidate` debut recently?",
+      "criteria_detail": "first appear within the last ten years",
       "tags_true": [
         "modern"
       ],
@@ -1075,7 +1097,7 @@
       "id": "meta_adapted",
       "category": "meta",
       "text": "Has your character appeared in more than one medium?",
-      "instructions": "Has the character in `candidate` appeared in more than one medium?",
+      "instructions": "Has the character in `candidate` crossed media?",
       "criteria_detail": "appears in more than one medium, for example both a game and an anime",
       "tags_true": [
         "multimedia"
@@ -1087,7 +1109,8 @@
       "id": "meta_live_action",
       "category": "meta",
       "text": "Has your character been played by a live-action actor?",
-      "instructions": "Has the character in `candidate` been portrayed by a live-action actor in a film or series?",
+      "instructions": "Has the character in `candidate` been in live action?",
+      "criteria_detail": "been portrayed by a live-action actor in a film or series",
       "tags_true": [
         "live-action"
       ],
@@ -1121,7 +1144,8 @@
       "id": "setting_fantasy",
       "category": "setting",
       "text": "Is your character's world a fantasy world?",
-      "instructions": "Is the character in `candidate` set in a fantasy world with magic, swords or mythical creatures?",
+      "instructions": "Is the character in `candidate` from a fantasy setting?",
+      "criteria_detail": "set in a fantasy world with magic, swords or mythical creatures",
       "tags_true": [
         "fantasy"
       ],
@@ -1146,7 +1170,8 @@
       "id": "setting_modern",
       "category": "setting",
       "text": "Is your character's story set in the modern real world?",
-      "instructions": "Is the character in `candidate` set in the modern-day real world?",
+      "instructions": "Is the character in `candidate` from the modern world?",
+      "criteria_detail": "set in the modern-day real world",
       "tags_true": [
         "modern-setting"
       ],
@@ -1157,7 +1182,8 @@
       "id": "setting_school",
       "category": "setting",
       "text": "Is your character's story set mainly at a school?",
-      "instructions": "Is the story of the character in `candidate` set mainly in a school or academy?",
+      "instructions": "Is the character in `candidate` from a school setting?",
+      "criteria_detail": "the story is set mainly in a school or academy",
       "tags_true": [
         "school"
       ],
@@ -1168,7 +1194,8 @@
       "id": "setting_apocalypse",
       "category": "setting",
       "text": "Is your character's world post-apocalyptic or at war?",
-      "instructions": "Is the character in `candidate` set in a post-apocalyptic world or an ongoing war?",
+      "instructions": "Is `candidate` post-apocalyptic or at war?",
+      "criteria_detail": "set in a post-apocalyptic world or an ongoing war",
       "tags_true": [
         "apocalypse",
         "war"

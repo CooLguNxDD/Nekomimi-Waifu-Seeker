@@ -36,8 +36,11 @@ from typing import Any
 
 from .. import query_llm, sources, timing, web_search
 from ..names import (
+    canonical_name,
+    identity_id,
     is_publisher_series,
     longer_namesake,
+    same_character,
     same_series,
     same_series_key,
     series_key,
@@ -106,6 +109,24 @@ _SIDE_CHARACTER_PENALTY = 0.7
 # A typed name ("mario") must not let "Mario Rossi" outrank the exact name
 # once a medium or franchise is known.
 _NAMESAKE_PENALTY = 2.2
+# Extra log-odds for a title character once the player named that work.
+# One capped hair-choice gap is about log(1.5/8.5) - log(1/8) ≈ 0.35, and a
+# royalty tag under the heuristic cap is about log(0.6/0.5) ≈ 0.18. 1.05
+# beats both together. A clear model miss (log(0.15/0.85) ≈ -1.7) still wins.
+_HEADLINER_BONUS = 1.05
+# Two alias rows each at least this probable mean the identity is still split.
+# Guessing either fragment commits before the mass is one person.
+_ALIAS_SPLIT_MASS = 0.15
+# Asked once after a same-work wrong guess, first trait the two answer differently.
+_RECOVERY_QIDS = (
+    "hair_color",
+    "hair_long",
+    "hair_short",
+    "hair_twintails",
+    "power_sword",
+    "gender_female",
+    "gender_male",
+)
 # Typed aliases: lexicon/franchises.yml. ``_typed_franchise`` applies the
 # ``exact`` flag (whole clue only). Broad and hair sets: lexicon/categories.yml.
 # Skip-on-yes and the focus ranking that uses those sets stay in this module.
@@ -217,7 +238,7 @@ def _focus_facts(sess: GuessSession, entries: list[tuple[str, float]]) -> list[s
          "confirmed_facts": list(keys.values())},
         {"focus": {
             "type": "choice",
-            "instructions": "Which confirmed fact most narrows down which specific character this is?",
+            "instructions": "Which fact most narrows down the character?",
             "criteria": {k: text[:80] for k, text in keys.items()},
         }},
     )
@@ -253,7 +274,7 @@ POOL_FITS_CANDIDATES = 5
 _POOL_FITS = {
     "pool_fits": {
         "type": "noul",
-        "instructions": "Does any character in `characters` fit every one of `confirmed_facts`?",
+        "instructions": "Does one `characters` entry fit `confirmed_facts`?",
         "criteria": {
             "true": "yes, at least one listed character fits all the confirmed facts",
             "false": "no, none of the listed characters fits all the confirmed facts",
@@ -324,8 +345,8 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
 
     Playwright HTML indexes first, then AniList and Wikipedia (structured, with
     real prose and a popularity number); DuckDuckGo fills remaining slots
-    inside ``find_candidates``. Once a series is known, the lead query keeps
-    that series next to the rare visual traits from the seed.
+    inside ``find_candidates``. Once a series is known, ``pin`` keeps that
+    work in every template group, next to the rare visual traits from the seed.
     """
     if not ONLINE:
         return 0
@@ -349,11 +370,14 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
         anchor = _series_trait_anchor(sess)
         terms = _search_terms(sess)
         if anchor:
-            # Lead with the series and the rare traits together. Focus is
-            # empty when there are only a few facts, which is exactly when
-            # the template would otherwise drop the series from later groups.
-            terms = [anchor, *[term for term in terms if term != anchor]]
-            focus = [anchor, *[fact for fact in focus if fact != anchor]][:FOCUS_TAKE]
+            # The pin is also a search term, so the same work was often listed
+            # three times (canonical label, typed detail, pin). Those copies
+            # filled the focus window and the lead query never mentioned the
+            # hair colour. Drop phrases the pin already says.
+            terms = [anchor, *[term for term in terms if not sources._fact_in_pin(term, anchor)]]
+            focus = [anchor, *[
+                fact for fact in focus if not sources._fact_in_pin(fact, anchor)
+            ]][:FOCUS_TAKE]
         with timing.span("search.llm_gate"):
             # The first search still uses templates. Starting the prefetch
             # here means a trait seed is rewritten before the next turn
@@ -376,6 +400,7 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
                 specific=bool(_free_text(sess) or rewritten or _confirmed_series(sess)),
                 pool_size=len(sess.alive_candidates()),
                 gemini_inline=_gemini_inline(sess),
+                pin=anchor or None,
             )
     except Exception as exc:  # noqa: BLE001 - search is best effort
         sess.notes.append(f"search failed: {exc}")
@@ -562,13 +587,30 @@ def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
     return (pins + rest)[:CHOICE_WIDTH]
 
 
+# Round-level calls share one 512-token sequence, and the state is truncated
+# from the end. Ten full 600-character profiles plus the whole transcript
+# pushed the characters off the end of `pool_fits` / `ready_to_guess`.
+_LAYA_ROUND_PROFILE = 160
+_LAYA_ROUND_FACTS = 8
+_LAYA_ROUND_HISTORY = 6
+
+
 def _laya_state(sess: GuessSession, candidates: list[Candidate]) -> dict[str, Any]:
-    """Round-level state for Laya: goal, confirmed facts, history, given candidates."""
+    """Compact state for one round-level Laya call.
+
+    Characters come first, each as a short profile, so truncation cuts old
+    answers rather than the identities the question names. Per-candidate
+    ``match`` still uses the full profile; this budget is only the shared call.
+    """
+    facts = sess.constraints[-_LAYA_ROUND_FACTS:] or ["nothing confirmed yet"]
+    history = sess.history()[-_LAYA_ROUND_HISTORY:] or [
+        {"question": "none yet", "answer": "", "detail": ""},
+    ]
     return {
         "goal": GOAL,
-        "confirmed_facts": sess.constraints or ["nothing confirmed yet"],
-        "answer_history": sess.history() or [{"question": "none yet", "answer": "", "detail": ""}],
-        "characters": {c.name: c.profile() for c in candidates},
+        "characters": {c.name: c.profile(budget=_LAYA_ROUND_PROFILE) for c in candidates},
+        "confirmed_facts": facts,
+        "answer_history": history,
         "questions_asked": sess.turn,
     }
 
@@ -589,10 +631,7 @@ def _pick_question(sess: GuessSession) -> tuple[dict[str, Any], dict[str, Any] |
     questions = {
         "ready_to_guess": {
             "type": "noul",
-            "instructions": (
-                "Given `confirmed_facts` and `answer_history`, is there now enough "
-                "evidence to name one specific character with confidence?"
-            ),
+            "instructions": "Do `confirmed_facts` name one character?",
             "criteria": {
                 "true": "yes, the facts so far point at one specific character",
                 "false": "no, several different characters still fit the facts",
@@ -700,12 +739,30 @@ def _series_label(series: str) -> str:
     return label[:40].rstrip()
 
 
+def _specific_work(text: str) -> str:
+    """Work named in ``text``, preferring a longer headliner title.
+
+    "final fantasy vii" contains the marker "final fantasy". The headliner
+    title keeps the VII so a different numbered entry is not the same cast.
+    "wonder woman" is not a series marker; the headliner list still names it.
+    """
+    marker = web_search.franchise_label(text)
+    head = web_search.headliner_label(text)
+    if head and marker:
+        marker_key, head_key = series_key(marker), series_key(head)
+        if head_key.startswith(marker_key) and len(head_key) > len(marker_key):
+            return head
+        return marker
+    return marker or head
+
+
 def _typed_franchise(sess: GuessSession) -> str:
     """Canonical series named in the player's own text, or "".
 
     "Another series" plus a detail never sets ``_confirmed_series``, so
     "cowboy bebop" / "star wars" / "simpsons" used to fall out of the lead
     query. A whole-phrase alias keeps that work in every later search.
+    A headliner phrase ("wonder woman", "final fantasy vii") counts too.
     """
     texts = [" ".join(t.lower().split()) for t in _free_text(sess)]
     for marker, label in _FRANCHISE_ALIASES:
@@ -717,32 +774,43 @@ def _typed_franchise(sess: GuessSession) -> str:
                     return label
             elif f" {marker} " in f" {text} ":
                 return label
+    for text in texts:
+        found = _specific_work(text)
+        if found:
+            return found
     return ""
 
 
 def _series_trait_anchor(sess: GuessSession) -> str:
-    """Series plus the rare visual traits the player already stated, or "".
+    """Work, personal alias, and rare visual traits that every search keeps.
 
-    Template groups keep the first fact and the newest three. After several
-    answers the series sits in the middle and drops out, so a later search
-    for "pink hair" returns every pink-haired student. Pinning both in one
-    lead string is what brings Mika's page back instead of the whole school.
-    A typed franchise counts: the player never clicked a series chip.
+    Template groups used to retry the newest fact alone. After a series was
+    only the first fact, that retry was "female character" or "long-haired
+    character" and the pool filled with other franchises and later
+    mantle-holders. The pin is passed through separately so it survives that
+    narrow retry. A typed franchise counts: the player never clicked a chip.
+    Several co-leads are not stuffed into this string; name search asks for
+    each of them. One title name that is not the work title is included, as
+    is a disjoint personal alias ("Diana Prince").
     """
     series = _confirmed_series(sess) or _typed_franchise(sess)
     if not series:
         return ""
+    texts = [series, *_free_text(sess)]
+    parts = web_search.fulltext_pin_parts(texts)
+    if not parts:
+        parts = [series]
+    elif not any(series.lower() in part.lower() for part in parts):
+        parts = [series, *parts]
     phrases: list[str] = []
     for text in (sess.seed, *(a.get("detail") for a in sess.asked)):
         phrases.extend(visual_search_phrases(text or ""))
     for text, _rank in _fact_entries(sess):
         phrases.extend(visual_search_phrases(text))
-    phrases = list(dict.fromkeys(phrases))
-    if not phrases:
-        # A typed or picked series with no visual combo still has to lead.
-        # Otherwise "cowboy bebop" is just another fact and later drops out.
-        return series[:180]
-    return f"{series} {' '.join(phrases)}"[:180]
+    for phrase in phrases:
+        if phrase not in parts:
+            parts.append(phrase)
+    return " ".join(dict.fromkeys(parts))[:180]
 
 
 def _confirmed_series(sess: GuessSession) -> str:
@@ -757,7 +825,7 @@ def _confirmed_series(sess: GuessSession) -> str:
         if option and option.get("series_key"):
             return option.get("fact", "")
         if str(a.get("qid") or "").startswith("series") and a.get("answer") == "other":
-            label = web_search.franchise_label(a.get("detail") or "")
+            label = _specific_work(a.get("detail") or "")
             if label:
                 return label
     return ""
@@ -951,8 +1019,10 @@ def _rescore_candidates(sess: GuessSession) -> None:
     The caller holds the session lock. Only known medium contradictions and
     rejected guesses remove identities; uncertain evidence must be recoverable.
     A visual clue the profile clearly misses is a strong down-rank, not a
-    removal, so a thin blurb can still recover on a later answer.
+    removal, so a thin blurb can still recover on a later answer. Alias rows
+    are one identity before any of that is added up.
     """
+    sess.collapse_identities()
     for question, answer in sess.evidence.values():
         _eliminate_by_medium(sess, question, answer)
     live = sess.alive_candidates()
@@ -1035,19 +1105,127 @@ def _in_franchise(cand: Candidate, franchise: str) -> bool:
     return bool(web_search.franchise_mentioned(franchise, f"{cand.name} {cand.blurb}"))
 
 
+def _player_work_texts(sess: GuessSession) -> list[str]:
+    """Player-typed clues plus a series chip they actually picked."""
+    texts = list(_free_text(sess))
+    for asked in sess.asked:
+        option = (asked.get("options") or {}).get(asked.get("answer") or "")
+        if option and option.get("series_key"):
+            fact = option.get("fact") or ""
+            if fact:
+                texts.append(fact)
+    return texts
+
+
+def _active_headliner(sess: GuessSession) -> tuple[str, tuple[str, ...]] | None:
+    """Franchise and its title characters named by the player, or None.
+
+    Reads the player's own text, not candidate blurbs. "wonder woman" is a
+    headliner phrase even though it is not a series-chip marker.
+    """
+    return web_search.headliner_from_texts(_player_work_texts(sess))
+
+
+def _name_is_headliner(name: str, names: tuple[str, ...]) -> bool:
+    """Whether ``name`` is one of ``names``, including a known alias spelling."""
+    iid = identity_id(name)
+    for listed in names:
+        if iid and iid == identity_id(listed):
+            return True
+        if same_character(name, listed):
+            return True
+    return False
+
+
+def _eligible_headliner(cand: Candidate, franchise: str, names: tuple[str, ...]) -> bool:
+    """Whether ``cand`` is a title character of ``franchise`` and not another work.
+
+    A publisher series such as DC Comics is not a different work: Diana's
+    page is often filed there. A known other series (Kingdom Hearts Cloud)
+    does not take the Final Fantasy VII bonus.
+    """
+    if not _name_is_headliner(cand.name, names):
+        return False
+    if not series_key(cand.series) or is_publisher_series(cand.series):
+        return True
+    blob = f"{cand.name} {cand.blurb}"
+    return _in_franchise(cand, franchise) or bool(web_search.franchise_mentioned(franchise, blob))
+
+
+def _in_headliner_cast(cand: Candidate, franchise: str, names: tuple[str, ...]) -> bool:
+    """Whether ``cand`` belongs to the named work's cast, including the lead."""
+    if _name_is_headliner(cand.name, names):
+        return _eligible_headliner(cand, franchise, names)
+    if is_publisher_series(cand.series):
+        return bool(web_search.franchise_mentioned(franchise, f"{cand.name} {cand.blurb}"))
+    if _in_franchise(cand, franchise):
+        return True
+    return bool(web_search.franchise_mentioned(franchise, f"{cand.name} {cand.series} {cand.blurb}"))
+
+
+def _yesno_likelihood(sess: GuessSession, question: dict[str, Any], cand: Candidate) -> float:
+    """P(yes) for one stored yes/no, using the same fallback as rescoring."""
+    visual = _profile_likelihood(question, cand)
+    p = sess.match_cache.get((cand.id, question["id"]))
+    if visual is not None:
+        p = visual
+    elif p is None:
+        p = min(0.6, max(0.4, _tag_match(question, cand)))
+    return p if p is not None else 0.5
+
+
+def _lift_title_royalty(
+    sess: GuessSession, live: list[Candidate], franchise: str, names: tuple[str, ...],
+) -> None:
+    """Give the title character at least the cast's royalty likelihood.
+
+    Wonder Woman is the princess the book is named after. ``job_royalty=yes``
+    used to move the posterior onto Nubia because only her row carried the
+    tag. The lift runs only when the franchise title is itself a headliner,
+    so an Eva pilot does not inherit a side character's royalty score.
+    """
+    if not any(series_key(franchise) == series_key(listed) for listed in names):
+        return
+    answered = [q for q, a in sess.evidence.values() if q.get("id") == "job_royalty" and a == "yes"]
+    if not answered:
+        return
+    question = answered[0]
+    cast = [c for c in live if _in_headliner_cast(c, franchise, names)]
+    heads = [c for c in cast if _eligible_headliner(c, franchise, names)]
+    if not heads or len(cast) < 2:
+        return
+    deltas = {
+        c.id: math.log(min(0.98, max(0.02, _yesno_likelihood(sess, question, c))))
+        for c in cast
+    }
+    best = max(deltas.values())
+    for head in heads:
+        gap = best - deltas[head.id]
+        if gap > 0:
+            head.logodds += gap
+
+
 def _apply_identity_priors(sess: GuessSession, live: list[Candidate]) -> None:
-    """Prefer a franchise lead, and an exact short name over a longer namesake.
+    """Prefer a franchise lead, a title character, and an exact short name.
 
     Called at the end of a rescore, after trait evidence. A clear trait miss
     is still larger than these bonuses. Publisher buckets are not a series,
-    so Marvel characters are not all treated as one cast.
+    so Marvel characters are not all treated as one cast. When the player
+    named a work, its headliners outrank supporting cast that only matches
+    a shared tag such as royalty.
     """
     franchise = _confirmed_series(sess) or _typed_franchise(sess)
+    headliner = _active_headliner(sess)
+    work, title_names = headliner if headliner else ("", ())
     if franchise:
         for cand in live:
-            if is_publisher_series(cand.series):
+            # Diana's row is often filed under DC Comics. That publisher bucket
+            # must not strip the in-franchise bonus from the title character
+            # while Nubia, filed under Wonder Woman, keeps it.
+            named = bool(title_names) and _eligible_headliner(cand, work, title_names)
+            if is_publisher_series(cand.series) and not named:
                 continue
-            if _in_franchise(cand, franchise):
+            if named or _in_franchise(cand, franchise):
                 cand.logodds += _SERIES_LEAD_BONUS
             elif series_key(cand.series):
                 cand.logodds -= _SIDE_CHARACTER_PENALTY
@@ -1088,6 +1266,11 @@ def _apply_identity_priors(sess: GuessSession, live: list[Candidate]) -> None:
             if re.search(r"\b" + re.escape(other_name) + r"\b", low):
                 cand.logodds -= _NAMESAKE_PENALTY
                 break
+    if title_names:
+        for cand in live:
+            if _eligible_headliner(cand, work, title_names):
+                cand.logodds += _HEADLINER_BONUS
+        _lift_title_royalty(sess, live, work, title_names)
     typed = [t.strip().lower() for t in _free_text(sess)]
     if not typed or not (franchise or _medium_hint(sess)):
         return
@@ -1127,7 +1310,26 @@ def _top_payload(sess: GuessSession, n: int = 3) -> list[dict[str, Any]]:
     return [c.public(p) for c, p in sess.posterior()[:n]]
 
 
+def _alias_split_blocks_guess(sess: GuessSession) -> bool:
+    """Whether two high-mass rows are still unresolved spellings of one person.
+
+    Collapsing should have merged them. If it did not, committing the top
+    fragment repeats the Asuka miss: Sohryu guessed while Soryu still holds mass.
+    """
+    buckets: dict[str, int] = {}
+    for cand, prob in sess.posterior():
+        iid = identity_id(cand.name)
+        if iid and prob >= _ALIAS_SPLIT_MASS:
+            buckets[iid] = buckets.get(iid, 0) + 1
+    return any(count >= 2 for count in buckets.values())
+
+
 def _guess_payload(sess: GuessSession) -> dict[str, Any]:
+    """Name the leading real character. Alias rows are one person first.
+
+    Franchise and species pages are already absent from ``posterior``.
+    """
+    sess.collapse_identities()
     ranked = sess.posterior()
     if not ranked:
         sess.stage = "done"
@@ -1197,8 +1399,12 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
     ``LEADER_STREAK`` checks at ``LEADER_POSTERIOR`` and ``LEADER_MARGIN``
     ahead of the runner-up, or when Laya's ready_to_guess is confident and
     the posterior is at least ``READY_MIN_POSTERIOR``. The turn cap guesses
-    even without that support.
+    even without that support. A still-split alias identity does not commit
+    before the turn cap: two high-mass spellings of one person are not a guess.
     """
+    sess.collapse_identities()
+    if _alias_split_blocks_guess(sess) and sess.turn < MAX_TURNS:
+        return False
     ranked = sess.posterior()
     if not ranked:
         return sess.turn >= MAX_TURNS
@@ -1233,15 +1439,64 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
     return False
 
 
-def _advance(sess: GuessSession) -> dict[str, Any]:
-    """Emit the next question, or a guess when the evidence is strong enough."""
-    with timing.span("pick"):
-        question, laya_answers = _pick_question(sess)
-    alive = len(sess.alive_candidates())
-    timing.note(turn=sess.turn, cands=f"{alive}/{len(sess.candidates)}")
-    if _should_guess(sess, laya_answers) or not question:
-        timing.note(guess=True)
-        return _guess_payload(sess)
+def _predicted_pole(question: dict[str, Any], cand: Candidate) -> str:
+    """The option or yes/no a candidate's tags pick, or ``""`` when they are silent."""
+    tags = set(cand.tags)
+    if is_choice(question):
+        hits = [key for key, opt in question["options"].items() if set(opt.get("tags") or []) & tags]
+        return hits[0] if len(hits) == 1 else ""
+    if set(question.get("tags_true") or []) & tags:
+        return "yes"
+    if set(question.get("tags_false") or []) & tags:
+        return "no"
+    return ""
+
+
+def _same_work(a: Candidate, b: Candidate) -> bool:
+    """Whether two candidates share a real series, not a publisher bucket."""
+    if not series_key(a.series) or not series_key(b.series):
+        return False
+    if is_publisher_series(a.series) or is_publisher_series(b.series):
+        return False
+    return same_series(a.series, b.series)
+
+
+def _recovery_question(sess: GuessSession) -> dict[str, Any] | None:
+    """One unasked trait that separates a rejected guess from the new leader.
+
+    After Kyoko, the next commit used to be another Soryu spelling. A trait
+    the two answer differently is asked once. Returns None when the reject
+    was not a same-work miss, and clears the one-shot flag either way.
+    """
+    rejected_id = sess.recovery_from
+    if not rejected_id:
+        return None
+    sess.recovery_from = ""
+    rejected = sess.by_id(rejected_id)
+    if rejected is None:
+        return None
+    ranked = sess.posterior()
+    if not ranked:
+        return None
+    leader = ranked[0][0]
+    if identity_id(leader.name) and identity_id(leader.name) == identity_id(rejected.name):
+        return None
+    if not _same_work(rejected, leader):
+        return None
+    asked = sess.asked_ids()
+    for qid in _RECOVERY_QIDS:
+        if qid in asked or qid not in QUESTIONS_BY_ID:
+            continue
+        question = QUESTIONS_BY_ID[qid]
+        left = _predicted_pole(question, rejected)
+        right = _predicted_pole(question, leader)
+        if left and right and left != right:
+            return question
+    return None
+
+
+def _emit_asking(sess: GuessSession, question: dict[str, Any]) -> dict[str, Any]:
+    """Record ``question`` as the pending turn and return the asking payload."""
     sess.turn += 1
     sess.asked.append(
         {
@@ -1268,6 +1523,27 @@ def _advance(sess: GuessSession) -> dict[str, Any]:
         "candidates_alive": len(sess.alive_candidates()),
         "laya": sess.laya_used,
     }
+
+
+def _advance(sess: GuessSession) -> dict[str, Any]:
+    """Emit the next question, or a guess when the evidence is strong enough."""
+    if sess.turn < MAX_TURNS:
+        recovery = _recovery_question(sess)
+        if recovery is not None:
+            timing.note(recover=recovery["id"])
+            return _emit_asking(sess, recovery)
+    with timing.span("pick"):
+        question, laya_answers = _pick_question(sess)
+    alive = len(sess.alive_candidates())
+    timing.note(turn=sess.turn, cands=f"{alive}/{len(sess.candidates)}")
+    # Collapse happens inside the guess check. The split flag is read after
+    # that, so a merge that just succeeded is allowed to commit.
+    should = _should_guess(sess, laya_answers)
+    blocked = bool(question) and _alias_split_blocks_guess(sess) and sess.turn < MAX_TURNS
+    if (should or not question) and not blocked:
+        timing.note(guess=True)
+        return _guess_payload(sess)
+    return _emit_asking(sess, question)
 
 
 @timing.traced("start")
@@ -1336,8 +1612,30 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
     return _advance(sess)
 
 
+def _reject_identity(sess: GuessSession, cand: Candidate) -> None:
+    """Hard-eliminate ``cand`` and every stored spelling of that person.
+
+    A wrong guess of one Asuka spelling used to leave Sohryu and Shikinami
+    alive, so the next commit was the same person. Elimination is the
+    down-weight: log-odds go to -inf and every id is recorded in ``rejected``.
+    """
+    iid = identity_id(cand.name)
+    for other in sess.candidates:
+        if other.id == cand.id or (iid and identity_id(other.name) == iid):
+            other.alive = False
+            other.logodds = -math.inf
+            sess.rejected.add(other.id)
+    shown = canonical_name(cand.name) or cand.name
+    sess.constraints.append(f"The character is not {shown}")
+
+
 @timing.traced("guess_result")
 def submit_guess_result(sess: GuessSession, correct: bool) -> dict[str, Any]:
+    """Record whether the pending guess was right and continue the round.
+
+    A wrong guess eliminates that whole identity, then merges whatever alias
+    rows are still live before the next question or commit.
+    """
     if sess.stage != "guessing" or not sess.pending_guess:
         return {"error": "no guess is pending", "session_id": sess.id, "stage": sess.stage}
     guessed = sess.by_id(sess.pending_guess)
@@ -1357,9 +1655,11 @@ def submit_guess_result(sess: GuessSession, correct: bool) -> dict[str, Any]:
         }
 
     if guessed:
-        guessed.alive = False
-        sess.rejected.add(guessed.id)
-        sess.constraints.append(f"The character is not {guessed.name}")
+        sess.recovery_from = guessed.id
+        _reject_identity(sess, guessed)
+        sess.collapse_identities()
+        if sess.evidence:
+            _rescore_candidates(sess)
 
     if sess.guesses_made >= MAX_GUESSES:
         sess.stage = "done"

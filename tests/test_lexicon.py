@@ -35,6 +35,7 @@ from waifu_engine.nekomimi.lexicon import (
 )
 from waifu_engine.nekomimi.lexicon.load import (
     LexiconError,
+    build_characters,
     build_colors,
     build_franchises,
     build_medium,
@@ -193,6 +194,15 @@ def test_missing_file_bad_type_and_duplicate_id_raise():
     dup_phrase["markers"].append(dict(dup_phrase["markers"][0]))
     with pytest.raises(LexiconError, match="duplicate phrase"):
         build_franchises(dup_phrase)
+
+
+def test_character_identities_reject_a_repeated_spelling():
+    """Two people cannot share a spelling. The loader raises instead of merging them."""
+    doc = load_document("characters.yml")
+    broken = json.loads(json.dumps(doc))
+    broken["identities"][1]["names"].append(broken["identities"][0]["names"][0])
+    with pytest.raises(LexiconError, match="repeats spelling"):
+        build_characters(broken)
 
 
 def test_duplicate_nested_key_is_rejected():

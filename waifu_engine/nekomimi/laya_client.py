@@ -35,11 +35,12 @@ _WARMUP_QUESTIONS = {
 }
 
 MODEL_ID = os.getenv("WAIFU_LAYA_MODEL", "convaiinnovations/laya")
-# The `typed-decisions` checkpoint is the same 421M model trained for exactly
-# this shape of work. Its temperatures are ~1.0, where the default `english`
-# checkpoint uses 1.98 for `noul` -- that flattening was crushing every
-# probability toward 0.5 and making confidences useless. Set to "" for the
-# english checkpoint.
+# Stay on `typed-decisions` (temperatures ~1.0). The English root checkpoint
+# uses 1.98 for `noul` and flattened every character score toward 0.5.
+# The card calls this subfolder a specialist for four synthetic workflows and
+# says it can be no better than base `laya` elsewhere; on that same card,
+# `noul` is still its strongest primitive (0.857 vs `choice` 0.733), so match
+# stays `noul` with a short instruction. Set the env var to "" for English.
 SUBFOLDER = os.getenv("WAIFU_LAYA_SUBFOLDER", "typed-decisions").strip()
 # Option strings for a `choice` question are packed into the decision head; the
 # default budget (192) is too small for candidate profiles.
