@@ -211,6 +211,180 @@ def clue_question(qid: str, clues: str) -> dict[str, Any]:
     return question
 
 
+# Player phrases for traits that are rare in combination. Slugs match question
+# tags and ``web_search.TRAIT_PATTERNS``. Wings are detected separately: the
+# word also appears on wing-shaped halos.
+_VISUAL_PHRASES: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    ("pink", re.compile(r"\b(?:light\s+|pale\s+|bright\s+|dark\s+)?pink[\s-]+hair(?:ed)?\b", re.I),
+     "pink hair"),
+    ("halo", re.compile(r"\bhalos?\b", re.I), "halo"),
+    ("wings", re.compile(r"\bwings\b|\bwinged\b", re.I), "wings"),
+    ("horns", re.compile(r"\bhorns?\b|\bhorned\b", re.I), "horns"),
+)
+_VISUAL_YESNO = frozenset({"halo", "wings", "horns"})
+
+_SENTENCE = re.compile(r"[^.!?\n]+")
+_WINGS_WORD = re.compile(r"\bwings\b", re.I)
+_WINGS_NEG = re.compile(
+    r"\b(?:no|not|without|lacking|lacks|lack)\b(?:\W+\w+){0,3}\W+\bwings\b",
+    re.I,
+)
+# Colour and size words are not enough: "small wings" in a halo sentence is
+# still the halo. Angel, feathered, a pair, or wings on the back are the body.
+_BODY_WING = re.compile(
+    r"\b(?:angel|feathered|feather|bat|bird|fairy|dragon|demon|insect)\s+wings\b"
+    r"|\bpair of\b(?:\W+\w+){0,4}\W+\bwings\b"
+    r"|\bwings\b(?:\W+\w+){0,6}\W+\b(?:sprout|sprouting|grow|growing)\b"
+    r"|\bon (?:her|his|their) back\b(?:\W+\w+){0,8}\W+\bwings\b",
+    re.I,
+)
+_HALO_DECOR = re.compile(r"\b(?:halo|halos|winged halo|heart with wings)\b", re.I)
+_APPEARANCE = re.compile(
+    r"\b(?:hair|haired|eyes|eyed|halo|halos|wings|horns|horned|blonde|redhead)\b",
+    re.I,
+)
+# A one-line snippet is not an appearance description. Absence is only evidence
+# once the profile is long enough to have mentioned the trait.
+_APPEARANCE_MIN = 80
+
+
+def _sentences(text: str) -> list[str]:
+    """Split ``text`` on sentence boundaries so a halo line is not a wing line."""
+    parts = [p.strip() for p in _SENTENCE.findall(text or "") if p.strip()]
+    return parts or ([text.strip()] if (text or "").strip() else [])
+
+
+def _sentence_has_body_wings(sentence: str) -> bool:
+    """Whether ``sentence`` describes wings on the body, not a halo's shape."""
+    if not _WINGS_WORD.search(sentence) or _WINGS_NEG.search(sentence):
+        return False
+    if _BODY_WING.search(sentence):
+        return True
+    if _HALO_DECOR.search(sentence):
+        return False
+    return True
+
+
+def has_body_wings(text: str) -> bool:
+    """Whether ``text`` gives the character wings of their own.
+
+    Fandom blurbs call a halo "a heart with wings". That is not the angel
+    wings on Mika's back, and treating it as a yes tied her with Hanae.
+    """
+    return any(_sentence_has_body_wings(s) for s in _sentences(text))
+
+
+def _appearance_bearing(text: str) -> bool:
+    """Whether ``text`` is long enough, and visual enough, to judge a missing trait."""
+    return len(text or "") >= _APPEARANCE_MIN and bool(_APPEARANCE.search(text or ""))
+
+
+def _trait_hit(slug: str, blurb: str, tags: set[str]) -> bool:
+    """Whether the profile positively shows ``slug``.
+
+    A ``wings`` tag mined from a halo sentence loses to the blurb. An empty
+    blurb still trusts the tag, because there is no text to contradict it.
+    """
+    text = blurb or ""
+    if slug == "wings":
+        if has_body_wings(text):
+            return True
+        if text.strip():
+            return False
+        return "wings" in tags
+    for name, pattern, _search in _VISUAL_PHRASES:
+        if name == slug:
+            return bool(pattern.search(text)) or slug in tags
+    return slug in tags
+
+
+def _trait_observed(slug: str, blurb: str, tags: set[str]) -> bool | None:
+    """True, False, or None when the profile never describes appearance.
+
+    None keeps a short or plot-only blurb from being punished for a trait it
+    simply does not mention.
+    """
+    if _trait_hit(slug, blurb, tags):
+        return True
+    if not _appearance_bearing(blurb):
+        return None
+    return False
+
+
+def _clue_slugs(text: str) -> list[str]:
+    """Visual trait slugs named in player text, in table order."""
+    raw = text or ""
+    return [slug for slug, pattern, _search in _VISUAL_PHRASES if pattern.search(raw)]
+
+
+def visual_search_phrases(text: str) -> list[str]:
+    """Search words for the visual traits named in ``text``.
+
+    Kept beside a confirmed series so "Blue Archive" is not searched alone
+    after the player already said pink hair, a halo and wings.
+    """
+    raw = text or ""
+    return [search for _slug, pattern, search in _VISUAL_PHRASES if pattern.search(raw)]
+
+
+def mined_visual_slugs(text: str) -> list[str]:
+    """Halo, horns and body-wing slugs actually described in ``text``."""
+    tags: set[str] = set()
+    if _trait_hit("halo", text, tags):
+        tags.add("halo")
+    if _trait_hit("horns", text, tags):
+        tags.add("horns")
+    if has_body_wings(text):
+        tags.add("wings")
+    return [slug for slug in ("halo", "wings", "horns") if slug in tags]
+
+
+def clue_likelihood(clues: str, blurb: str, tags: list[str] | set[str] | None = None) -> float | None:
+    """P(profile matches a free-text clue), or None when it cannot be judged.
+
+    A soft noul stays near 0.6 for every Trinity student whose blurb shares a
+    few of the words. One missing trait of a stated combination has to cost
+    more than a fame prior (about 1.3 log-odds) or the popular lookalike wins.
+    A profile that never describes appearance returns None so the noul stands.
+    """
+    slugs = _clue_slugs(clues)
+    if not slugs:
+        return None
+    have = set(tags or ())
+    statuses = [_trait_observed(slug, blurb, have) for slug in slugs]
+    if not any(status is not None for status in statuses):
+        return None
+    hits = sum(status is True for status in statuses)
+    misses = sum(status is False for status in statuses)
+    if misses == 0 and hits == len(slugs):
+        return 0.96 if len(slugs) >= 2 else 0.86
+    if misses == 0:
+        return None
+    if len(slugs) >= 2:
+        return 0.04 + 0.10 * (hits / len(slugs))
+    return 0.22
+
+
+def yesno_visual_likelihood(
+    tags_true: list[str] | None, blurb: str, tags: list[str] | set[str] | None = None,
+) -> float | None:
+    """P(yes) for a halo, wings or horns question, or None if the profile is silent.
+
+    These three are separate questions because a single "horns or wings or
+    halo" yes matched every Blue Archive student. The likelihood is left
+    sharp on purpose: the usual [0.4, 0.6] tag cap cannot separate them.
+    """
+    slugs = [slug for slug in (tags_true or []) if slug in _VISUAL_YESNO]
+    if len(slugs) != 1 or len(tags_true or []) != 1:
+        return None
+    status = _trait_observed(slugs[0], blurb, set(tags or ()))
+    if status is True:
+        return 0.92
+    if status is False:
+        return 0.10
+    return None
+
+
 def _expand_entry(entry: dict[str, Any]) -> list[dict[str, Any]]:
     """Turn one JSON template row into runtime questions.
 

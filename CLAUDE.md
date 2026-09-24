@@ -80,7 +80,10 @@ Consequences, in order of how often they get forgotten:
 
 The loop does not call `prune()`: soft evidence must remain recoverable. Only
 medium contradictions and rejected guesses eliminate candidates. Heuristic
-fallback probabilities are capped to [0.4, 0.6]; never write predictions into
+fallback probabilities are capped to [0.4, 0.6], except a free-text visual
+combination (pink hair, halo, wings, horns) and the separate halo / wings /
+horns questions: when the profile clearly has or lacks the trait, that
+likelihood is used even if Laya's noul is mushy. Never write predictions into
 candidate tags or feed noisy mined tags to Laya as confirmed identity facts.
 `posterior()` softmaxes these scores. Cost scales with eligible candidates per
 new trait; there is no longer a ten-forward-pass evidence budget.

@@ -52,12 +52,15 @@ from .traits import (
     MEDIUM_VALUES,
     QUESTION_BANK,
     QUESTIONS_BY_ID,
+    clue_likelihood,
     clue_question,
     is_choice,
     make_dynamic,
     noul_criteria,
     series_question,
     valid_answers,
+    visual_search_phrases,
+    yesno_visual_likelihood,
 )
 
 # The medium question's id. Its pick is a hard fact (``MEDIUM_ACCEPTS``):
@@ -114,7 +117,8 @@ def _fact_entries(sess: GuessSession) -> list[tuple[str, float]]:
     entries: dict[str, float] = {}
 
     def add(text: str | None, rank: float) -> None:
-        text = (text or "").strip()
+        """Record one search fact. ``+`` is flattened so it is not a query operator."""
+        text = " ".join((text or "").replace("+", " ").split())
         if text and text not in entries:
             entries[text] = rank
 
@@ -137,6 +141,30 @@ def _search_terms(sess: GuessSession) -> list[str]:
     return [text for text, _ in _fact_entries(sess)] or ["fictional character"]
 
 
+def _focus_offer(entries: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Facts Laya may rank as the lead of the search query.
+
+    The window used to be the first fact plus the newest ones. A series
+    answered early then fell out, and the query became the hair colour
+    without "Blue Archive". Rank 0 is the seed, a typed detail, or a series.
+    """
+    if len(entries) <= FOCUS_OPTIONS:
+        return entries
+    pinned = [entry for entry in entries if entry[1] <= 0.0]
+    rest = [entry for entry in entries if entry[1] > 0.0]
+    room = FOCUS_OPTIONS - len(pinned)
+    if room <= 0:
+        return pinned[:FOCUS_OPTIONS]
+    rarest = sorted(rest, key=lambda entry: entry[1])
+    chosen = list(dict.fromkeys([*pinned, *rarest[:room]]))
+    for entry in rest[-room:]:
+        if len(chosen) >= FOCUS_OPTIONS:
+            break
+        if entry not in chosen:
+            chosen.append(entry)
+    return chosen[:FOCUS_OPTIONS]
+
+
 def _focus_facts(sess: GuessSession, entries: list[tuple[str, float]]) -> list[str]:
     """The few most distinctive facts, to lead the search query.
 
@@ -146,8 +174,7 @@ def _focus_facts(sess: GuessSession, entries: list[tuple[str, float]]) -> list[s
     """
     if len(entries) <= FOCUS_TAKE:
         return []  # the template queries already carry every fact
-    offered = (entries if len(entries) <= FOCUS_OPTIONS
-               else [entries[0], *entries[-(FOCUS_OPTIONS - 1):]])
+    offered = _focus_offer(entries)
     keys = {f"fact_{i}": text for i, (text, _) in enumerate(offered, start=1)}
     answers = laya_client.ask(
         {"goal": GOAL,
@@ -261,7 +288,8 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
 
     Playwright HTML indexes first, then AniList and Wikipedia (structured, with
     real prose and a popularity number); DuckDuckGo fills remaining slots
-    inside ``find_candidates``.
+    inside ``find_candidates``. Once a series is known, the lead query keeps
+    that series next to the rare visual traits from the seed.
     """
     if not ONLINE:
         return 0
@@ -282,11 +310,19 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
         medium = _medium_hint(sess)
         with timing.span("search.focus"):
             focus = _focus_facts(sess, entries)
+        anchor = _series_trait_anchor(sess)
+        terms = _search_terms(sess)
+        if anchor:
+            # Lead with the series and the rare traits together. Focus is
+            # empty when there are only a few facts, which is exactly when
+            # the template would otherwise drop the series from later groups.
+            terms = [anchor, *[term for term in terms if term != anchor]]
+            focus = [anchor, *[fact for fact in focus if fact != anchor]][:FOCUS_TAKE]
         with timing.span("search.llm_gate"):
             rewritten = None if initial else _llm_queries(sess, medium, stuck)
         with timing.span("search.fetch"):
             raws = sources.find_candidates(
-                _search_terms(sess),
+                terms,
                 medium_hint=medium,
                 limit=limit * 2 if initial else limit,
                 exclude_names=exclude_names,
@@ -483,7 +519,29 @@ def _pick_question(sess: GuessSession) -> tuple[dict[str, Any], dict[str, Any] |
 # --- evidence ---------------------------------------------------------
 
 
+def _profile_likelihood(question: dict[str, Any], cand: Candidate) -> float | None:
+    """P(the question holds) from appearance text, or None when it is silent.
+
+    Flat noul scores left Mika tied with other Trinity students: their blurbs
+    share "pink", "halo" and, for a wing-shaped halo, "wings". A clear hit or
+    miss on that combination has to outrank the fame prior.
+    """
+    if question.get("clues"):
+        return clue_likelihood(question["clues"], cand.blurb, cand.tags)
+    if question.get("kind", "yesno") == "yesno":
+        return yesno_visual_likelihood(question.get("tags_true"), cand.blurb, cand.tags)
+    return None
+
+
 def _tag_match(question: dict[str, Any], cand: Candidate) -> float:
+    """Heuristic P(yes). Halo, wings and horns use the appearance text.
+
+    Information gain reads this. The capped fallback in rescoring does not,
+    or a sharp visual split would be flattened back to [0.4, 0.6].
+    """
+    visual = _profile_likelihood(question, cand)
+    if visual is not None and not question.get("clues"):
+        return visual
     tags = set(cand.tags)
     if set(question["tags_true"]) & tags:
         return 0.85
@@ -551,6 +609,28 @@ def _series_label(series: str) -> str:
     digits, spaces and ``:'&.!-/`` survive, capped at 40 characters."""
     label = " ".join(_SERIES_LABEL.sub("", series or "").split())
     return label[:40].rstrip()
+
+
+def _series_trait_anchor(sess: GuessSession) -> str:
+    """Series plus the rare visual traits the player already stated, or "".
+
+    Template groups keep the first fact and the newest three. After several
+    answers the series sits in the middle and drops out, so a later search
+    for "pink hair" returns every pink-haired student. Pinning both in one
+    lead string is what brings Mika's page back instead of the whole school.
+    """
+    series = _confirmed_series(sess)
+    if not series:
+        return ""
+    phrases: list[str] = []
+    for text in (sess.seed, *(a.get("detail") for a in sess.asked)):
+        phrases.extend(visual_search_phrases(text or ""))
+    for text, _rank in _fact_entries(sess):
+        phrases.extend(visual_search_phrases(text))
+    phrases = list(dict.fromkeys(phrases))
+    if not phrases:
+        return ""
+    return f"{series} {' '.join(phrases)}"[:180]
 
 
 def _confirmed_series(sess: GuessSession) -> str:
@@ -731,6 +811,8 @@ def _rescore_candidates(sess: GuessSession) -> None:
 
     The caller holds the session lock. Only known medium contradictions and
     rejected guesses remove identities; uncertain evidence must be recoverable.
+    A visual clue the profile clearly misses is a strong down-rank, not a
+    removal, so a thin blurb can still recover on a later answer.
     """
     for question, answer in sess.evidence.values():
         _eliminate_by_medium(sess, question, answer)
@@ -760,8 +842,14 @@ def _rescore_candidates(sess: GuessSession) -> None:
             sess.laya_used = True
             sess.match_cache.update({(cid, qid): p for cid, p in probs.items()})
         for c in live:
+            # Appearance text wins over a mushy noul for a stated visual
+            # combination. The cache still holds the model score so the
+            # guess gate can see that a judgment happened.
+            visual = _profile_likelihood(question, c)
             p = sess.match_cache.get((c.id, qid))
-            if p is None:
+            if visual is not None:
+                p = visual
+            elif p is None:
                 # A failed model call must not make noisy tags stronger evidence
                 # than the model's typically modest confidence.
                 p = min(0.6, max(0.4, _tag_match(question, c)))

@@ -593,6 +593,11 @@ TRAIT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("eyes-gold", ("golden eyes", "gold eyes", "amber eyes", "yellow eyes")),
     ("eyes-brown", ("brown eyes", "brown-eyed", "dark eyes")),
     ("glasses", ("glasses", "spectacles")),
+    ("halo", ("halo", "halos")),
+    ("horns", ("horns", "horned")),
+    # Body wings only. A wing-shaped halo ("heart with wings") is not this tag;
+    # ``mine_trait_slugs`` drops it unless the blurb describes wings on the body.
+    ("wings", ("angel wings", "feathered wings")),
     ("fantasy", ("fantasy", "kingdom", "magic world")),
     ("scifi", ("sci-fi", "science fiction", "cyberpunk", "mecha", "spaceship")),
     ("school", ("school", "classroom", "academy")),
@@ -606,12 +611,29 @@ def _marker_re(marker: str) -> "re.Pattern[str]":
 
 
 def mine_trait_slugs(text: str) -> list[str]:
+    """Tag slugs described in ``text``.
+
+    ``wings`` is reconciled with ``traits.has_body_wings``. The marker list
+    includes "angel wings", and a halo described as "a heart with wings" must
+    not receive the tag or every Trinity student looks winged.
+    """
     low = text.lower()
-    return [
+    found = [
         slug
         for slug, markers in TRAIT_PATTERNS
         if any(_marker_re(m).search(low) for m in markers)
     ]
+    # Lazy import: the nekomimi package init pulls the engine, which imports
+    # this module, so a top-level import would cycle.
+    from .nekomimi.traits import mined_visual_slugs
+
+    visual = set(mined_visual_slugs(text))
+    for slug in ("halo", "wings", "horns"):
+        if slug in visual and slug not in found:
+            found.append(slug)
+        elif slug == "wings" and slug not in visual and slug in found:
+            found.remove(slug)
+    return found
 
 
 def _feature_seed_queries(query: str) -> list[str]:
