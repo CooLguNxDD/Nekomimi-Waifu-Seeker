@@ -154,7 +154,10 @@ def _series_of(title: str, categories: list[str], extract: str) -> str:
     if named:
         # The most specific category is usually the longest.
         return max(named, key=len)
-    hit = franchise_label(" ".join([title, *categories, (extract or "")[:400]]))
+    # Only identity evidence: the title, categories and the defining first
+    # sentence. A crossover mentioned later in the intro is not membership.
+    lead = re.split(r"(?<=[.!?])\s", (extract or "").strip(), maxsplit=1)[0][:300]
+    hit = franchise_label(" ".join([title, *categories, lead]))
     if hit:
         return hit
     m = re.search(r"\(([^)]+)\)$", title)

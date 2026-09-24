@@ -256,6 +256,7 @@ MIKU_EXTRACT = (
 
 
 def test_vocaloid_series_beats_category_crumbs():
+    """Vocaloid aliases win over meme, software and location crumbs."""
     assert wikipedia._series_of("Hatsune Miku", MIKU_CATS, MIKU_EXTRACT) == "Vocaloid"
     assert wikipedia._series_of(
         "Kaito (software)",
@@ -275,6 +276,7 @@ def test_vocaloid_series_beats_category_crumbs():
 
 
 def test_category_crumbs_are_not_a_series():
+    """Crumbs alone leave the series Unknown."""
     assert wikipedia._series_of(
         "Someone", ["Category:Internet meme characters"], "A fictional singer."
     ) == "Unknown"
@@ -289,6 +291,7 @@ def test_category_crumbs_are_not_a_series():
 
 
 def test_list_pages_never_lead_the_pool():
+    """List, roster and category pages never enter the posterior."""
     s = sess_mod.new_session()
     added = s.add_candidates([
         {"id": "roster", "name": "VOCALOIDs", "series": "Vocaloid",
@@ -313,6 +316,7 @@ def test_list_pages_never_lead_the_pool():
 
 
 def test_color_detail_is_not_a_name_query():
+    """A colour-only hair detail is not searched as a name."""
     s = sess_mod.new_session()
     s.asked.append({
         "qid": "hair_color", "text": "What colour is your character's hair?",
@@ -327,6 +331,7 @@ def test_color_detail_is_not_a_name_query():
 
 
 def test_typed_vocaloid_confirms_series_and_is_offered():
+    """Typing vocaloid on Another series confirms and offers that series."""
     s = _session()
     q = engine._series_question(s)
     s.asked.append({
@@ -342,6 +347,7 @@ def test_typed_vocaloid_confirms_series_and_is_offered():
 
 
 def test_color_word_seed_is_still_a_name_query():
+    """A colour-word seed such as "Aqua" is still searched as a name."""
     s = sess_mod.new_session("Aqua")
     assert "Aqua" in engine._search_terms(s)
     s.asked.append({
@@ -352,6 +358,7 @@ def test_color_word_seed_is_still_a_name_query():
 
 
 def test_profiles_under_a_characters_route_are_not_aggregates():
+    """Profiles under /characters/ and slash names are not roster pages."""
     assert not web_search.is_aggregate_page(
         "Spider-Man", "https://www.marvel.com/characters/spider-man-peter-parker")
     assert not web_search.is_aggregate_page(
@@ -363,6 +370,7 @@ def test_profiles_under_a_characters_route_are_not_aggregates():
 
 
 def test_character_category_beats_a_mentioned_franchise():
+    """A character category beats a franchise the extract mentions."""
     series = wikipedia._series_of(
         "Some Fighter",
         ["Category:Tekken characters"],
@@ -372,6 +380,7 @@ def test_character_category_beats_a_mentioned_franchise():
 
 
 def test_enrich_keeps_a_usable_page_series(monkeypatch):
+    """Enrich keeps a usable page series and only maps crumbs from the blurb."""
     from waifu_engine import browser_search
 
     monkeypatch.setattr(browser_search, "_fetch_html", lambda *_a, **_k: "<html></html>")

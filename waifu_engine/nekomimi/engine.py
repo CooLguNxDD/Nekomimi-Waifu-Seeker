@@ -1036,6 +1036,19 @@ def _is_series_lead(group: list[Candidate]) -> list[Candidate]:
     return []
 
 
+def _in_franchise(cand: Candidate, franchise: str) -> bool:
+    """Whether ``cand`` belongs to ``franchise``: its series if known, else its page.
+
+    A missing series still counts when the page names the work: Spike's row
+    was "Unknown" while Ed's said Cowboy Bebop. A known series is trusted
+    over the blurb, or a Tekken fighter whose page mentions a Vocaloid
+    collaboration would join the Vocaloid cast.
+    """
+    if series_key(cand.series):
+        return same_series(cand.series, franchise)
+    return bool(web_search.franchise_mentioned(franchise, f"{cand.name} {cand.blurb}"))
+
+
 def _apply_identity_priors(sess: GuessSession, live: list[Candidate]) -> None:
     """Prefer a franchise lead, and an exact short name over a longer namesake.
 
@@ -1048,8 +1061,7 @@ def _apply_identity_priors(sess: GuessSession, live: list[Candidate]) -> None:
         for cand in live:
             if is_publisher_series(cand.series):
                 continue
-            blob = f"{cand.name} {cand.series} {cand.blurb}".lower()
-            if same_series(cand.series, franchise) or franchise.lower() in blob:
+            if _in_franchise(cand, franchise):
                 cand.logodds += _SERIES_LEAD_BONUS
             elif series_key(cand.series):
                 cand.logodds -= _SIDE_CHARACTER_PENALTY
@@ -1058,12 +1070,7 @@ def _apply_identity_priors(sess: GuessSession, live: list[Candidate]) -> None:
     for cand in live:
         if not focus or is_publisher_series(cand.series):
             continue
-        key = series_key(cand.series)
-        blob = f"{cand.name} {cand.series} {cand.blurb}".lower()
-        # A missing series field still counts when the page names the work.
-        # Spike's row was "Unknown" while Ed's said Cowboy Bebop, so the
-        # series key alone never put them in one cast.
-        if not ((key and same_series_key(key, focus)) or franchise.lower() in blob):
+        if not _in_franchise(cand, franchise):
             continue
         groups.setdefault(focus, []).append(cand)
     protag = _protagonist_answer(sess)
@@ -1102,10 +1109,15 @@ def _apply_identity_priors(sess: GuessSession, live: list[Candidate]) -> None:
     if not exact:
         return
     for cand in live:
-        if any(longer_namesake(short.name, cand.name) for short in exact):
-            if any(same_series(short.series, cand.series) for short in exact):
-                continue
-            cand.logodds -= _NAMESAKE_PENALTY
+        shorts = [short for short in exact if longer_namesake(short.name, cand.name)]
+        if not shorts:
+            continue
+        # An unknown series ("Web result") cannot prove two different people:
+        # a stray "Spike" hit must not sink Spike Spiegel.
+        if any(not series_key(short.series) or not series_key(cand.series)
+               or same_series(short.series, cand.series) for short in shorts):
+            continue
+        cand.logodds -= _NAMESAKE_PENALTY
 
 
 # --- public API -------------------------------------------------------

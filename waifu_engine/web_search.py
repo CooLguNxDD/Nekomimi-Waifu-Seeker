@@ -363,17 +363,35 @@ _SERIES_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _phrase_re(phrase: str) -> re.Pattern[str]:
+    """Whole-phrase pattern for ``phrase``, allowing a plural ``s`` ("VOCALOIDs").
+
+    Plain substring matching turned "personality" into Persona and
+    "bleached" into Bleach.
+    """
+    return re.compile(r"(?<!\w)" + re.escape(phrase.lower()) + r"s?(?!\w)")
+
+
+_SERIES_MARKER_RES = tuple((_phrase_re(m), label) for m, label in _SERIES_MARKERS)
+
+
 def franchise_label(text: str) -> str:
     """Display name of a known franchise named in ``text``, or ``""``.
 
     Vocaloid aliases (Crypton, Project Diva, Sekai) share one label so a
     series question can offer "Vocaloid" instead of a category crumb.
+    Markers match whole phrases only.
     """
     low = (text or "").lower()
-    for marker, label in _SERIES_MARKERS:
-        if marker in low:
+    for marker_re, label in _SERIES_MARKER_RES:
+        if marker_re.search(low):
             return label
     return ""
+
+
+def franchise_mentioned(franchise: str, text: str) -> bool:
+    """Whether ``text`` names ``franchise`` as a whole phrase."""
+    return bool(franchise) and bool(_phrase_re(franchise).search((text or "").lower()))
 
 
 # Category and parenthetical leftovers. "Internet meme characters" and
