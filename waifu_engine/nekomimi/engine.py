@@ -1148,7 +1148,13 @@ def submit_guess_result(sess: GuessSession, correct: bool) -> dict[str, Any]:
 
 
 def state_payload(sess: GuessSession) -> dict[str, Any]:
-    return {
+    """Return a round a refreshed page can render.
+
+    The turn responses already include the pending question or guess. This
+    snapshot used to omit them, so a follow-up GET replaced that payload and
+    the UI lost the question it was showing.
+    """
+    payload: dict[str, Any] = {
         "session_id": sess.id,
         "stage": sess.stage,
         "turn": sess.turn,
@@ -1165,3 +1171,26 @@ def state_payload(sess: GuessSession) -> dict[str, Any]:
         "top": _top_payload(sess, 8),
         "notes": sess.notes,
     }
+    if sess.stage == "asking" and sess.asked:
+        current = sess.asked[-1]
+        question = {
+            "id": current["qid"],
+            "text": current["text"],
+            "category": current["category"],
+            "kind": current.get("kind", "yesno"),
+            "options": current.get("options"),
+        }
+        payload["question"] = _question_payload(sess, question)
+    elif sess.stage == "guessing" and sess.pending_guess:
+        cand = sess.by_id(sess.pending_guess)
+        if cand is not None:
+            prob = next((p for c, p in sess.posterior() if c.id == cand.id), 0.0)
+            payload["guess"] = cand.public(prob)
+            payload["guess_number"] = sess.guesses_made
+    elif sess.stage == "done" and sess.winner:
+        cand = sess.by_id(sess.winner)
+        if cand is not None:
+            payload["winner"] = cand.public(1.0)
+            payload["correct"] = True
+            payload["turns"] = sess.turn
+    return payload

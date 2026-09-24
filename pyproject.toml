@@ -30,3 +30,4 @@ include = ["waifu_engine*"]
 
 [tool.setuptools.package-data]
 "waifu_engine.nekomimi" = ["question_bank.json"]
+"waifu_engine" = ["webui_dist/**/*"]

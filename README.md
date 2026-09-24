@@ -104,11 +104,14 @@ python -m waifu_engine "blue hair ice general" --fallback
 
 ## Web UI
 
+The browser app is a SolidJS SPA in `webui/` (TanStack Router + Query, Zustand, Tailwind). `npm run build` writes `waifu_engine/webui_dist`, which is what FastAPI serves (503 until that bundle exists) and what `pip install` ships.
+
 ```bash
+cd webui && npm install && npm run build && cd ..
 python -m waifu_engine.web
 ```
 
-Open http://127.0.0.1:7860
+Open http://127.0.0.1:7860. For frontend HMR, run `npm run dev` in `webui/` while the API is already on port 7860.
 
 ## Candidate discovery
 

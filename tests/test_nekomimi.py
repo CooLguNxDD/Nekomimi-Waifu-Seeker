@@ -543,18 +543,33 @@ def test_search_driven_round_discovers_target_from_later_detail(monkeypatch):
     assert len(queries) == 1 + sum(bool(a["answer"]) for a in s.asked)
 
 
-def test_nekomimi_page_and_api_paths():
+def test_nekomimi_page_and_api_paths(monkeypatch):
     from fastapi.testclient import TestClient
 
-    from waifu_engine.web import app
+    from waifu_engine import web
 
-    client = TestClient(app, follow_redirects=False)
+    client = TestClient(web.app, follow_redirects=False)
     page = client.get("/nekomimi")
-    assert page.status_code == 200
-    assert b"Nekomimi" in page.content
-    assert b"/api/nekomimi/" in page.content
+    if web._bundle_dir() is not None:
+        assert page.status_code == 200
+        assert b"Nekomimi" in page.content
+        assert b"/api/nekomimi/" in page.content
+    monkeypatch.setattr(web, "_bundle_dir", lambda: None)
+    assert client.get("/nekomimi").status_code == 503
+    assert client.get("/").status_code == 503
     assert client.get("/akinator").status_code == 404
     assert client.post("/api/akinator/start", json={}).status_code == 404
+
+
+def test_state_snapshot_keeps_the_pending_question(monkeypatch):
+    monkeypatch.setattr(engine.sources, "find_candidates", lambda *a, **k: [])
+    monkeypatch.setattr(laya_client, "ask", lambda *a, **k: None)
+    state = engine.start()
+    sess = sess_mod.get_session(state["session_id"])
+    snap = engine.state_payload(sess)
+    assert snap["stage"] == "asking"
+    assert snap["question"]["text"] == state["question"]["text"]
+    assert snap["question"]["qid"] == state["question"]["qid"]
 
 
 # --- multiple-choice questions ----------------------------------------
@@ -888,7 +903,9 @@ def test_only_typed_text_counts_as_something_specific_to_search(monkeypatch):
 
 
 def test_page_asks_for_a_detail_when_no_candidates_are_in_play():
-    from waifu_engine.nekomimi_page import NEKOMIMI_PAGE
+    from pathlib import Path
 
-    assert 'id="emptyHint"' in NEKOMIMI_PAGE
-    assert "show(el('emptyHint'), !data.candidates_alive)" in NEKOMIMI_PAGE
+    page = Path(__file__).resolve().parents[1] / "webui/src/components/nekomimi/QuestionCard.tsx"
+    text = page.read_text(encoding="utf-8")
+    assert 'id="emptyHint"' in text
+    assert "!props.candidatesAlive" in text
