@@ -55,7 +55,7 @@ export function QuestionCard(props: {
               exit={fade()}
               transition={{ duration: reduced() ? 0 : 0.22, easing: [0.16, 1, 0.3, 1] }}
             >
-              {question().text}
+              {question.text}
             </Motion.h2>
           )}
         </Show>
