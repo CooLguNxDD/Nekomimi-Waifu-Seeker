@@ -19,6 +19,9 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
+# Publisher keys: lexicon/franchises.yml. ``series_key`` is the matcher.
+from .nekomimi.lexicon import PUBLISHER_KEYS as _PUBLISHER_KEYS
+
 # Word separators between name parts: whitespace, the Japanese middle dot and
 # full-width space, commas ("Shimoe, Koharu").
 _WORDS = re.compile(r"[\s・･·,　]+")
@@ -152,15 +155,6 @@ def same_series_key(ka: str, kb: str) -> bool:
         return True
     short, long_ = sorted((ka, kb), key=len)
     return len(short) >= 5 and long_.startswith(short)
-
-
-# Publisher buckets are not a series. "Marvel Comics" grouped Abomination with
-# every other Marvel page, so the series question locked the whole line and
-# Spider-Man never became its own option.
-_PUBLISHER_KEYS = frozenset({
-    "marvelcomics", "dccomics", "imagecomics", "darkhorsecomics",
-    "darkhorse", "image",
-})
 
 
 def is_publisher_series(series: str) -> bool:

@@ -1,0 +1,184 @@
+# First match wins. Longer Vocaloid aliases stay before the bare name.
+# franchise_label uses web_search._phrase_re; this file is only the sequence.
+markers:
+  - { phrase: project sekai, label: Vocaloid }
+  - { phrase: colorful stage, label: Vocaloid }
+  - { phrase: project diva, label: Vocaloid }
+  - { phrase: crypton future, label: Vocaloid }
+  - { phrase: vocaloid, label: Vocaloid }
+  - { phrase: blue archive, label: Blue Archive }
+  - { phrase: "honkai: star rail", label: "Honkai: Star Rail" }
+  - { phrase: star rail, label: "Honkai: Star Rail" }
+  - { phrase: fate/grand order, label: Fate/Grand Order }
+  - { phrase: final fantasy, label: Final Fantasy }
+  - { phrase: street fighter, label: Street Fighter }
+  - { phrase: guilty gear, label: Guilty Gear }
+  - { phrase: league of legends, label: League of Legends }
+  - { phrase: elden ring, label: Elden Ring }
+  - { phrase: dark souls, label: Dark Souls }
+  - { phrase: the legend of zelda, label: The Legend of Zelda }
+  - { phrase: super mario, label: Super Mario }
+  - { phrase: pokemon, label: Pokemon }
+  - { phrase: persona, label: Persona }
+  - { phrase: nier, label: NieR }
+  - { phrase: overwatch, label: Overwatch }
+  - { phrase: arknights, label: Arknights }
+  - { phrase: azur lane, label: Azur Lane }
+  - { phrase: "spider-man", label: "Spider-Man" }
+  - { phrase: spiderman, label: "Spider-Man" }
+  - { phrase: "x-men", label: "X-Men" }
+  - { phrase: batman, label: Batman }
+  - { phrase: star wars, label: Star Wars }
+  - { phrase: the simpsons, label: The Simpsons }
+  - { phrase: simpsons, label: The Simpsons }
+  - { phrase: spy x family, label: Spy x Family }
+  - { phrase: frieren, label: Frieren }
+  - { phrase: oshi no ko, label: Oshi no Ko }
+  - { phrase: evangelion, label: Neon Genesis Evangelion }
+  - { phrase: cowboy bebop, label: Cowboy Bebop }
+  - { phrase: death note, label: Death Note }
+  - { phrase: dragon ball, label: Dragon Ball }
+  - { phrase: sailor moon, label: Sailor Moon }
+  - { phrase: bleach, label: Bleach }
+  - { phrase: genshin impact, label: Genshin Impact }
+  - { phrase: chainsaw man, label: Chainsaw Man }
+  - { phrase: attack on titan, label: Attack on Titan }
+  - { phrase: sword art online, label: Sword Art Online }
+  - { phrase: "re:zero", label: "Re:Zero" }
+  - { phrase: one piece, label: One Piece }
+  - { phrase: naruto, label: Naruto }
+  - { phrase: jujutsu kaisen, label: Jujutsu Kaisen }
+  - { phrase: demon slayer, label: Demon Slayer }
+  - { phrase: tokyo revengers, label: Tokyo Revengers }
+  - { phrase: black clover, label: Black Clover }
+  - { phrase: fullmetal alchemist, label: Fullmetal Alchemist }
+  - { phrase: my hero academia, label: My Hero Academia }
+  - { phrase: assassination classroom, label: Assassination Classroom }
+  - { phrase: food wars, label: Food Wars }
+  - { phrase: dr. stone, label: Dr. Stone }
+  - { phrase: seven deadly sins, label: Seven Deadly Sins }
+
+# Player text only. exact: true means the whole clue must be the phrase
+# (engine._typed_franchise). Do not fold these into markers.
+typed_aliases:
+  - { phrase: cowboy bebop, label: Cowboy Bebop }
+  - { phrase: star wars, label: Star Wars }
+  - { phrase: super mario, label: Super Mario }
+  - { phrase: "spider-man", label: "Spider-Man" }
+  - { phrase: spiderman, label: "Spider-Man" }
+  - { phrase: spider man, label: "Spider-Man" }
+  - { phrase: the simpsons, label: The Simpsons }
+  - { phrase: simpsons, label: The Simpsons }
+  - { phrase: mario, label: Super Mario, exact: true }
+
+# Exact normalized string match in web_search.series_is_crumb.
+crumbs:
+  - internet meme
+  - memes
+  - software
+  - japan
+  - voice banks
+  - internet memes
+  - meme
+  - sapporo
+  - voice bank
+  - mascots
+  - japanese
+  - mascot
+  - popular culture
+
+aggregate_exact:
+  - vocaloids
+  - fanloids
+  - vocaloid characters
+  - fanloid
+
+# Wikipedia skips these labels; names.is_publisher_series skips these keys.
+# "image" is a key without a display label so it is not also a Wikipedia series string.
+publishers:
+  - { label: Marvel Comics, key: marvelcomics }
+  - { label: DC Comics, key: dccomics }
+  - { label: Image Comics, key: imagecomics }
+  - { label: Dark Horse Comics, key: darkhorsecomics }
+  - { label: Dark Horse, key: darkhorse }
+  - { key: image }
+
+# Shared by _ok_person_name and the plural-stem rule in is_aggregate_page.
+name_block:
+  - naruto
+  - persona
+  - vocaloid
+  - umamusume
+  - hunter x hunter
+  - dragon ball
+  - the legend of zelda
+  - all time
+  - honkai
+  - fullmetal alchemist
+  - frieren
+  - bungou stray dogs
+  - mob psycho
+  - black clover
+  - "re:zero"
+  - honkai star rail
+  - super mario
+  - blue archive
+  - the avengers
+  - final fantasy
+  - spy x family
+  - street fighter
+  - tekken
+  - discover pinterest
+  - attack on titan
+  - tokyo revengers
+  - grand blue
+  - sailor moon
+  - kokuhaku jikkou iinkai
+  - vinland saga
+  - one piece
+  - chainsaw man
+  - overwatch
+  - x men
+  - arknights
+  - jujutsu kaisen
+  - food wars
+  - cowboy bebop
+  - demon slayer
+  - nier automata
+  - oshi no ko
+  - sword art online
+  - death note
+  - marvel comics
+  - dc comics
+  - pokemon
+  - justice league
+  - my hero academia
+  - fate grand order
+  - azur lane
+  - dr stone
+  - guilty gear
+  - neon genesis evangelion
+  - progression
+  - dark souls
+  - elden ring
+  - bleach
+  - you will fall
+  - fairy tail
+  - re zero
+  - teen titans
+  - genshin impact
+  - league of legends
+
+# wikipedia._series_of skips these generic category words.
+generic_series:
+  - video game
+  - orphan
+  - comics
+  - animated television
+  - adoption in
+  - teenage
+  - female
+  - male
+  - anime and manga
+  - animated film
+  - animated

@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from .. import timing
 from ..names import already_seen, name_keys
+from ..nekomimi.lexicon import POPULAR_CATEGORIES, SEARCH_SUFFIX as _MEDIUM_SUFFIX
 from . import _http, anilist, gemini, wikipedia
 
 __all__ = ["anilist", "gemini", "wikipedia", "find_candidates", "normalize_name"]
@@ -28,14 +29,8 @@ def normalize_name(name: str) -> str:
     return "".join(ch for ch in (name or "").lower() if ch.isalnum())
 
 
-_MEDIUM_SUFFIX = {
-    "anime": "anime character",
-    "manga": "manga character",
-    "game": "video game character",
-    "comic": "comic book character",
-    "movie": "film character",
-    "tv": "TV series character",
-}
+# Search suffixes: lexicon/medium.yml ``search_suffix``. ``_queries`` still
+# decides the order the strings are tried.
 
 
 MAX_QUERIES = 5
@@ -225,14 +220,8 @@ def _gemini_background_on() -> bool:
 # list articles in full text. Start from popular characters instead and let the
 # questions narrow them. Live sources only -- never catalog.json.
 
-POPULAR_CATEGORIES = {
-    "game": ("Category:Female characters in video games",
-             "Category:Male characters in video games"),
-    "comic": ("Category:Marvel Comics superheroes", "Category:DC Comics superheroes"),
-    "movie": ("Category:Female characters in film", "Category:Male characters in film"),
-    "tv": ("Category:Female characters in television",
-           "Category:Male characters in television"),
-}
+# Popular-category titles: lexicon/categories.yml ``popular``. Live Wikipedia
+# categories only; this path never reads catalog.json.
 
 
 def popular_limit() -> int:

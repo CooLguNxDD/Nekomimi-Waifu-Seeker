@@ -1,0 +1,258 @@
+# Mined markers for web_search.mine_trait_slugs via _marker_re.
+# Question wording stays in question_bank.json. mine_only lists slugs
+# that have markers but no bank tag; it is empty on purpose today.
+mine_only: []
+traits:
+  - id: female
+    group: gender
+    markers:
+      - she
+      - her
+      - heroine
+      - woman
+      - girl
+      - female
+  - id: male
+    group: gender
+    markers:
+      - he
+      - his
+      - him
+      - hero
+      - man
+      - boy
+      - male
+  - id: protagonist
+    group: role
+    markers:
+      - protagonist
+      - main character
+      - player character
+  - id: antagonist
+    group: role
+    markers:
+      - antagonist
+      - villain
+      - main enemy
+  - id: playable
+    group: medium
+    markers:
+      - playable
+  - id: student
+    group: job
+    markers:
+      - student
+      - high school
+      - academy
+  - id: soldier
+    group: job
+    markers:
+      - soldier
+      - knight
+      - mercenary
+      - warrior
+  - id: mage
+    group: job
+    markers:
+      - mage
+      - wizard
+      - witch
+      - sorcerer
+      - spellcaster
+  - id: ninja
+    group: job
+    markers:
+      - ninja
+      - shinobi
+      - assassin
+  - id: idol
+    group: job
+    markers:
+      - idol
+      - singer
+      - virtual singer
+  - id: royalty
+    group: job
+    markers:
+      - princess
+      - prince
+      - queen
+      - king
+      - noble
+  - id: robot
+    group: species
+    markers:
+      - android
+      - robot
+      - cyborg
+      - artificial intelligence
+  - id: demon
+    group: species
+    markers:
+      - demon
+      - devil
+      - oni
+      - vampire
+  - id: god
+    group: species
+    markers:
+      - goddess
+      - god
+      - deity
+  - id: sword
+    group: power
+    markers:
+      - sword
+      - katana
+      - blade
+  - id: gun
+    group: power
+    markers:
+      - gun
+      - pistol
+      - rifle
+      - firearm
+  - id: magic
+    group: power
+    markers:
+      - magic
+      - spell
+      - mana
+  - id: tsundere
+    group: pers
+    markers:
+      - tsundere
+  - id: kuudere
+    group: pers
+    markers:
+      - kuudere
+      - stoic
+      - emotionless
+  - id: yandere
+    group: pers
+    markers:
+      - yandere
+  - id: genki
+    group: pers
+    markers:
+      - cheerful
+      - energetic
+      - genki
+  - id: blonde
+    group: hair_color
+    markers:
+      - blonde
+      - blond
+      - golden hair
+  - id: black
+    group: hair_color
+    markers:
+      - black hair
+      - "black-haired"
+  - id: white
+    group: hair_color
+    markers:
+      - white hair
+      - silver hair
+      - grey hair
+      - gray hair
+  - id: red
+    group: hair_color
+    markers:
+      - red hair
+      - crimson hair
+      - redhead
+  - id: blue
+    group: hair_color
+    markers:
+      - blue hair
+  - id: pink
+    group: hair_color
+    markers:
+      - pink hair
+  - id: brown
+    group: hair_color
+    markers:
+      - brown hair
+      - "brown-haired"
+  - id: green
+    group: hair_color
+    markers:
+      - green hair
+      - "green-haired"
+  - id: purple
+    group: hair_color
+    markers:
+      - purple hair
+      - violet hair
+      - "purple-haired"
+  - id: "eyes-blue"
+    group: eye_color
+    markers:
+      - blue eyes
+      - "blue-eyed"
+  - id: "eyes-red"
+    group: eye_color
+    markers:
+      - red eyes
+      - crimson eyes
+      - "red-eyed"
+  - id: "eyes-green"
+    group: eye_color
+    markers:
+      - green eyes
+      - "green-eyed"
+  - id: "eyes-gold"
+    group: eye_color
+    markers:
+      - golden eyes
+      - gold eyes
+      - amber eyes
+      - yellow eyes
+  - id: "eyes-brown"
+    group: eye_color
+    markers:
+      - brown eyes
+      - "brown-eyed"
+      - dark eyes
+  - id: glasses
+    group: look
+    markers:
+      - glasses
+      - spectacles
+  - id: halo
+    group: look_halo
+    markers:
+      - halo
+      - halos
+  - id: horns
+    group: look_horns
+    markers:
+      - horns
+      - horned
+  - id: wings
+    group: look_wings
+    reconcile: body_wings
+    markers:
+      - angel wings
+      - feathered wings
+  - id: fantasy
+    group: setting
+    markers:
+      - fantasy
+      - kingdom
+      - magic world
+  - id: scifi
+    group: setting
+    markers:
+      - "sci-fi"
+      - science fiction
+      - cyberpunk
+      - mecha
+      - spaceship
+  - id: school
+    group: setting
+    markers:
+      - school
+      - classroom
+      - academy

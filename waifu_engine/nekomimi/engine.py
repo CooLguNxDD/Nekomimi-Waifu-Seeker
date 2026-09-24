@@ -43,6 +43,11 @@ from ..names import (
     series_key,
 )
 from . import laya_client
+from .lexicon import BROAD_CATEGORIES as _BROAD_CATEGORIES
+from .lexicon import EXACT_ALIASES as _EXACT_ALIASES
+from .lexicon import HAIR_CATEGORIES as _HAIR_CATEGORIES
+from .lexicon import SERIES_APPEARANCE as _SERIES_APPEARANCE
+from .lexicon import TYPED_ALIASES as _FRANCHISE_ALIASES
 from .session import (
     MAX_GUESSES,
     MAX_TURNS,
@@ -101,32 +106,14 @@ _SIDE_CHARACTER_PENALTY = 0.7
 # A typed name ("mario") must not let "Mario Rossi" outrank the exact name
 # once a medium or franchise is known.
 _NAMESAKE_PENALTY = 2.2
-# Whole-phrase aliases the player types on "Another series". Longer phrases
-# are listed first so "super mario" wins over "mario".
-_FRANCHISE_ALIASES: tuple[tuple[str, str], ...] = (
-    ("cowboy bebop", "Cowboy Bebop"),
-    ("star wars", "Star Wars"),
-    ("super mario", "Super Mario"),
-    ("spider-man", "Spider-Man"),
-    ("spiderman", "Spider-Man"),
-    ("spider man", "Spider-Man"),
-    ("the simpsons", "The Simpsons"),
-    ("simpsons", "The Simpsons"),
-    ("mario", "Super Mario"),
-)
-# Aliases that are also a character's given name: they count only as the
-# whole typed clue.
-_EXACT_ALIASES = frozenset({"mario"})
+# Typed aliases: lexicon/franchises.yml. ``_typed_franchise`` applies the
+# ``exact`` flag (whole clue only). Broad and hair sets: lexicon/categories.yml.
+# Skip-on-yes and the focus ranking that uses those sets stay in this module.
 ONLINE = os.getenv("WAIFU_ONLINE_SEARCH", "1").lower() in {"1", "true", "yes"}
 # Facts offered to Laya when ranking which ones lead the search query, and how
 # many of the winners go into the focused query.
 FOCUS_OPTIONS = 8
 FOCUS_TAKE = 3
-# Broad facts that match thousands of characters; they go last in the fallback
-# focus ranking.
-_BROAD_CATEGORIES = frozenset({"medium", "gender", "meta"})
-# Questions whose typed detail may be only colour words.
-_HAIR_CATEGORIES = frozenset({"hair_color", "hair"})
 
 _SESSION_LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
@@ -505,9 +492,8 @@ def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
     return out
 
 
-# Asked ahead of school/uniform/teen once the player has named them, or once
-# the series is known and those shared answers no longer separate anyone.
-_SERIES_APPEARANCE = ("hair_color", "look_halo", "look_wings", "look_horns")
+# Appearance pin order: lexicon/categories.yml (hair_color, then the
+# series_appearance flags). ``_pinned_question_ids`` still decides when.
 
 
 def _pinned_question_ids(sess: GuessSession) -> list[str]:

@@ -13,6 +13,7 @@ dependencies = [
   "uvicorn[standard]>=0.27",
   "python-multipart>=0.0.9",
   "ddgs>=9.0.0",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -29,5 +30,5 @@ waifu-engine = "waifu_engine.cli:main"
 include = ["waifu_engine*"]
 
 [tool.setuptools.package-data]
-"waifu_engine.nekomimi" = ["question_bank.json"]
+"waifu_engine.nekomimi" = ["question_bank.json", "lexicon/*.yml"]
 "waifu_engine" = ["webui_dist/**/*"]

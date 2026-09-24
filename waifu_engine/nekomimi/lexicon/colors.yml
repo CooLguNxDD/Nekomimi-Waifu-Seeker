@@ -1,0 +1,30 @@
+# is_color_phrase: every token is in this set. The matcher stays in web_search.is_color_phrase.
+words:
+  - brown
+  - indigo
+  - aqua
+  - blue
+  - cyan
+  - scarlet
+  - violet
+  - lime
+  - green
+  - magenta
+  - silver
+  - white
+  - auburn
+  - blonde
+  - red
+  - golden
+  - orange
+  - teal
+  - mint
+  - pink
+  - grey
+  - turquoise
+  - purple
+  - crimson
+  - black
+  - blond
+  - gold
+  - gray

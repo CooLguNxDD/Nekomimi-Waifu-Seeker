@@ -12,6 +12,7 @@ import hashlib
 import re
 from typing import Any
 
+from ..nekomimi.lexicon import GENERIC_SERIES, PUBLISHER_LABELS as _PUBLISHER_SERIES
 from ._http import get_json
 
 API = "https://en.wikipedia.org/w/api.php"
@@ -99,20 +100,6 @@ def _is_character(title: str, categories: list[str], extract: str) -> bool:
     if NOT_CHARACTER.search(head):
         return False
     return bool(IS_CHARACTER.search(head))
-
-
-GENERIC_SERIES = {
-    "male", "female", "video game", "comics", "anime and manga", "animated",
-    "animated film", "animated television", "teenage", "adoption in", "orphan",
-}
-
-# A publisher is not the work. Taking the longest "<series> characters"
-# category made every Marvel page "Marvel Comics", so the series question
-# could not offer Spider-Man separately from Abomination.
-_PUBLISHER_SERIES = {
-    "marvel comics", "dc comics", "image comics", "dark horse comics",
-    "dark horse",
-}
 
 
 def _series_of(title: str, categories: list[str], extract: str) -> str:
