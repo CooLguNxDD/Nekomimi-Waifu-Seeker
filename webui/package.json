@@ -1,0 +1,26 @@
+{
+  "name": "nekomimi-webui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tanstack/solid-query": "^5.90.0",
+    "@tanstack/solid-router": "^1.131.0",
+    "mitt": "^3.0.1",
+    "solid-js": "^1.9.9",
+    "solid-motionone": "^1.0.4",
+    "zustand": "^5.0.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.13",
+    "@tanstack/router-plugin": "^1.131.0",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5",
+    "vite-plugin-solid": "^2.11.8"
+  }
+}

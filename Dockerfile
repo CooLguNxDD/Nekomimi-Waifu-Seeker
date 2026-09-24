@@ -1,5 +1,12 @@
 # Slim web image — keyword decision fallback by default.
 # For Laya: docker compose --profile laya up --build
+FROM node:22-slim AS webui
+WORKDIR /webui
+COPY webui/package.json webui/package-lock.json ./
+RUN npm ci
+COPY webui/ ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -17,6 +24,7 @@ RUN pip install --upgrade pip && pip install -r requirements-docker.txt
 COPY pyproject.toml README.md ./
 COPY data ./data
 COPY waifu_engine ./waifu_engine
+COPY --from=webui /webui/dist ./webui/dist
 
 RUN pip install -e .
 

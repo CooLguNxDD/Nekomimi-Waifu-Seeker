@@ -557,6 +557,17 @@ def test_nekomimi_page_and_api_paths():
     assert client.post("/api/akinator/start", json={}).status_code == 404
 
 
+def test_state_snapshot_keeps_the_pending_question(monkeypatch):
+    monkeypatch.setattr(engine.sources, "find_candidates", lambda *a, **k: [])
+    monkeypatch.setattr(laya_client, "ask", lambda *a, **k: None)
+    state = engine.start()
+    sess = sess_mod.get_session(state["session_id"])
+    snap = engine.state_payload(sess)
+    assert snap["stage"] == "asking"
+    assert snap["question"]["text"] == state["question"]["text"]
+    assert snap["question"]["qid"] == state["question"]["qid"]
+
+
 # --- multiple-choice questions ----------------------------------------
 
 
@@ -888,7 +899,9 @@ def test_only_typed_text_counts_as_something_specific_to_search(monkeypatch):
 
 
 def test_page_asks_for_a_detail_when_no_candidates_are_in_play():
-    from waifu_engine.nekomimi_page import NEKOMIMI_PAGE
+    from pathlib import Path
 
-    assert 'id="emptyHint"' in NEKOMIMI_PAGE
-    assert "show(el('emptyHint'), !data.candidates_alive)" in NEKOMIMI_PAGE
+    page = Path(__file__).resolve().parents[1] / "webui/src/components/nekomimi/QuestionCard.tsx"
+    text = page.read_text(encoding="utf-8")
+    assert 'id="emptyHint"' in text
+    assert "!props.candidatesAlive" in text

@@ -1,4 +1,6 @@
 .venv
+webui/node_modules
+webui/dist
 venv
 __pycache__
 *.pyc
