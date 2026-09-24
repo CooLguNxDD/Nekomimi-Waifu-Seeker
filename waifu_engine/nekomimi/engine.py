@@ -345,8 +345,8 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
 
     Playwright HTML indexes first, then AniList and Wikipedia (structured, with
     real prose and a popularity number); DuckDuckGo fills remaining slots
-    inside ``find_candidates``. Once a series is known, the lead query keeps
-    that series next to the rare visual traits from the seed.
+    inside ``find_candidates``. Once a series is known, ``pin`` keeps that
+    work in every template group, next to the rare visual traits from the seed.
     """
     if not ONLINE:
         return 0
@@ -370,11 +370,14 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
         anchor = _series_trait_anchor(sess)
         terms = _search_terms(sess)
         if anchor:
-            # Lead with the series and the rare traits together. Focus is
-            # empty when there are only a few facts, which is exactly when
-            # the template would otherwise drop the series from later groups.
-            terms = [anchor, *[term for term in terms if term != anchor]]
-            focus = [anchor, *[fact for fact in focus if fact != anchor]][:FOCUS_TAKE]
+            # The pin is also a search term, so the same work was often listed
+            # three times (canonical label, typed detail, pin). Those copies
+            # filled the focus window and the lead query never mentioned the
+            # hair colour. Drop phrases the pin already says.
+            terms = [anchor, *[term for term in terms if not sources._fact_in_pin(term, anchor)]]
+            focus = [anchor, *[
+                fact for fact in focus if not sources._fact_in_pin(fact, anchor)
+            ]][:FOCUS_TAKE]
         with timing.span("search.llm_gate"):
             # The first search still uses templates. Starting the prefetch
             # here means a trait seed is rewritten before the next turn
@@ -397,6 +400,7 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
                 specific=bool(_free_text(sess) or rewritten or _confirmed_series(sess)),
                 pool_size=len(sess.alive_candidates()),
                 gemini_inline=_gemini_inline(sess),
+                pin=anchor or None,
             )
     except Exception as exc:  # noqa: BLE001 - search is best effort
         sess.notes.append(f"search failed: {exc}")
@@ -764,28 +768,35 @@ def _typed_franchise(sess: GuessSession) -> str:
 
 
 def _series_trait_anchor(sess: GuessSession) -> str:
-    """Series plus the rare visual traits the player already stated, or "".
+    """Work, personal alias, and rare visual traits that every search keeps.
 
-    Template groups keep the first fact and the newest three. After several
-    answers the series sits in the middle and drops out, so a later search
-    for "pink hair" returns every pink-haired student. Pinning both in one
-    lead string is what brings Mika's page back instead of the whole school.
-    A typed franchise counts: the player never clicked a series chip.
+    Template groups used to retry the newest fact alone. After a series was
+    only the first fact, that retry was "female character" or "long-haired
+    character" and the pool filled with other franchises and later
+    mantle-holders. The pin is passed through separately so it survives that
+    narrow retry. A typed franchise counts: the player never clicked a chip.
+    Several co-leads are not stuffed into this string; name search asks for
+    each of them. One title name that is not the work title is included, as
+    is a disjoint personal alias ("Diana Prince").
     """
     series = _confirmed_series(sess) or _typed_franchise(sess)
     if not series:
         return ""
+    texts = [series, *_free_text(sess)]
+    parts = web_search.fulltext_pin_parts(texts)
+    if not parts:
+        parts = [series]
+    elif not any(series.lower() in part.lower() for part in parts):
+        parts = [series, *parts]
     phrases: list[str] = []
     for text in (sess.seed, *(a.get("detail") for a in sess.asked)):
         phrases.extend(visual_search_phrases(text or ""))
     for text, _rank in _fact_entries(sess):
         phrases.extend(visual_search_phrases(text))
-    phrases = list(dict.fromkeys(phrases))
-    if not phrases:
-        # A typed or picked series with no visual combo still has to lead.
-        # Otherwise "cowboy bebop" is just another fact and later drops out.
-        return series[:180]
-    return f"{series} {' '.join(phrases)}"[:180]
+    for phrase in phrases:
+        if phrase not in parts:
+            parts.append(phrase)
+    return " ".join(dict.fromkeys(parts))[:180]
 
 
 def _confirmed_series(sess: GuessSession) -> str:

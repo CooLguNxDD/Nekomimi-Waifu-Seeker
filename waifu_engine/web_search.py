@@ -26,9 +26,10 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from . import browser_search
-from .names import already_seen, name_keys, same_character, series_key
+from .names import already_seen, identity_id, name_keys, same_character, series_key
 from .nekomimi.lexicon import (
     AGGREGATE_EXACT as _AGGREGATE_EXACT,
+    CHARACTER_IDENTITIES as _CHARACTER_IDENTITIES,
     COLOR_WORDS as _COLOR_WORDS,
     HEADLINERS as _HEADLINERS,
     NAME_BLOCK as SERIES_BLOCK,
@@ -363,6 +364,99 @@ def headliner_from_texts(texts: Iterable[str]) -> tuple[str, tuple[str, ...]] | 
     if best is None:
         return None
     return best[1], best[2]
+
+
+_NAME_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _name_tokens(name: str) -> set[str]:
+    """Lower-case words of ``name``. Used to tell a spelling from a second name."""
+    return set(_NAME_WORD.findall((name or "").lower()))
+
+
+def disambiguating_alias(name: str, franchise: str) -> str:
+    """Shortest lexicon alias of ``name`` whose words are not already in ``name``.
+
+    A mantle title is also the character ("Wonder Woman"), so a search for
+    that string ranks later holders. "Diana Prince" shares no words with the
+    title. Romanisations ("Sohryu") still share words with the primary name
+    and are not a second person, so they are not returned.
+    """
+    primary = _name_tokens(name)
+    if len(primary) < 1:
+        return ""
+    slug = identity_id(name)
+    if not slug:
+        return ""
+    aliases: tuple[str, ...] = ()
+    for row in _CHARACTER_IDENTITIES:
+        if row["id"] == slug:
+            aliases = row["names"]
+            break
+    work = _name_tokens(franchise)
+    best = ""
+    best_key: tuple[int, int] | None = None
+    for alias in aliases:
+        tokens = _name_tokens(alias)
+        if len(tokens) < 2 or tokens & primary:
+            continue
+        if work and work <= tokens:
+            continue
+        key = (len(tokens), len(alias))
+        if best_key is None or key < best_key:
+            best, best_key = alias, key
+    return best
+
+
+def title_character_queries(texts: Iterable[str]) -> list[str]:
+    """Character names to send a name search, or ``[]`` when no headliner matches.
+
+    AniList searches names and sorts by favourites. A trait sentence
+    ("Neon Genesis Evangelion female character") does not name Asuka, and the
+    favourites sort then fills the pool with unrelated leads.
+    """
+    hit = headliner_from_texts(texts)
+    if not hit:
+        return []
+    franchise, names = hit
+    out: list[str] = []
+    for name in names:
+        if name not in out:
+            out.append(name)
+        alias = disambiguating_alias(name, franchise)
+        if alias and alias not in out:
+            out.append(alias)
+    return out
+
+
+def fulltext_pin_parts(texts: Iterable[str]) -> list[str]:
+    """Work label, a sole title name, and any personal alias, for full-text search.
+
+    Every later query has to keep this lead. The newest trait alone retrieves
+    co-cast and other mantle pages. Several co-leads are not all AND-ed into
+    the Wikipedia string (that misses a page about only one of them); each
+    name is searched on its own by ``title_character_queries``.
+    """
+    hit = headliner_from_texts(texts)
+    label = ""
+    names: tuple[str, ...] = ()
+    if hit:
+        label, names = hit
+    if not label:
+        for text in texts:
+            label = franchise_label(text or "")
+            if label:
+                break
+    if not label:
+        return []
+    parts = [label]
+    if len(names) == 1 and _name_tokens(names[0]) - _name_tokens(label):
+        parts.append(names[0])
+    for name in names:
+        alias = disambiguating_alias(name, label)
+        if alias and alias not in parts:
+            parts.append(alias)
+    return parts
 
 
 def headliner_label(text: str) -> str:
@@ -712,10 +806,25 @@ def _feature_seed_queries(query: str) -> list[str]:
     ]
 
 
+def _joined_constraints(constraints: list[str]) -> str:
+    """Newest facts, with a resolved work put back in front of the window.
+
+    The last-six slice dropped a series answered early, and full-text search
+    then ran on the newest trait alone.
+    """
+    raw = [c.strip() for c in constraints if c and c.strip()]
+    facts = raw[-6:]
+    have = {fact.lower() for fact in facts}
+    lead = [
+        part for part in fulltext_pin_parts(raw)
+        if part.lower() not in have and not any(part.lower() in fact.lower() for fact in facts)
+    ]
+    return " ".join([*lead, *facts])[:180].strip()
+
+
 def _constraint_queries(constraints: list[str], medium_hint: str | None = None) -> list[str]:
     """Build searches from the facts confirmed so far in a guessing session."""
-    facts = [c.strip() for c in constraints if c and c.strip()][-6:]
-    base = " ".join(facts)[:180].strip()
+    base = _joined_constraints(constraints)
     if not base:
         base = "popular character"
     media = [medium_hint] if medium_hint and medium_hint != "unknown" else ["anime", "game", "comic"]
@@ -741,8 +850,8 @@ def _constraint_queries(constraints: list[str], medium_hint: str | None = None) 
 
 
 def _constraint_query_text(constraints: list[str]) -> str:
-    facts = [c.strip() for c in constraints if c and c.strip()][-6:]
-    return " ".join(facts)[:180].strip() or "popular character"
+    """The same joined text ``_constraint_queries`` searches, without a site scope."""
+    return _joined_constraints(constraints) or "popular character"
 
 
 def _take_candidate(

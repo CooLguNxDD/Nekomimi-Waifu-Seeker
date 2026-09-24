@@ -41,14 +41,16 @@ def _queries(
     medium_hint: str | None,
     focus: list[str] | None = None,
     rewritten: list[str] | None = None,
+    pin: str | None = None,
 ) -> list[str]:
     """Search strings, best first.
 
     ``rewritten`` (from the optional query LLM) goes first verbatim, then the
     ``focus`` facts Laya ranked most distinctive, then the template groups.
-    Without either, this is exactly the template list.
+    Without either, this is exactly the template list. ``pin`` is a resolved
+    work that every template group keeps.
     """
-    templates = _template_queries(constraints, medium_hint)
+    templates = _template_queries(constraints, medium_hint, pin=pin)
     if not focus and not rewritten:
         return templates
     suffix = _MEDIUM_SUFFIX.get(medium_hint or "", "character")
@@ -58,7 +60,30 @@ def _queries(
     return list(dict.fromkeys([*lead, *templates]))[:MAX_QUERIES]
 
 
-def _template_queries(constraints: list[str], medium_hint: str | None) -> list[str]:
+def _fact_in_pin(fact: str, pin: str) -> bool:
+    """Whether ``fact`` is already a whole phrase inside ``pin``.
+
+    Substring checks dropped "red" out of a pin that merely contained those
+    letters. The phrase has to sit on word boundaries.
+    """
+    fact_l = " ".join(fact.lower().split())
+    pin_l = " ".join(pin.lower().split())
+    if not fact_l:
+        return True
+    return fact_l == pin_l or f" {fact_l} " in f" {pin_l} " or pin_l.startswith(fact_l + " ")
+
+
+def _template_queries(
+    constraints: list[str], medium_hint: str | None, pin: str | None = None,
+) -> list[str]:
+    """Positive-fact queries. A resolved work stays in every group.
+
+    The narrow retry used to be the newest fact alone ("long-haired
+    character", "female character"). After the series was only the first
+    fact, that group left the work and filled the pool with other franchises
+    and later mantle-holders. ``pin`` is that work (and a personal alias);
+    the narrow retry is the pin itself, not the newest trait.
+    """
     facts = []
     for c in constraints:
         c = (c or "").strip()
@@ -69,13 +94,22 @@ def _template_queries(constraints: list[str], medium_hint: str | None) -> list[s
         if c and c not in facts:
             facts.append(c[:80])
     suffix = _MEDIUM_SUFFIX.get(medium_hint or "", "character")
-    if not facts:
+    pinned = " ".join((pin or "").split())[:160]
+    if pinned:
+        facts = [fact for fact in facts if not _fact_in_pin(fact, pinned)]
+    if not facts and not pinned:
         return [f"fictional {suffix}"]
-    # Retry narrower combinations when an overconstrained conjunction is empty.
-    # Keep the seed/first clue as an anchor and the newest clue in every query.
-    groups = [[facts[0], *facts[-3:]], [facts[0], facts[-1]], [facts[-1]]]
+    if pinned:
+        newest = facts[-1] if facts else ""
+        tail = facts[-3:]
+        groups = [[pinned, *tail], [pinned, newest] if newest else [pinned], [pinned]]
+    else:
+        # No resolved work: still retry the newest clue alone when the first
+        # fact over-constrains the search ("Italian plumber" without "Nintendo").
+        groups = [[facts[0], *facts[-3:]], [facts[0], facts[-1]], [facts[-1]]]
     return list(dict.fromkeys(
-        f"{' '.join(dict.fromkeys(group))[:200]} {suffix}" for group in groups
+        f"{' '.join(part for part in dict.fromkeys(group) if part)[:200]} {suffix}"
+        for group in groups
     ))
 
 
@@ -315,6 +349,24 @@ def _gemini_inline(
     return not found and not exclude_names
 
 
+def _anilist_plan(
+    constraints: list[str], pin: str | None, queries: list[str], limit: int,
+) -> tuple[list[str], int, bool]:
+    """Name-search strings, page size, and whether to stop once ``limit`` is full.
+
+    AniList searches character names and sorts by favourites. A trait sentence
+    returned unrelated leads (Ken Kaneki for an Evangelion clue) and one fat
+    page filled the limit before the next title name was requested. Headliner
+    names are a few small pages; without them the full-text queries still run.
+    """
+    from .. import web_search
+
+    names = web_search.title_character_queries([pin or "", *constraints])
+    if names:
+        return names[:4], min(3, max(1, limit)), False
+    return list(queries), limit, True
+
+
 def find_candidates(
     constraints: list[str],
     medium_hint: str | None = None,
@@ -328,6 +380,7 @@ def find_candidates(
     specific: bool = True,
     pool_size: int | None = None,
     gemini_inline: bool | None = None,
+    pin: str | None = None,
 ) -> list[dict[str, Any]]:
     """Merge candidates from every source, best source first, deduped by name.
 
@@ -351,6 +404,12 @@ def find_candidates(
     they are skipped, DuckDuckGo never runs inline, and the pool is topped up
     from ``popular_characters`` instead, up to ``pool_size`` (candidates
     still in play; defaults to ``len(exclude_names)``) of ``popular_limit()``.
+
+    ``pin`` is a resolved work. Every template group keeps it, so the narrow
+    retry cannot become a series-free trait query. When that work has lexicon
+    headliners, AniList is searched by those character names: its API is a
+    name search sorted by favourites, and a trait sentence returns unrelated
+    leads.
 
     A host that still answers 429 after retries is not queried again in this
     search. Further sequential calls would come back empty and only make the
@@ -392,7 +451,7 @@ def find_candidates(
         if source:
             hits[source] = hits.get(source, 0) + added
 
-    queries = _queries(constraints, medium_hint, focus=focus, rewritten=rewritten)
+    queries = _queries(constraints, medium_hint, focus=focus, rewritten=rewritten, pin=pin)
     web_search._LAST_SEARCH["queries"] = list(queries)
     pw_ok = False
     pw_empty = True
@@ -440,11 +499,15 @@ def find_candidates(
     # skip the other.
     with timing.span("fetch.anilist"):
         if specific and medium_hint in (None, "anime", "manga", "game") and len(found) < limit:
-            for q in queries:
-                if len(found) >= limit or _http.host_blocked(anilist.ENDPOINT):
+            anilist_queries, per_query, stop_when_full = _anilist_plan(
+                constraints, pin, queries, limit)
+            for q in anilist_queries:
+                if _http.host_blocked(anilist.ENDPOINT):
+                    break
+                if stop_when_full and len(found) >= limit:
                     break
                 try:
-                    take(anilist.search_characters(q, limit=limit), "anilist")
+                    take(anilist.search_characters(q, limit=per_query), "anilist")
                 except Exception as exc:  # noqa: BLE001
                     web_search._note_error(f"anilist: {exc}")
 
