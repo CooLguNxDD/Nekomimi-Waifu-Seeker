@@ -327,11 +327,13 @@ _SERIES_MARKERS: tuple[tuple[str, str], ...] = (
         ("overwatch", "Overwatch"),
         ("arknights", "Arknights"),
         ("azur lane", "Azur Lane"),
-        ("marvel", "Marvel Comics"),
-        ("dc comics", "DC Comics"),
-        ("batman", "DC Comics"),
-        ("spider-man", "Marvel Comics"),
-        ("x-men", "Marvel Comics"),
+        ("spider-man", "Spider-Man"),
+        ("spiderman", "Spider-Man"),
+        ("x-men", "X-Men"),
+        ("batman", "Batman"),
+        ("star wars", "Star Wars"),
+        ("the simpsons", "The Simpsons"),
+        ("simpsons", "The Simpsons"),
         ("spy x family", "Spy x Family"),
         ("frieren", "Frieren"),
         ("oshi no ko", "Oshi no Ko"),
@@ -414,10 +416,11 @@ _AGGREGATE_NAME = re.compile(
     r"(^|\b)(list of|category:|portal:|template:)|"
     r"\bdisambiguation\b|"
     r"^characters (of|in)\b|"
-    r"(^|/)characters\b|"
-    r"/",
+    r"(^|/)characters?$",
     re.I,
 )
+# A path that ends at the roster itself: /characters, /wiki/X/Characters.
+_ROSTER_URL = re.compile(r"/characters?/?(?:[?#].*)?$")
 # Roster titles that are a franchise plus a plural, not a person.
 _AGGREGATE_EXACT = {"vocaloids", "fanloid", "fanloids", "vocaloid characters"}
 
@@ -440,7 +443,11 @@ def is_aggregate_page(name: str, url: str = "", blurb: str = "") -> bool:
     if _AGGREGATE_NAME.search(raw):
         return True
     url_l = (url or "").lower()
-    if any(token in url_l for token in ("list_of_", "category:", "/characters", "disambiguation")):
+    if any(token in url_l for token in ("list_of_", "category:", "disambiguation")):
+        return True
+    # A roster endpoint ends in /characters; /characters/hatsune-miku is a
+    # profile and must survive.
+    if _ROSTER_URL.search(url_l):
         return True
     head = (blurb or "")[:200].lower()
     if "list of characters" in head or head.startswith("this is a list") or "the following is a list" in head:

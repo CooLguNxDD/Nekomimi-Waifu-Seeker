@@ -339,3 +339,52 @@ def test_typed_vocaloid_confirms_series_and_is_offered():
     fresh.add_candidates(POOL[:3])
     labels = [o["label"] for o in engine._series_question(fresh)["options"].values()]
     assert "Vocaloid" in labels
+
+
+def test_color_word_seed_is_still_a_name_query():
+    s = sess_mod.new_session("Aqua")
+    assert "Aqua" in engine._search_terms(s)
+    s.asked.append({
+        "qid": "series", "text": "Which series?", "answer": "other",
+        "kind": "choice", "detail": "silver", "options": {}, "category": "series",
+    })
+    assert "silver" in engine._search_terms(s)
+
+
+def test_profiles_under_a_characters_route_are_not_aggregates():
+    assert not web_search.is_aggregate_page(
+        "Spider-Man", "https://www.marvel.com/characters/spider-man-peter-parker")
+    assert not web_search.is_aggregate_page(
+        "Hatsune Miku", "https://example.org/characters/hatsune-miku")
+    assert not web_search.is_aggregate_page("Saber/Artoria Pendragon")
+    assert web_search.is_aggregate_page("Vocaloid/Characters")
+    assert web_search.is_aggregate_page("Miku", "https://vocaloid.fandom.com/wiki/Characters")
+    assert web_search.is_aggregate_page("Heroes", "https://www.marvel.com/characters")
+
+
+def test_character_category_beats_a_mentioned_franchise():
+    series = wikipedia._series_of(
+        "Some Fighter",
+        ["Category:Tekken characters"],
+        "Some Fighter is a Tekken character who appeared in a Vocaloid collaboration.",
+    )
+    assert series == "Tekken"
+
+
+def test_enrich_keeps_a_usable_page_series(monkeypatch):
+    from waifu_engine import browser_search
+
+    monkeypatch.setattr(browser_search, "_fetch_html", lambda *_a, **_k: "<html></html>")
+    monkeypatch.setattr(browser_search, "parse_character_page", lambda url, html: {
+        "series": "Tekken", "blurb": "Starred in a Vocaloid collaboration song.",
+    })
+    cand = {"name": "Some Fighter", "series": "Web result",
+            "source_url": "https://example.org/wiki/Some_Fighter"}
+    assert browser_search.enrich(cand)["series"] == "Tekken"
+
+    monkeypatch.setattr(browser_search, "parse_character_page", lambda url, html: {
+        "series": "Internet meme", "blurb": "A Vocaloid voice bank by Crypton.",
+    })
+    cand = {"name": "Hatsune Miku", "series": "Web result",
+            "source_url": "https://example.org/wiki/Hatsune_Miku"}
+    assert browser_search.enrich(cand)["series"] == "Vocaloid"

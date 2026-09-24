@@ -570,11 +570,16 @@ def enrich(candidate: dict[str, Any]) -> dict[str, Any] | None:
         if image and not candidate.get("image_url"):
             candidate["image_url"] = image
         series = (info.get("series") or "").strip()
-        # The infobox label wins when it is already a franchise. Otherwise the
-        # page text can still map Crypton / Vocaloid and drop "Internet meme".
-        named = franchise_label(series) or franchise_label(
-            f"{candidate.get('name', '')} {info.get('blurb') or candidate.get('blurb') or ''}"
-        )
+        # A usable infobox series is direct evidence: normalise it, but never
+        # replace it with a franchise the blurb merely mentions (a Vocaloid
+        # collaboration). Only a crumb such as "Internet meme" falls back to
+        # the page text, which can still map Crypton / Vocaloid.
+        if series and not series_is_crumb(series):
+            named = franchise_label(series)
+        else:
+            named = franchise_label(
+                f"{candidate.get('name', '')} {info.get('blurb') or candidate.get('blurb') or ''}"
+            )
         if series_is_crumb(candidate.get("series") or ""):
             candidate["series"] = ""
         if named:

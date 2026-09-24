@@ -152,3 +152,40 @@ def same_series_key(ka: str, kb: str) -> bool:
         return True
     short, long_ = sorted((ka, kb), key=len)
     return len(short) >= 5 and long_.startswith(short)
+
+
+# Publisher buckets are not a series. "Marvel Comics" grouped Abomination with
+# every other Marvel page, so the series question locked the whole line and
+# Spider-Man never became its own option.
+_PUBLISHER_KEYS = frozenset({
+    "marvelcomics", "dccomics", "imagecomics", "darkhorsecomics",
+    "darkhorse", "image",
+})
+
+
+def is_publisher_series(series: str) -> bool:
+    """Whether ``series`` is a publisher bucket rather than one work.
+
+    A series question built from these labels offers "Marvel Comics" as if it
+    were Cowboy Bebop, and every character in that bucket shares the pick.
+    """
+    return series_key(series) in _PUBLISHER_KEYS
+
+
+def name_tokens(name: str) -> list[str]:
+    """Alphanumeric words of a display name, in order."""
+    base, _note = _split_disambiguation(name)
+    return [w for w in ("".join(ch for ch in part.lower() if ch.isalnum())
+                        for part in _WORDS.split(base or "")) if w]
+
+
+def longer_namesake(short: str, long: str) -> bool:
+    """Whether ``long`` is ``short`` plus extra name words.
+
+    "Mario" and "Mario Rossi" are different people. A trailing series title
+    is already stripped, so "Mario (Super Mario)" is not a longer namesake.
+    """
+    a, b = name_tokens(short), name_tokens(long)
+    if not a or len(a) >= len(b):
+        return False
+    return b[:len(a)] == a
