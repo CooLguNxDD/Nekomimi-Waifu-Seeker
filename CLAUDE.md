@@ -63,7 +63,10 @@ Consequences, in order of how often they get forgotten:
    within-candidate uncertainty); Laya only answers `ready_to_guess`. The
    `medium` choice ("Where is your character from?": anime/manga, game, comic,
    movie, TV, something else) and dynamic "Which series?" compete in that
-   ranking like any other question — neither is forced first. A medium pick is
+   ranking like any other question — neither is forced first. Traits the seed
+   already named (hair colour, halo, wings, horns) are pulled in front of that
+   ranking, and the same appearance questions lead once a series is confirmed,
+   because school/uniform/teen do not separate students from one school. A medium pick is
    a hard filter (`traits.MEDIUM_ACCEPTS`; movie and TV accept each other,
    "other" accepts no known medium; unknown media are never removed). Empty
    searches keep asking until the turn limit.
@@ -80,7 +83,10 @@ Consequences, in order of how often they get forgotten:
 
 The loop does not call `prune()`: soft evidence must remain recoverable. Only
 medium contradictions and rejected guesses eliminate candidates. Heuristic
-fallback probabilities are capped to [0.4, 0.6]; never write predictions into
+fallback probabilities are capped to [0.4, 0.6], except a free-text visual
+combination (pink hair, halo, wings, horns) and the separate halo / wings /
+horns questions: when the profile clearly has or lacks the trait, that
+likelihood is used even if Laya's noul is mushy. Never write predictions into
 candidate tags or feed noisy mined tags to Laya as confirmed identity facts.
 `posterior()` softmaxes these scores. Cost scales with eligible candidates per
 new trait; there is no longer a ten-forward-pass evidence budget.
@@ -108,7 +114,8 @@ The query LLM is gated by Laya: `_llm_queries` sends only the player's typed
 text (`_free_text`: seed + details), at most once per distinct text, and only
 when `_search_stuck` says so (one `pool_fits` noul over the top five; heuristic
 without Laya). It runs in the background; searches reuse the last good rewrite
-until a newer one lands. The first search of a round never uses it.
+until a newer one lands. The first search starts that prefetch but still uses
+the template queries, so a turn never waits for it.
 
 DuckDuckGo is the slow source (uncapped it made ~35 sequential requests, ~40 s
 a turn). It is capped (`WAIFU_DDG_MAX_REQUESTS` generic queries within
@@ -129,9 +136,13 @@ line shows per-source `hits=` and `err=`.
 Gemini search grounding (`sources.gemini`) finds characters from the facts
 themselves, so it works on broad button facts where name searches cannot. It
 shares the memoised `ddg_gate` (Laya `pool_fits`), runs in the background
-(`_GEMINI_BG`, its own worker, capped by `WAIFU_GEMINI_BG_MAX_PENDING`) whenever
-the session has candidates, and inline only when the pool would be empty.
-Results are cached 15 min per facts. With no facts it is skipped (billed calls).
+(`_GEMINI_BG`, its own worker, capped by `WAIFU_GEMINI_BG_MAX_PENDING`) when
+the pool already has a candidate who shows the seed's visual traits, and
+inline when the pool is empty or the only hits are junk (a Wikipedia page
+that merely shares a word with the seed, or a name in `exclude_names` that
+does not show the combination). Results are cached 15 min per facts. With no
+facts it is skipped (billed calls). AniList also runs for `medium=game`.
+The medium it reports is kept: a game hint does not relabel anime rows.
 
 Answers to yes/no questions are **`yes` / `no` / `detail`**. `detail` does not answer the current
 yes/no trait. Instead, the text becomes a separate `clue_question` for Laya and

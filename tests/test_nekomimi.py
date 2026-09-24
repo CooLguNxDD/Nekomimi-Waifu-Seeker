@@ -820,10 +820,14 @@ def test_button_only_rounds_never_call_the_llm(monkeypatch, llm):
 
 
 def test_first_search_uses_templates_only(monkeypatch, llm):
+    seen = []
+    monkeypatch.setattr(engine.sources, "find_candidates",
+                        lambda terms, **k: seen.append(k.get("rewritten")) or [])
     state = engine.start("pilots a mech")
-    _drain()
     assert state["stage"] == "asking"
-    assert llm["sent"] == []
+    assert seen[0] is None  # this search does not wait for the rewrite
+    _drain()
+    assert llm["sent"] and "pilots a mech" in llm["sent"][0]
 
 
 def test_wait_budget_uses_the_answer_in_the_same_turn(monkeypatch, llm):

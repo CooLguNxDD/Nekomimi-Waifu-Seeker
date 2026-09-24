@@ -684,13 +684,35 @@
     },
     {
       "template": "yesno",
-      "id": "look_horns",
-      "category": "look",
-      "text": "Does your character have horns or wings?",
-      "instructions": "Does the character in `candidate` have horns, wings or a halo?",
+      "id": "look_halo",
+      "category": "look_halo",
+      "text": "Does your character have a halo?",
+      "instructions": "Does the character in `candidate` have a halo?",
       "tags_true": [
-        "horns",
+        "halo"
+      ],
+      "prior": 0.05
+    },
+    {
+      "template": "yesno",
+      "id": "look_wings",
+      "category": "look_wings",
+      "text": "Does your character have wings?",
+      "instructions": "Does the character in `candidate` have wings?",
+      "criteria_detail": "wings on the body, such as angel wings, not a wing-shaped halo",
+      "tags_true": [
         "wings"
+      ],
+      "prior": 0.06
+    },
+    {
+      "template": "yesno",
+      "id": "look_horns",
+      "category": "look_horns",
+      "text": "Does your character have horns?",
+      "instructions": "Does the character in `candidate` have horns?",
+      "tags_true": [
+        "horns"
       ],
       "prior": 0.08
     },
