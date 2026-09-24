@@ -20,5 +20,5 @@ export default defineConfig({
       "/healthz": "http://127.0.0.1:7860",
     },
   },
-  build: { outDir: "dist", emptyOutDir: true },
+  build: { outDir: "../waifu_engine/webui_dist", emptyOutDir: true },
 });

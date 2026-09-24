@@ -543,16 +543,20 @@ def test_search_driven_round_discovers_target_from_later_detail(monkeypatch):
     assert len(queries) == 1 + sum(bool(a["answer"]) for a in s.asked)
 
 
-def test_nekomimi_page_and_api_paths():
+def test_nekomimi_page_and_api_paths(monkeypatch):
     from fastapi.testclient import TestClient
 
-    from waifu_engine.web import app
+    from waifu_engine import web
 
-    client = TestClient(app, follow_redirects=False)
+    client = TestClient(web.app, follow_redirects=False)
     page = client.get("/nekomimi")
-    assert page.status_code == 200
-    assert b"Nekomimi" in page.content
-    assert b"/api/nekomimi/" in page.content
+    if web._bundle_dir() is not None:
+        assert page.status_code == 200
+        assert b"Nekomimi" in page.content
+        assert b"/api/nekomimi/" in page.content
+    monkeypatch.setattr(web, "_bundle_dir", lambda: None)
+    assert client.get("/nekomimi").status_code == 503
+    assert client.get("/").status_code == 503
     assert client.get("/akinator").status_code == 404
     assert client.post("/api/akinator/start", json={}).status_code == 404
 

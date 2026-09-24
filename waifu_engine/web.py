@@ -41,32 +41,34 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Nekomimi-Waifu-Seeker", version="0.2.0", lifespan=lifespan)
 
-_WEBUI = Path(__file__).resolve().parent.parent / "webui"
-_DIST = _WEBUI / "dist"
+def _bundle_dir() -> Path | None:
+    """Return a built Solid bundle, preferring files shipped inside the package.
 
-
-def _spa_index() -> Path:
-    """Return the Solid bundle when it has been built, otherwise the Vite shell.
-
-    Tests and a fresh checkout can serve ``webui/index.html`` before ``npm run build``.
-    The built file keeps the same title and API hint the shell already carries.
+    ``pip install`` only includes ``waifu_engine*``, so a sibling ``webui/`` tree
+    is absent in site-packages. The Vite build writes ``waifu_engine/webui_dist``.
+    A checkout that still has ``webui/dist`` is accepted so an older build works.
+    The uncompiled Vite ``index.html`` is never served: its ``/src/main.tsx``
+    entry cannot run under FastAPI.
     """
-    built = _DIST / "index.html"
-    if built.is_file():
-        return built
-    return _WEBUI / "index.html"
+    packaged = Path(__file__).resolve().parent / "webui_dist"
+    sibling = Path(__file__).resolve().parent.parent / "webui" / "dist"
+    for candidate in (packaged, sibling):
+        if (candidate / "index.html").is_file():
+            return candidate
+    return None
 
 
 def _spa_response() -> FileResponse:
-    """Serve the single-page shell for client routes."""
-    index = _spa_index()
-    if not index.is_file():
-        raise HTTPException(status_code=503, detail="webui is missing")
-    return FileResponse(index)
+    """Serve the built shell, or 503 until ``npm run build`` has produced one."""
+    bundle = _bundle_dir()
+    if bundle is None:
+        raise HTTPException(status_code=503, detail="webui is not built; run npm run build in webui/")
+    return FileResponse(bundle / "index.html")
 
 
-if (_DIST / "assets").is_dir():
-    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+_BUNDLE = _bundle_dir()
+if _BUNDLE is not None and (_BUNDLE / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=_BUNDLE / "assets"), name="assets")
 
 
 @app.get("/", response_class=FileResponse)

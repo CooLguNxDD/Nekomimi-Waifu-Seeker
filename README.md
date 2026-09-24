@@ -104,7 +104,7 @@ python -m waifu_engine "blue hair ice general" --fallback
 
 ## Web UI
 
-The browser app is a SolidJS SPA in `webui/` (TanStack Router + Query, Zustand, Tailwind). FastAPI serves the built files and the JSON API.
+The browser app is a SolidJS SPA in `webui/` (TanStack Router + Query, Zustand, Tailwind). `npm run build` writes `waifu_engine/webui_dist`, which is what FastAPI serves (503 until that bundle exists) and what `pip install` ships.
 
 ```bash
 cd webui && npm install && npm run build && cd ..

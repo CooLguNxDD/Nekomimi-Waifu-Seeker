@@ -1,7 +1,7 @@
 import type { JSX } from "solid-js";
 
 const field =
-  "rounded-[10px] border border-[#333] bg-[#1a1d24] px-3 py-2 text-inherit outline-none";
+  "rounded-[10px] border border-[#333] bg-[#1a1d24] px-3 py-2 text-inherit outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 
 /** Text field. Scraped content is never passed in as HTML. */
 export function Input(props: JSX.InputHTMLAttributes<HTMLInputElement>) {

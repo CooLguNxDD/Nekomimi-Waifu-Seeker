@@ -11,7 +11,16 @@ export function QuestionCard(props: {
   busy: boolean;
   onAnswer: (answer: string, detail?: string) => void;
 }) {
+  let detailInput: HTMLInputElement | undefined;
   let detail = "";
+  const clearDetail = () => {
+    detail = "";
+    if (detailInput) detailInput.value = "";
+  };
+  const answer = (value: string, extra?: string) => {
+    props.onAnswer(value, extra);
+    clearDetail();
+  };
   const choice = () => props.question.kind === "choice" && props.question.options;
   const turn = () => props.question.turn ?? 0;
   const max = () => props.question.max_turns ?? 1;
@@ -40,10 +49,10 @@ export function QuestionCard(props: {
           when={choice()}
           fallback={
             <>
-              <Button disabled={props.busy} onClick={() => props.onAnswer("yes")}>
+              <Button disabled={props.busy} onClick={() => answer("yes")}>
                 Yes
               </Button>
-              <Button tone="ghost" disabled={props.busy} onClick={() => props.onAnswer("no")}>
+              <Button tone="ghost" disabled={props.busy} onClick={() => answer("no")}>
                 No
               </Button>
             </>
@@ -51,7 +60,7 @@ export function QuestionCard(props: {
         >
           <For each={props.question.options ?? []}>
             {(opt) => (
-              <Button disabled={props.busy} onClick={() => props.onAnswer(opt.key)}>
+              <Button disabled={props.busy} onClick={() => answer(opt.key)}>
                 {opt.label}
               </Button>
             )}
@@ -60,30 +69,26 @@ export function QuestionCard(props: {
       </div>
       <div class="mt-3 flex flex-wrap gap-2">
         <input
+          ref={detailInput}
           type="text"
-          class="min-w-56 flex-1 rounded-[10px] border border-[#333] bg-[#1a1d24] px-3 py-2"
+          class="min-w-56 flex-1 rounded-[10px] border border-[#333] bg-[#1a1d24] px-3 py-2 outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           placeholder="Add a detail instead (e.g. she pilots a mech)"
           onInput={(event) => {
             detail = event.currentTarget.value;
           }}
           onKeyDown={(event) => {
             if (event.key === "Enter" && detail.trim() && !props.busy) {
-              props.onAnswer("detail", detail.trim());
-              event.currentTarget.value = "";
-              detail = "";
+              answer("detail", detail.trim());
             }
           }}
         />
         <Button
           tone="ghost"
           disabled={props.busy}
-          onClick={(event) => {
+          onClick={() => {
             const text = detail.trim();
             if (!text) return;
-            props.onAnswer("detail", text);
-            detail = "";
-            const field = event.currentTarget.parentElement?.querySelector("input");
-            if (field) field.value = "";
+            answer("detail", text);
           }}
         >
           Send detail

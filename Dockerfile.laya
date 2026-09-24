@@ -27,7 +27,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY pyproject.toml README.md ./
 COPY data ./data
 COPY waifu_engine ./waifu_engine
-COPY --from=webui /webui/dist ./webui/dist
+COPY --from=webui /waifu_engine/webui_dist ./waifu_engine/webui_dist
 
 RUN pip install -e .
 

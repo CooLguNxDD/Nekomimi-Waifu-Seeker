@@ -10,6 +10,7 @@ dist/
 build/
 webui/node_modules/
 webui/dist/
+waifu_engine/webui_dist/
 .hf_cache/
 *.onnx
 data/*.meta.json
