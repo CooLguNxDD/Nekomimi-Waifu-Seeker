@@ -1,7 +1,7 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { Motion, Presence } from "solid-motionone";
 
-/** Expand or fade a panel. Reduced motion skips the height tween. */
+/** Fade a panel in. Reduced motion uses opacity only; otherwise a short slide. */
 export function AnimatedCard(props: { show: boolean; children: unknown }) {
   const [reduced, setReduced] = createSignal(false);
   onMount(() => {
@@ -16,11 +16,10 @@ export function AnimatedCard(props: { show: boolean; children: unknown }) {
     <Presence>
       <Show when={props.show}>
         <Motion.div
-          initial={reduced() ? { opacity: 0 } : { height: 0, opacity: 0 }}
-          animate={reduced() ? { opacity: 1 } : { height: "auto", opacity: 1 }}
-          exit={reduced() ? { opacity: 0 } : { height: 0, opacity: 0 }}
+          initial={reduced() ? { opacity: 0 } : { opacity: 0, y: 8 }}
+          animate={reduced() ? { opacity: 1 } : { opacity: 1, y: 0 }}
+          exit={reduced() ? { opacity: 0 } : { opacity: 0, y: 8 }}
           transition={{ duration: 0.2, easing: [0.16, 1, 0.3, 1] }}
-          class="overflow-hidden"
         >
           {props.children as never}
         </Motion.div>
