@@ -35,7 +35,13 @@ import threading
 from typing import Any
 
 from .. import query_llm, sources, timing, web_search
-from ..names import same_series_key, series_key
+from ..names import (
+    is_publisher_series,
+    longer_namesake,
+    same_series,
+    same_series_key,
+    series_key,
+)
 from . import laya_client
 from .session import (
     MAX_GUESSES,
@@ -86,6 +92,31 @@ READY_MIN_POSTERIOR = float(os.getenv("WAIFU_NEKOMINI_READY_POSTERIOR", "0.45"))
 LEADER_POSTERIOR = float(os.getenv("WAIFU_NEKOMINI_LEADER_POSTERIOR", "0.50"))
 LEADER_MARGIN = float(os.getenv("WAIFU_NEKOMINI_LEADER_MARGIN", "0.15"))
 LEADER_STREAK = int(os.getenv("WAIFU_NEKOMINI_LEADER_STREAK", "2"))
+# Log-odds added to the face of a shared series. One noisy trait used to tie
+# Kylo with Vader and Gil with Homer; this stays smaller than a clear miss
+# (about log(0.15/0.85) ≈ -1.7) so evidence can still overrule fame.
+_SERIES_LEAD_BONUS = 0.9
+_PROTAGONIST_LEAD_BONUS = 0.8
+_SIDE_CHARACTER_PENALTY = 0.7
+# A typed name ("mario") must not let "Mario Rossi" outrank the exact name
+# once a medium or franchise is known.
+_NAMESAKE_PENALTY = 2.2
+# Whole-phrase aliases the player types on "Another series". Longer phrases
+# are listed first so "super mario" wins over "mario".
+_FRANCHISE_ALIASES: tuple[tuple[str, str], ...] = (
+    ("cowboy bebop", "Cowboy Bebop"),
+    ("star wars", "Star Wars"),
+    ("super mario", "Super Mario"),
+    ("spider-man", "Spider-Man"),
+    ("spiderman", "Spider-Man"),
+    ("spider man", "Spider-Man"),
+    ("the simpsons", "The Simpsons"),
+    ("simpsons", "The Simpsons"),
+    ("mario", "Super Mario"),
+)
+# Aliases that are also a character's given name: they count only as the
+# whole typed clue.
+_EXACT_ALIASES = frozenset({"mario"})
 ONLINE = os.getenv("WAIFU_ONLINE_SEARCH", "1").lower() in {"1", "true", "yes"}
 # Facts offered to Laya when ranking which ones lead the search query, and how
 # many of the winners go into the focused query.
@@ -94,6 +125,8 @@ FOCUS_TAKE = 3
 # Broad facts that match thousands of characters; they go last in the fallback
 # focus ranking.
 _BROAD_CATEGORIES = frozenset({"medium", "gender", "meta"})
+# Questions whose typed detail may be only colour words.
+_HAIR_CATEGORIES = frozenset({"hair_color", "hair"})
 
 _SESSION_LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
@@ -131,9 +164,16 @@ def _fact_entries(sess: GuessSession) -> list[tuple[str, float]]:
         if text and text not in entries:
             entries[text] = rank
 
+    # The seed is always searched: "Aqua" or "Silver" can be a name.
     add(sess.seed, 0.0)
+    add(_typed_franchise(sess), 0.0)
     for a in sess.asked:
-        add(a.get("detail"), 0.0)
+        # A colour phrase typed on a hair question is a trait, not a name.
+        # Searching "teal aqua turquoise" retrieved a page titled Turquoise.
+        detail = a.get("detail")
+        if not (a.get("category") in _HAIR_CATEGORIES
+                and web_search.is_color_phrase(detail or "")):
+            add(detail, 0.0)
         answer = a.get("answer")
         if a.get("kind") == "choice":
             option = (a.get("options") or {}).get(answer) or {}
@@ -674,6 +714,26 @@ def _series_label(series: str) -> str:
     return label[:40].rstrip()
 
 
+def _typed_franchise(sess: GuessSession) -> str:
+    """Canonical series named in the player's own text, or "".
+
+    "Another series" plus a detail never sets ``_confirmed_series``, so
+    "cowboy bebop" / "star wars" / "simpsons" used to fall out of the lead
+    query. A whole-phrase alias keeps that work in every later search.
+    """
+    texts = [" ".join(t.lower().split()) for t in _free_text(sess)]
+    for marker, label in _FRANCHISE_ALIASES:
+        for text in texts:
+            # "mario" is also the first word of "Mario Rossi"; only the whole
+            # clue names the franchise, or Rossi's own search is penalised.
+            if marker in _EXACT_ALIASES:
+                if text == marker:
+                    return label
+            elif f" {marker} " in f" {text} ":
+                return label
+    return ""
+
+
 def _series_trait_anchor(sess: GuessSession) -> str:
     """Series plus the rare visual traits the player already stated, or "".
 
@@ -681,8 +741,9 @@ def _series_trait_anchor(sess: GuessSession) -> str:
     answers the series sits in the middle and drops out, so a later search
     for "pink hair" returns every pink-haired student. Pinning both in one
     lead string is what brings Mika's page back instead of the whole school.
+    A typed franchise counts: the player never clicked a series chip.
     """
-    series = _confirmed_series(sess)
+    series = _confirmed_series(sess) or _typed_franchise(sess)
     if not series:
         return ""
     phrases: list[str] = []
@@ -692,16 +753,27 @@ def _series_trait_anchor(sess: GuessSession) -> str:
         phrases.extend(visual_search_phrases(text))
     phrases = list(dict.fromkeys(phrases))
     if not phrases:
-        return ""
+        # A typed or picked series with no visual combo still has to lead.
+        # Otherwise "cowboy bebop" is just another fact and later drops out.
+        return series[:180]
     return f"{series} {' '.join(phrases)}"[:180]
 
 
 def _confirmed_series(sess: GuessSession) -> str:
-    """The series the player picked in a "Which series?" question, or ""."""
+    """The series the player picked, or a known franchise they typed instead.
+
+    "Another series" plus the detail ``vocaloid`` is a confirmation. Leaving
+    it as free text asked ``series_2`` over junk labels and never offered
+    Vocaloid.
+    """
     for a in sess.asked:
         option = (a.get("options") or {}).get(a.get("answer") or "")
         if option and option.get("series_key"):
             return option.get("fact", "")
+        if str(a.get("qid") or "").startswith("series") and a.get("answer") == "other":
+            label = web_search.franchise_label(a.get("detail") or "")
+            if label:
+                return label
     return ""
 
 
@@ -724,7 +796,10 @@ def _series_question(sess: GuessSession) -> dict[str, Any] | None:
     for cand, p in sess.posterior():
         key = series_key(cand.series)
         label = _series_label(cand.series)
-        if not key or not label or any(same_series_key(key, k) for k in offered):
+        # A publisher bucket is not a series chip. Offering "Marvel Comics"
+        # locked Abomination to every other Marvel page.
+        if (not key or not label or is_publisher_series(cand.series)
+                or any(same_series_key(key, k) for k in offered)):
             continue
         group = next((g for g in groups if same_series_key(key, g["key"])), None)
         if group is None:
@@ -732,11 +807,21 @@ def _series_question(sess: GuessSession) -> dict[str, Any] | None:
             groups.append(group)
         group["weight"] += p
         group["labels"][label] = group["labels"].get(label, 0) + 1
+    typed = web_search.franchise_label(" ".join(_free_text(sess)))
+    if typed:
+        key = series_key(typed)
+        if key and not any(same_series_key(key, g["key"]) for g in groups) \
+                and not any(same_series_key(key, k) for k in offered):
+            groups.insert(0, {"key": key, "weight": 0.0, "labels": {typed: 1}})
     if len(groups) < 2:
         return None
     groups.sort(key=lambda g: g["weight"], reverse=True)
     picked = [(g["key"], max(g["labels"], key=g["labels"].get))
               for g in groups[:MAX_SERIES_OPTIONS]]
+    if typed:
+        key = series_key(typed)
+        if key and not any(same_series_key(key, k) for k, _label in picked):
+            picked = [(key, typed), *picked[: MAX_SERIES_OPTIONS - 1]]
     return series_question("series" if not series_asked else "series_2", picked)
 
 
@@ -923,6 +1008,116 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 p = min(0.6, max(0.4, _tag_match(question, c)))
             likelihood = p if answer == "yes" else 1.0 - p
             c.logodds += math.log(min(0.98, max(0.02, likelihood)))
+    _apply_identity_priors(sess, live)
+
+
+def _protagonist_answer(sess: GuessSession) -> str:
+    """The player's answer to the protagonist question, or "" if unasked."""
+    for question, answer in sess.evidence.values():
+        if question.get("id") == "role_protagonist":
+            return answer or ""
+    return ""
+
+
+def _is_series_lead(group: list[Candidate]) -> list[Candidate]:
+    """The face of one series: a protagonist tag, else a much more famous row.
+
+    Side characters share the series string with the lead. Without this, one
+    mushy trait lets Gil or Kylo tie Homer or Vader.
+    """
+    tagged = [c for c in group if {"protagonist", "mascot"} & set(c.tags)]
+    if tagged:
+        return tagged
+    ranked = sorted(group, key=lambda c: c.popularity, reverse=True)
+    top = ranked[0].popularity
+    nxt = ranked[1].popularity if len(ranked) > 1 else 0
+    if top >= max(1000, 3 * max(nxt, 1)):
+        return [ranked[0]]
+    return []
+
+
+def _in_franchise(cand: Candidate, franchise: str) -> bool:
+    """Whether ``cand`` belongs to ``franchise``: its series if known, else its page.
+
+    A missing series still counts when the page names the work: Spike's row
+    was "Unknown" while Ed's said Cowboy Bebop. A known series is trusted
+    over the blurb, or a Tekken fighter whose page mentions a Vocaloid
+    collaboration would join the Vocaloid cast.
+    """
+    if series_key(cand.series):
+        return same_series(cand.series, franchise)
+    return bool(web_search.franchise_mentioned(franchise, f"{cand.name} {cand.blurb}"))
+
+
+def _apply_identity_priors(sess: GuessSession, live: list[Candidate]) -> None:
+    """Prefer a franchise lead, and an exact short name over a longer namesake.
+
+    Called at the end of a rescore, after trait evidence. A clear trait miss
+    is still larger than these bonuses. Publisher buckets are not a series,
+    so Marvel characters are not all treated as one cast.
+    """
+    franchise = _confirmed_series(sess) or _typed_franchise(sess)
+    if franchise:
+        for cand in live:
+            if is_publisher_series(cand.series):
+                continue
+            if _in_franchise(cand, franchise):
+                cand.logodds += _SERIES_LEAD_BONUS
+            elif series_key(cand.series):
+                cand.logodds -= _SIDE_CHARACTER_PENALTY
+    focus = series_key(franchise)
+    groups: dict[str, list[Candidate]] = {}
+    for cand in live:
+        if not focus or is_publisher_series(cand.series):
+            continue
+        if not _in_franchise(cand, franchise):
+            continue
+        groups.setdefault(focus, []).append(cand)
+    protag = _protagonist_answer(sess)
+    for group in groups.values():
+        # "Not the protagonist" must not hand the face of the series a bonus
+        # that outweighs the player's own answer.
+        if len(group) < 2 or protag == "no":
+            continue
+        leads = set(id(c) for c in _is_series_lead(group))
+        if not leads:
+            continue
+        for cand in group:
+            if id(cand) in leads:
+                cand.logodds += _SERIES_LEAD_BONUS
+                if protag == "yes":
+                    cand.logodds += _PROTAGONIST_LEAD_BONUS
+            elif protag == "yes":
+                cand.logodds -= _SIDE_CHARACTER_PENALTY
+    for cand in live:
+        if "/" not in cand.name:
+            continue
+        low = cand.name.lower()
+        for other in live:
+            if other is cand:
+                continue
+            other_name = other.name.lower().strip()
+            if len(other_name) < 4:
+                continue
+            if re.search(r"\b" + re.escape(other_name) + r"\b", low):
+                cand.logodds -= _NAMESAKE_PENALTY
+                break
+    typed = [t.strip().lower() for t in _free_text(sess)]
+    if not typed or not (franchise or _medium_hint(sess)):
+        return
+    exact = [c for c in live if c.name.strip().lower() in typed]
+    if not exact:
+        return
+    for cand in live:
+        shorts = [short for short in exact if longer_namesake(short.name, cand.name)]
+        if not shorts:
+            continue
+        # An unknown series ("Web result") cannot prove two different people:
+        # a stray "Spike" hit must not sink Spike Spiegel.
+        if any(not series_key(short.series) or not series_key(cand.series)
+               or same_series(short.series, cand.series) for short in shorts):
+            continue
+        cand.logodds -= _NAMESAKE_PENALTY
 
 
 # --- public API -------------------------------------------------------

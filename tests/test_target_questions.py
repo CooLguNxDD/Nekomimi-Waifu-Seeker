@@ -241,3 +241,159 @@ def test_page_hides_the_web_result_placeholder():
     s = _session()
     assert s.by_id("mystery").public()["series"] == ""
     assert s.by_id("koharu").public()["series"] == "Blue Archive"
+
+
+MIKU_CATS = [
+    "Category:Internet meme characters",
+    "Category:Internet memes introduced in 2007",
+    "Category:Vocaloid voice banks by Crypton Future Media",
+    "Category:Vocaloids introduced in 2007",
+]
+MIKU_EXTRACT = (
+    "Hatsune Miku is a Vocaloid voicebank and software application developed "
+    "by Crypton Future Media. She has turquoise twintails."
+)
+
+
+def test_vocaloid_series_beats_category_crumbs():
+    """Vocaloid aliases win over meme, software and location crumbs."""
+    assert wikipedia._series_of("Hatsune Miku", MIKU_CATS, MIKU_EXTRACT) == "Vocaloid"
+    assert wikipedia._series_of(
+        "Kaito (software)",
+        ["Category:Vocaloid voice banks", "Category:Vocaloids"],
+        "Kaito is a Voice Synth developed for the Vocaloid engine.",
+    ) == "Vocaloid"
+    assert wikipedia._series_of(
+        "Megurine Luka",
+        ["Category:Vocaloids"],
+        "Developed by Crypton Future Media (headquartered in Sapporo, Japan).",
+    ) == "Vocaloid"
+    assert wikipedia._series_of(
+        "Ichika",
+        ["Category:Project Sekai characters"],
+        "A character in Hatsune Miku: Colorful Stage.",
+    ) == "Vocaloid"
+
+
+def test_category_crumbs_are_not_a_series():
+    """Crumbs alone leave the series Unknown."""
+    assert wikipedia._series_of(
+        "Someone", ["Category:Internet meme characters"], "A fictional singer."
+    ) == "Unknown"
+    assert wikipedia._series_of("Kaito (software)", [], "A singer from Japan.") == "Unknown"
+    assert wikipedia._series_of(
+        "Luka", [], "She is based in Sapporo and is Japanese."
+    ) == "Unknown"
+    assert wikipedia._series_of(
+        "Idol", ["Category:Japanese characters"], "A mascot."
+    ) == "Unknown"
+    assert web_search._guess_series("Project Diva module for Crypton Future Media") == "Vocaloid"
+
+
+def test_list_pages_never_lead_the_pool():
+    """List, roster and category pages never enter the posterior."""
+    s = sess_mod.new_session()
+    added = s.add_candidates([
+        {"id": "roster", "name": "VOCALOIDs", "series": "Vocaloid",
+         "source_url": "https://vocaloid.fandom.com/wiki/VOCALOIDs",
+         "blurb": "This is a list of Vocaloid characters.", "popularity": 10**9},
+        {"id": "path", "name": "Vocaloid/Characters", "series": "Vocaloid",
+         "source_url": "https://vocaloid.fandom.com/wiki/Vocaloid/Characters"},
+        {"id": "listed", "name": "List of Vocaloid characters", "series": "Vocaloid"},
+        {"id": "miku", "name": "Hatsune Miku", "series": "Vocaloid", "popularity": 10},
+    ])
+    assert added == 1
+    assert [c.name for c, _p in s.posterior()] == ["Hatsune Miku"]
+    # A page already stored must still be invisible to the guess.
+    s.candidates.append(sess_mod.Candidate(
+        id="stuck", name="VOCALOIDs", series="Vocaloid", logodds=50,
+        source_url="https://vocaloid.fandom.com/wiki/VOCALOIDs",
+    ))
+    assert [c.name for c, _p in s.posterior()] == ["Hatsune Miku"]
+    assert web_search.is_aggregate_page("VOCALOIDs")
+    assert web_search.is_aggregate_page("Vocaloid/Characters")
+    assert not web_search.is_aggregate_page("Hatsune Miku")
+
+
+def test_color_detail_is_not_a_name_query():
+    """A colour-only hair detail is not searched as a name."""
+    s = sess_mod.new_session()
+    s.asked.append({
+        "qid": "hair_color", "text": "What colour is your character's hair?",
+        "answer": "other", "kind": "choice", "detail": "teal aqua turquoise",
+        "options": {}, "category": "hair_color",
+    })
+    terms = engine._search_terms(s)
+    assert "teal aqua turquoise" not in terms
+    assert not any("turquoise" in t.lower() for t in terms)
+    assert web_search.is_color_phrase("teal aqua turquoise")
+    assert not web_search.is_color_phrase("hatsune miku teal hair")
+
+
+def test_typed_vocaloid_confirms_series_and_is_offered():
+    """Typing vocaloid on Another series confirms and offers that series."""
+    s = _session()
+    q = engine._series_question(s)
+    s.asked.append({
+        "qid": q["id"], "text": q["text"], "category": "series", "answer": "other",
+        "kind": "choice", "options": q["options"], "detail": "vocaloid",
+    })
+    assert engine._confirmed_series(s) == "Vocaloid"
+    assert engine._series_question(s) is None
+    fresh = sess_mod.new_session("vocaloid")
+    fresh.add_candidates(POOL[:3])
+    labels = [o["label"] for o in engine._series_question(fresh)["options"].values()]
+    assert "Vocaloid" in labels
+
+
+def test_color_word_seed_is_still_a_name_query():
+    """A colour-word seed such as "Aqua" is still searched as a name."""
+    s = sess_mod.new_session("Aqua")
+    assert "Aqua" in engine._search_terms(s)
+    s.asked.append({
+        "qid": "series", "text": "Which series?", "answer": "other",
+        "kind": "choice", "detail": "silver", "options": {}, "category": "series",
+    })
+    assert "silver" in engine._search_terms(s)
+
+
+def test_profiles_under_a_characters_route_are_not_aggregates():
+    """Profiles under /characters/ and slash names are not roster pages."""
+    assert not web_search.is_aggregate_page(
+        "Spider-Man", "https://www.marvel.com/characters/spider-man-peter-parker")
+    assert not web_search.is_aggregate_page(
+        "Hatsune Miku", "https://example.org/characters/hatsune-miku")
+    assert not web_search.is_aggregate_page("Saber/Artoria Pendragon")
+    assert web_search.is_aggregate_page("Vocaloid/Characters")
+    assert web_search.is_aggregate_page("Miku", "https://vocaloid.fandom.com/wiki/Characters")
+    assert web_search.is_aggregate_page("Heroes", "https://www.marvel.com/characters")
+
+
+def test_character_category_beats_a_mentioned_franchise():
+    """A character category beats a franchise the extract mentions."""
+    series = wikipedia._series_of(
+        "Some Fighter",
+        ["Category:Tekken characters"],
+        "Some Fighter is a Tekken character who appeared in a Vocaloid collaboration.",
+    )
+    assert series == "Tekken"
+
+
+def test_enrich_keeps_a_usable_page_series(monkeypatch):
+    """Enrich keeps a usable page series and only maps crumbs from the blurb."""
+    from waifu_engine import browser_search
+
+    monkeypatch.setattr(browser_search, "_fetch_html", lambda *_a, **_k: "<html></html>")
+    monkeypatch.setattr(browser_search, "parse_character_page", lambda url, html: {
+        "series": "Tekken", "blurb": "Starred in a Vocaloid collaboration song.",
+    })
+    cand = {"name": "Some Fighter", "series": "Web result",
+            "source_url": "https://example.org/wiki/Some_Fighter"}
+    assert browser_search.enrich(cand)["series"] == "Tekken"
+
+    monkeypatch.setattr(browser_search, "parse_character_page", lambda url, html: {
+        "series": "Internet meme", "blurb": "A Vocaloid voice bank by Crypton.",
+    })
+    cand = {"name": "Hatsune Miku", "series": "Web result",
+            "source_url": "https://example.org/wiki/Hatsune_Miku"}
+    assert browser_search.enrich(cand)["series"] == "Vocaloid"

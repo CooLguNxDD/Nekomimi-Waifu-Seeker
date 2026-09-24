@@ -84,7 +84,10 @@ def _medium_of(categories: list[str], extract: str) -> str:
 
 
 def _is_character(title: str, categories: list[str], extract: str) -> bool:
-    if not title or BAD_TITLE.search(title):
+    """Whether this Wikipedia page is one character, not a list or franchise."""
+    from ..web_search import is_aggregate_page
+
+    if not title or BAD_TITLE.search(title) or is_aggregate_page(title, "", extract):
         return False
     if any(DISAMBIGUATION.search(c) for c in categories):
         return False
@@ -103,9 +106,36 @@ GENERIC_SERIES = {
     "animated film", "animated television", "teenage", "adoption in", "orphan",
 }
 
+# A publisher is not the work. Taking the longest "<series> characters"
+# category made every Marvel page "Marvel Comics", so the series question
+# could not offer Spider-Man separately from Abomination.
+_PUBLISHER_SERIES = {
+    "marvel comics", "dc comics", "image comics", "dark horse comics",
+    "dark horse",
+}
+
 
 def _series_of(title: str, categories: list[str], extract: str) -> str:
-    """Prefer a "<series> characters" category; the prose fallback guesses badly."""
+    """Series for this page: a character category first, then a known franchise.
+
+    A usable "<series> characters" category is direct evidence and wins over a
+    franchise merely mentioned in the extract (a Vocaloid collaboration must
+    not relabel another work's character). Category crumbs such as ``Internet
+    meme characters`` and publisher buckets such as "Marvel Comics" are
+    skipped: the first used to beat the Vocaloid marker on Hatsune Miku, the
+    second glued unrelated Marvel characters into one series chip. A
+    publisher-only page stays "Unknown".
+    """
+    from ..web_search import franchise_label, series_is_crumb
+
+    def usable(series: str) -> bool:
+        """Whether a series string is a work, not a crumb or a publisher."""
+        low = series.lower().strip()
+        return bool(low) and not (
+            low.startswith("fictional") or low in GENERIC_SERIES
+            or low in _PUBLISHER_SERIES or series_is_crumb(series)
+        )
+
     named = []
     for c in categories:
         m = re.match(r"Category:(.+?) (?:characters|superheroes|supervillains)$", c, re.I)
@@ -118,22 +148,29 @@ def _series_of(title: str, categories: list[str], extract: str) -> str:
             m.group(1).strip(),
             flags=re.I,
         ).strip()
-        low = series.lower()
-        if low.startswith("fictional") or low in GENERIC_SERIES:
-            continue
-        named.append(series)
+        if usable(series):
+            # "Crypton Future Media characters" still files under Vocaloid.
+            named.append(franchise_label(series) or series)
     if named:
         # The most specific category is usually the longest.
         return max(named, key=len)
+    # Only identity evidence: the title, categories and the defining first
+    # sentence. A crossover mentioned later in the intro is not membership.
+    lead = re.split(r"(?<=[.!?])\s", (extract or "").strip(), maxsplit=1)[0][:300]
+    hit = franchise_label(" ".join([title, *categories, lead]))
+    if hit:
+        return hit
     m = re.search(r"\(([^)]+)\)$", title)
-    if m and "character" not in m.group(1).lower():
-        return m.group(1)
+    if m and "character" not in m.group(1).lower() and usable(m.group(1)):
+        return m.group(1).strip()
     m = re.search(
         r"\b(?:from|in) (?:the )?(?:video game |comic book |manga |anime )?"
         r"(?:series |franchise )?([A-Z][\w'&:.-]*(?:\s+[A-Z][\w'&:.-]*){0,3})",
         extract[:300],
     )
-    return m.group(1) if m else "Unknown"
+    if m and usable(m.group(1)):
+        return m.group(1)
+    return "Unknown"
 
 
 def _clean_title(title: str) -> str:

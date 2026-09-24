@@ -159,12 +159,16 @@ class GuessSession:
 
         A hit is a duplicate if its id or its name (either word order, or a
         trailing series title) is already known, or it was rejected as a guess.
+        List, category, and disambiguation pages are dropped so a roster such
+        as VOCALOIDs cannot lead the pool.
         """
         known = {c.id for c in self.candidates}
         # The same character turns up under several URLs (wiki, MAL, fandom),
         # and duplicates split their own posterior mass. Names, not key
         # sets: "Link" absorbs "Link (The Legend of Zelda)", while
         # "Young Link" and a different work's "Aqua (other)" stay.
+        from ..web_search import is_aggregate_page
+
         seen_names = [c.name for c in self.candidates]
         added = 0
         live = self.alive_candidates()
@@ -174,6 +178,10 @@ class GuessSession:
                 continue
             name = raw.get("name", "")
             if not name_keys(name) or already_seen(name, seen_names):
+                continue
+            # List and category pages (VOCALOIDs, Vocaloid/Characters) must
+            # not enter the pool, or they lead the posterior and get guessed.
+            if is_aggregate_page(name, raw.get("source_url") or "", raw.get("blurb") or ""):
                 continue
             seen_names.append(name)
             cand = Candidate.from_search(raw)
@@ -192,7 +200,16 @@ class GuessSession:
         return live[:MAX_SCORED_CANDIDATES]
 
     def posterior(self) -> list[tuple[Candidate, float]]:
-        live = self.alive_candidates()
+        """Live candidates by probability, with list and category pages left out.
+
+        A roster page that slipped into the pool must not be the guess.
+        """
+        from ..web_search import is_aggregate_page
+
+        live = [
+            c for c in self.alive_candidates()
+            if not is_aggregate_page(c.name, c.source_url or "", c.blurb)
+        ]
         if not live:
             return []
         top = max(c.logodds for c in live)

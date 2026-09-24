@@ -547,7 +547,13 @@ def enrich(candidate: dict[str, Any]) -> dict[str, Any] | None:
     if not url:
         return None
     try:
-        from .web_search import JUNK_DOMAINS, _guess_series, mine_trait_slugs
+        from .web_search import (
+            JUNK_DOMAINS,
+            _guess_series,
+            franchise_label,
+            mine_trait_slugs,
+            series_is_crumb,
+        )
 
         if any(d in url.lower() for d in JUNK_DOMAINS):
             return None
@@ -564,6 +570,22 @@ def enrich(candidate: dict[str, Any]) -> dict[str, Any] | None:
         if image and not candidate.get("image_url"):
             candidate["image_url"] = image
         series = (info.get("series") or "").strip()
+        # A usable infobox series is direct evidence: normalise it, but never
+        # replace it with a franchise the blurb merely mentions (a Vocaloid
+        # collaboration). Only a crumb such as "Internet meme" falls back to
+        # the page text, which can still map Crypton / Vocaloid.
+        if series and not series_is_crumb(series):
+            named = franchise_label(series)
+        else:
+            named = franchise_label(
+                f"{candidate.get('name', '')} {info.get('blurb') or candidate.get('blurb') or ''}"
+            )
+        if series_is_crumb(candidate.get("series") or ""):
+            candidate["series"] = ""
+        if named:
+            candidate["series"] = named
+        elif series_is_crumb(series):
+            series = ""
         if series and candidate.get("series") in ("", "Web result", None):
             candidate["series"] = series
         elif not candidate.get("series") or candidate.get("series") == "Web result":
