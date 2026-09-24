@@ -84,7 +84,10 @@ def _medium_of(categories: list[str], extract: str) -> str:
 
 
 def _is_character(title: str, categories: list[str], extract: str) -> bool:
-    if not title or BAD_TITLE.search(title):
+    """Whether this Wikipedia page is one character, not a list or franchise."""
+    from ..web_search import is_aggregate_page
+
+    if not title or BAD_TITLE.search(title) or is_aggregate_page(title, "", extract):
         return False
     if any(DISAMBIGUATION.search(c) for c in categories):
         return False
@@ -105,7 +108,18 @@ GENERIC_SERIES = {
 
 
 def _series_of(title: str, categories: list[str], extract: str) -> str:
-    """Prefer a "<series> characters" category; the prose fallback guesses badly."""
+    """Series for this page, preferring a known franchise over category crumbs.
+
+    ``Category:Internet meme characters`` and a ``(software)`` title used to
+    beat the Vocaloid marker on Hatsune Miku and Kaito. Crypton, Project Diva
+    and Sekai map to Vocaloid. Sapporo, Japanese, and other leftovers do not.
+    """
+    from ..web_search import franchise_label, series_is_crumb
+
+    context = " ".join([title, *categories, (extract or "")[:400]])
+    hit = franchise_label(context)
+    if hit:
+        return hit
     named = []
     for c in categories:
         m = re.match(r"Category:(.+?) (?:characters|superheroes|supervillains)$", c, re.I)
@@ -119,21 +133,23 @@ def _series_of(title: str, categories: list[str], extract: str) -> str:
             flags=re.I,
         ).strip()
         low = series.lower()
-        if low.startswith("fictional") or low in GENERIC_SERIES:
+        if low.startswith("fictional") or low in GENERIC_SERIES or series_is_crumb(series):
             continue
         named.append(series)
     if named:
         # The most specific category is usually the longest.
         return max(named, key=len)
     m = re.search(r"\(([^)]+)\)$", title)
-    if m and "character" not in m.group(1).lower():
+    if m and "character" not in m.group(1).lower() and not series_is_crumb(m.group(1)):
         return m.group(1)
     m = re.search(
         r"\b(?:from|in) (?:the )?(?:video game |comic book |manga |anime )?"
         r"(?:series |franchise )?([A-Z][\w'&:.-]*(?:\s+[A-Z][\w'&:.-]*){0,3})",
         extract[:300],
     )
-    return m.group(1) if m else "Unknown"
+    if m and not series_is_crumb(m.group(1)):
+        return m.group(1)
+    return "Unknown"
 
 
 def _clean_title(title: str) -> str:

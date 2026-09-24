@@ -131,9 +131,14 @@ def _fact_entries(sess: GuessSession) -> list[tuple[str, float]]:
         if text and text not in entries:
             entries[text] = rank
 
-    add(sess.seed, 0.0)
+    if sess.seed and not web_search.is_color_phrase(sess.seed):
+        add(sess.seed, 0.0)
     for a in sess.asked:
-        add(a.get("detail"), 0.0)
+        # A colour phrase is a trait, not a name. Searching "teal aqua
+        # turquoise" retrieved a page titled Turquoise.
+        detail = a.get("detail")
+        if detail and not web_search.is_color_phrase(detail):
+            add(detail, 0.0)
         answer = a.get("answer")
         if a.get("kind") == "choice":
             option = (a.get("options") or {}).get(answer) or {}
@@ -697,11 +702,20 @@ def _series_trait_anchor(sess: GuessSession) -> str:
 
 
 def _confirmed_series(sess: GuessSession) -> str:
-    """The series the player picked in a "Which series?" question, or ""."""
+    """The series the player picked, or a known franchise they typed instead.
+
+    "Another series" plus the detail ``vocaloid`` is a confirmation. Leaving
+    it as free text asked ``series_2`` over junk labels and never offered
+    Vocaloid.
+    """
     for a in sess.asked:
         option = (a.get("options") or {}).get(a.get("answer") or "")
         if option and option.get("series_key"):
             return option.get("fact", "")
+        if str(a.get("qid") or "").startswith("series") and a.get("answer") == "other":
+            label = web_search.franchise_label(a.get("detail") or "")
+            if label:
+                return label
     return ""
 
 
@@ -732,11 +746,21 @@ def _series_question(sess: GuessSession) -> dict[str, Any] | None:
             groups.append(group)
         group["weight"] += p
         group["labels"][label] = group["labels"].get(label, 0) + 1
+    typed = web_search.franchise_label(" ".join(_free_text(sess)))
+    if typed:
+        key = series_key(typed)
+        if key and not any(same_series_key(key, g["key"]) for g in groups) \
+                and not any(same_series_key(key, k) for k in offered):
+            groups.insert(0, {"key": key, "weight": 0.0, "labels": {typed: 1}})
     if len(groups) < 2:
         return None
     groups.sort(key=lambda g: g["weight"], reverse=True)
     picked = [(g["key"], max(g["labels"], key=g["labels"].get))
               for g in groups[:MAX_SERIES_OPTIONS]]
+    if typed:
+        key = series_key(typed)
+        if key and not any(same_series_key(key, k) for k, _label in picked):
+            picked = [(key, typed), *picked[: MAX_SERIES_OPTIONS - 1]]
     return series_question("series" if not series_asked else "series_2", picked)
 
 

@@ -393,6 +393,10 @@ def find_candidates(
             keys = name_keys(name)
             if not keys or already_seen(name, excluded) or already_seen(name, taken_names):
                 continue
+            if web_search.is_aggregate_page(
+                name, cand.get("source_url") or "", cand.get("blurb") or ""
+            ):
+                continue
             found[str(cand.get("id") or min(keys))] = cand
             taken_names.append(name)
             added += 1

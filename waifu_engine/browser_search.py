@@ -547,7 +547,13 @@ def enrich(candidate: dict[str, Any]) -> dict[str, Any] | None:
     if not url:
         return None
     try:
-        from .web_search import JUNK_DOMAINS, _guess_series, mine_trait_slugs
+        from .web_search import (
+            JUNK_DOMAINS,
+            _guess_series,
+            franchise_label,
+            mine_trait_slugs,
+            series_is_crumb,
+        )
 
         if any(d in url.lower() for d in JUNK_DOMAINS):
             return None
@@ -564,6 +570,17 @@ def enrich(candidate: dict[str, Any]) -> dict[str, Any] | None:
         if image and not candidate.get("image_url"):
             candidate["image_url"] = image
         series = (info.get("series") or "").strip()
+        # The infobox label wins when it is already a franchise. Otherwise the
+        # page text can still map Crypton / Vocaloid and drop "Internet meme".
+        named = franchise_label(series) or franchise_label(
+            f"{candidate.get('name', '')} {info.get('blurb') or candidate.get('blurb') or ''}"
+        )
+        if series_is_crumb(candidate.get("series") or ""):
+            candidate["series"] = ""
+        if named:
+            candidate["series"] = named
+        elif series_is_crumb(series):
+            series = ""
         if series and candidate.get("series") in ("", "Web result", None):
             candidate["series"] = series
         elif not candidate.get("series") or candidate.get("series") == "Web result":

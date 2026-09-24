@@ -301,10 +301,15 @@ def _guess_medium(title: str, href: str, body: str) -> str:
     return "unknown"
 
 
-def _guess_series(text: str) -> str:
-    low = text.lower()
-    for marker, label in (
-        ("blue archive", "Blue Archive"),
+# Longer Vocaloid aliases first so Crypton / Project Diva / Sekai pages
+# become Vocaloid before a later, broader marker in the same blurb can.
+_SERIES_MARKERS: tuple[tuple[str, str], ...] = (
+    ("project sekai", "Vocaloid"),
+    ("colorful stage", "Vocaloid"),
+    ("project diva", "Vocaloid"),
+    ("crypton future", "Vocaloid"),
+    ("vocaloid", "Vocaloid"),
+    ("blue archive", "Blue Archive"),
         ("honkai: star rail", "Honkai: Star Rail"),
         ("star rail", "Honkai: Star Rail"),
         ("fate/grand order", "Fate/Grand Order"),
@@ -322,7 +327,6 @@ def _guess_series(text: str) -> str:
         ("overwatch", "Overwatch"),
         ("arknights", "Arknights"),
         ("azur lane", "Azur Lane"),
-        ("vocaloid", "Vocaloid"),
         ("marvel", "Marvel Comics"),
         ("dc comics", "DC Comics"),
         ("batman", "DC Comics"),
@@ -354,10 +358,94 @@ def _guess_series(text: str) -> str:
         ("food wars", "Food Wars"),
         ("dr. stone", "Dr. Stone"),
         ("seven deadly sins", "Seven Deadly Sins"),
-    ):
+)
+
+
+def franchise_label(text: str) -> str:
+    """Display name of a known franchise named in ``text``, or ``""``.
+
+    Vocaloid aliases (Crypton, Project Diva, Sekai) share one label so a
+    series question can offer "Vocaloid" instead of a category crumb.
+    """
+    low = (text or "").lower()
+    for marker, label in _SERIES_MARKERS:
         if marker in low:
             return label
-    return "Web result"
+    return ""
+
+
+# Category and parenthetical leftovers. "Internet meme characters" and
+# "Kaito (software)" are not franchises; neither is "headquartered in Sapporo".
+_SERIES_CRUMBS = {
+    "internet meme", "internet memes", "meme", "memes",
+    "software", "sapporo", "japanese", "japan",
+    "mascot", "mascots", "popular culture", "voice bank", "voice banks",
+}
+
+
+def series_is_crumb(series: str) -> bool:
+    """Whether ``series`` is a category leftover rather than a work title."""
+    low = " ".join((series or "").lower().split()).strip(".,;:")
+    return low in _SERIES_CRUMBS
+
+
+def _guess_series(text: str) -> str:
+    """Series implied by a hit, or ``Web result`` when no franchise is known."""
+    return franchise_label(text) or "Web result"
+
+
+# Hair-colour words. A detail that is only these must not be searched as a
+# name: "teal aqua turquoise" retrieved a page titled Turquoise.
+_COLOR_WORDS = {
+    "teal", "aqua", "turquoise", "cyan", "mint", "lime", "violet", "purple",
+    "green", "grey", "gray", "silver", "white", "orange", "red", "pink",
+    "blue", "black", "brown", "gold", "golden", "blonde", "blond", "crimson",
+    "scarlet", "auburn", "magenta", "indigo",
+}
+
+
+def is_color_phrase(text: str) -> bool:
+    """Whether ``text`` is only hair-colour words, with no character or series name."""
+    tokens = re.findall(r"[a-z]+", (text or "").lower())
+    return bool(tokens) and all(token in _COLOR_WORDS for token in tokens)
+
+
+_AGGREGATE_NAME = re.compile(
+    r"(^|\b)(list of|category:|portal:|template:)|"
+    r"\bdisambiguation\b|"
+    r"^characters (of|in)\b|"
+    r"(^|/)characters\b|"
+    r"/",
+    re.I,
+)
+# Roster titles that are a franchise plus a plural, not a person.
+_AGGREGATE_EXACT = {"vocaloids", "fanloid", "fanloids", "vocaloid characters"}
+
+
+def is_aggregate_page(name: str, url: str = "", blurb: str = "") -> bool:
+    """Whether this hit is a list, category, or disambiguation page.
+
+    Fandom roster titles such as VOCALOIDs and Vocaloid/Characters pass a
+    one-word name check and a ``/wiki/`` accept, then outrank the character.
+    """
+    raw = (name or "").strip()
+    low = raw.lower()
+    if not low:
+        return False
+    if low in _AGGREGATE_EXACT:
+        return True
+    stem = low.rstrip("s")
+    if stem != low and stem in SERIES_BLOCK:
+        return True
+    if _AGGREGATE_NAME.search(raw):
+        return True
+    url_l = (url or "").lower()
+    if any(token in url_l for token in ("list_of_", "category:", "/characters", "disambiguation")):
+        return True
+    head = (blurb or "")[:200].lower()
+    if "list of characters" in head or head.startswith("this is a list") or "the following is a list" in head:
+        return True
+    return False
 
 
 # Wiki scaffolding and trope pages that look like names but are not characters.
@@ -374,8 +462,9 @@ JUNK_DOMAINS = ("tvtropes.org", "reddit.com", "quora.com", "youtube.com", "pinte
 
 
 def _ok_person_name(name: str) -> bool:
+    """Whether ``name`` can be a character, not a franchise, list, or crumb page."""
     key = name.lower().strip()
-    if not key or key in SERIES_BLOCK:
+    if not key or key in SERIES_BLOCK or is_aggregate_page(name):
         return False
     if ":" in name or NON_NAME.match(name):
         return False

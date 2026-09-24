@@ -241,3 +241,101 @@ def test_page_hides_the_web_result_placeholder():
     s = _session()
     assert s.by_id("mystery").public()["series"] == ""
     assert s.by_id("koharu").public()["series"] == "Blue Archive"
+
+
+MIKU_CATS = [
+    "Category:Internet meme characters",
+    "Category:Internet memes introduced in 2007",
+    "Category:Vocaloid voice banks by Crypton Future Media",
+    "Category:Vocaloids introduced in 2007",
+]
+MIKU_EXTRACT = (
+    "Hatsune Miku is a Vocaloid voicebank and software application developed "
+    "by Crypton Future Media. She has turquoise twintails."
+)
+
+
+def test_vocaloid_series_beats_category_crumbs():
+    assert wikipedia._series_of("Hatsune Miku", MIKU_CATS, MIKU_EXTRACT) == "Vocaloid"
+    assert wikipedia._series_of(
+        "Kaito (software)",
+        ["Category:Vocaloid voice banks", "Category:Vocaloids"],
+        "Kaito is a Voice Synth developed for the Vocaloid engine.",
+    ) == "Vocaloid"
+    assert wikipedia._series_of(
+        "Megurine Luka",
+        ["Category:Vocaloids"],
+        "Developed by Crypton Future Media (headquartered in Sapporo, Japan).",
+    ) == "Vocaloid"
+    assert wikipedia._series_of(
+        "Ichika",
+        ["Category:Project Sekai characters"],
+        "A character in Hatsune Miku: Colorful Stage.",
+    ) == "Vocaloid"
+
+
+def test_category_crumbs_are_not_a_series():
+    assert wikipedia._series_of(
+        "Someone", ["Category:Internet meme characters"], "A fictional singer."
+    ) == "Unknown"
+    assert wikipedia._series_of("Kaito (software)", [], "A singer from Japan.") == "Unknown"
+    assert wikipedia._series_of(
+        "Luka", [], "She is based in Sapporo and is Japanese."
+    ) == "Unknown"
+    assert wikipedia._series_of(
+        "Idol", ["Category:Japanese characters"], "A mascot."
+    ) == "Unknown"
+    assert web_search._guess_series("Project Diva module for Crypton Future Media") == "Vocaloid"
+
+
+def test_list_pages_never_lead_the_pool():
+    s = sess_mod.new_session()
+    added = s.add_candidates([
+        {"id": "roster", "name": "VOCALOIDs", "series": "Vocaloid",
+         "source_url": "https://vocaloid.fandom.com/wiki/VOCALOIDs",
+         "blurb": "This is a list of Vocaloid characters.", "popularity": 10**9},
+        {"id": "path", "name": "Vocaloid/Characters", "series": "Vocaloid",
+         "source_url": "https://vocaloid.fandom.com/wiki/Vocaloid/Characters"},
+        {"id": "listed", "name": "List of Vocaloid characters", "series": "Vocaloid"},
+        {"id": "miku", "name": "Hatsune Miku", "series": "Vocaloid", "popularity": 10},
+    ])
+    assert added == 1
+    assert [c.name for c, _p in s.posterior()] == ["Hatsune Miku"]
+    # A page already stored must still be invisible to the guess.
+    s.candidates.append(sess_mod.Candidate(
+        id="stuck", name="VOCALOIDs", series="Vocaloid", logodds=50,
+        source_url="https://vocaloid.fandom.com/wiki/VOCALOIDs",
+    ))
+    assert [c.name for c, _p in s.posterior()] == ["Hatsune Miku"]
+    assert web_search.is_aggregate_page("VOCALOIDs")
+    assert web_search.is_aggregate_page("Vocaloid/Characters")
+    assert not web_search.is_aggregate_page("Hatsune Miku")
+
+
+def test_color_detail_is_not_a_name_query():
+    s = sess_mod.new_session()
+    s.asked.append({
+        "qid": "hair_color", "text": "What colour is your character's hair?",
+        "answer": "other", "kind": "choice", "detail": "teal aqua turquoise",
+        "options": {}, "category": "hair_color",
+    })
+    terms = engine._search_terms(s)
+    assert "teal aqua turquoise" not in terms
+    assert not any("turquoise" in t.lower() for t in terms)
+    assert web_search.is_color_phrase("teal aqua turquoise")
+    assert not web_search.is_color_phrase("hatsune miku teal hair")
+
+
+def test_typed_vocaloid_confirms_series_and_is_offered():
+    s = _session()
+    q = engine._series_question(s)
+    s.asked.append({
+        "qid": q["id"], "text": q["text"], "category": "series", "answer": "other",
+        "kind": "choice", "options": q["options"], "detail": "vocaloid",
+    })
+    assert engine._confirmed_series(s) == "Vocaloid"
+    assert engine._series_question(s) is None
+    fresh = sess_mod.new_session("vocaloid")
+    fresh.add_candidates(POOL[:3])
+    labels = [o["label"] for o in engine._series_question(fresh)["options"].values()]
+    assert "Vocaloid" in labels
