@@ -274,6 +274,76 @@ def popular_characters(medium_hint: str | None, n: int) -> list[dict[str, Any]]:
     return out
 
 
+def _anilist_as_game(cand: dict[str, Any]) -> dict[str, Any]:
+    """Return ``cand`` labeled as a game.
+
+    AniList's non-manga bucket is anime, which is where a gacha character
+    with an anime adaptation is filed. The player already said game, so
+    leaving the label as anime would delete the hit on the medium question.
+    """
+    if cand.get("medium") not in (None, "", "anime", "unknown"):
+        return cand
+    out = dict(cand)
+    out["medium"] = "game"
+    tags = list(out.get("tags") or [])
+    if "game" not in tags:
+        tags.append("game")
+    out["tags"] = tags
+    return out
+
+
+def _trait_clue(facts: list[str]) -> str:
+    """Visual phrases named across ``facts``, or "" when there is no combination.
+
+    One trait is not enough to call a Wikipedia hit junk. Pink hair plus a
+    halo plus wings is the combination that name search cannot retrieve.
+    """
+    from ..nekomimi.traits import visual_search_phrases
+
+    phrases: list[str] = []
+    for fact in facts:
+        for phrase in visual_search_phrases(fact):
+            if phrase not in phrases:
+                phrases.append(phrase)
+    if len(phrases) < 2:
+        return ""
+    return " ".join(phrases)
+
+
+def _hit_shows_traits(cand: dict[str, Any], clue: str) -> bool:
+    """Whether ``cand`` clearly has every trait in ``clue``."""
+    from ..nekomimi.traits import clue_likelihood
+
+    if not clue:
+        return False
+    text = f"{cand.get('blurb') or ''} {cand.get('name') or ''}"
+    score = clue_likelihood(clue, text, cand.get("tags"))
+    return score is not None and score >= 0.9
+
+
+def _gemini_inline(
+    found: dict[str, dict[str, Any]],
+    exclude_names: set[str],
+    facts: list[str],
+    forced: bool | None,
+) -> bool:
+    """Whether Gemini should run on this turn instead of the background worker.
+
+    ``forced=True`` is the engine saying no alive candidate shows the seed.
+    ``forced=False`` means one does, so a junk page must not schedule another
+    billed call. With no opinion, a trait seed ignores ``exclude_names``:
+    storing "The Saint" used to set that set and push Mika to the next turn.
+    """
+    if forced is True:
+        return True
+    if forced is False:
+        return not found and not exclude_names
+    clue = _trait_clue(facts)
+    if clue:
+        return not any(_hit_shows_traits(cand, clue) for cand in found.values())
+    return not found and not exclude_names
+
+
 def find_candidates(
     constraints: list[str],
     medium_hint: str | None = None,
@@ -286,6 +356,7 @@ def find_candidates(
     ddg_gate: Callable[[], bool] | None = None,
     specific: bool = True,
     pool_size: int | None = None,
+    gemini_inline: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Merge candidates from every source, best source first, deduped by name.
 
@@ -297,9 +368,12 @@ def find_candidates(
 
     Gemini (``sources.gemini``, off unless configured) searches Google for
     characters matching the facts themselves, so it helps most when there is
-    nothing specific. It shares ``ddg_gate`` and, like DuckDuckGo, runs in the
-    background whenever the session already has candidates; it runs inline
-    only when the pool would otherwise be empty.
+    nothing specific. It shares ``ddg_gate``. It runs inline when the pool is
+    empty, and also when a trait seed's only hits are junk: a Wikipedia page
+    that shares one word with the seed used to count as a full pool and defer
+    Gemini to the next turn. ``gemini_inline=True`` forces that; ``False``
+    keeps the background path once a live candidate already shows the traits.
+    ``exclude_names`` alone does not count as that pool for a trait seed.
 
     ``specific=False`` means the facts are only broad traits (no seed, typed
     detail or LLM query). Name and keyword searches cannot match those, so
@@ -371,14 +445,19 @@ def find_candidates(
             except Exception as exc:  # noqa: BLE001
                 web_search._note_error(f"wikipedia: {exc}")
 
-    # AniList adds gender, popularity and better anime/manga coverage.
+    # AniList adds gender, popularity and a real description. Game characters
+    # are filed under the anime adaptation, so a game hint used to skip the
+    # source entirely and a trait seed never saw Blue Archive students.
     with timing.span("fetch.anilist"):
-        if specific and medium_hint in (None, "anime", "manga") and len(found) < limit:
+        if specific and medium_hint in (None, "anime", "manga", "game") and len(found) < limit:
             for q in queries:
                 if len(found) >= limit:
                     break
                 try:
-                    take(anilist.search_characters(q, limit=limit), "anilist")
+                    anilist_hits = anilist.search_characters(q, limit=limit)
+                    if medium_hint == "game":
+                        anilist_hits = [_anilist_as_game(c) for c in anilist_hits]
+                    take(anilist_hits, "anilist")
                 except Exception as exc:  # noqa: BLE001
                     web_search._note_error(f"anilist: {exc}")
 
@@ -417,9 +496,13 @@ def find_candidates(
     # a billed grounded call on it would only list famous characters.
     facts = [c for c in constraints
              if c and c.strip() and c.strip().lower() != "fictional character"][-8:]
-    if facts and gemini.enabled() and len(found) < limit and gate():
-        empty = not found and not exclude_names
-        if background_key and not empty and _gemini_background_on():
+    # A full page of junk must not block the inline call: the limit slice
+    # below puts trait matches first, so Mika is not cut off by "The Saint".
+    # ``gate`` is called once; the engine memoises it with the DuckDuckGo gate.
+    run_gemini = bool(facts and gemini.enabled() and gate())
+    inline = bool(run_gemini and _gemini_inline(found, exclude_names, facts, gemini_inline))
+    if run_gemini and (inline or len(found) < limit):
+        if background_key and not inline and _gemini_background_on():
             with timing.span("fetch.gemini_background"):
                 _GEMINI_BG.start(background_key, _gemini_run, facts, medium_hint, limit)
         else:
@@ -448,7 +531,16 @@ def find_candidates(
                 web_search._note_error(f"ddg: {exc}")
 
     # Preserve provider relevance. Fame is only a capped prior after retrieval.
-    out = list(found.values())[:limit]
+    # A trait seed is the exception: pages that actually show the combination
+    # lead, so a junk hit that arrived first cannot fill the limit alone.
+    out = list(found.values())
+    clue = _trait_clue(facts)
+    if clue:
+        matched = [c for c in out if _hit_shows_traits(c, clue)]
+        if matched:
+            matched_ids = {id(c) for c in matched}
+            out = matched + [c for c in out if id(c) not in matched_ids]
+    out = out[:limit]
     with timing.span("fetch.enrich"):
         if web_search._enrich_on() and out:
             web_search._set_state("enrich")

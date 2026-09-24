@@ -130,6 +130,59 @@ def test_inline_when_the_pool_is_empty(fake, quiet):
     assert [c["name"] for c in out] == ["Hatsune Miku", "Rem"]
 
 
+def test_inline_when_wikipedia_only_returned_junk(fake, quiet, monkeypatch):
+    """A page that shares no visual traits must not defer Gemini to the next turn."""
+    monkeypatch.setattr(wikipedia, "search_characters", lambda q, limit: [{
+        "id": "saint",
+        "name": "The Saint",
+        "series": "The Saint",
+        "medium": "tv",
+        "blurb": "A mystery series about a detective known as The Saint.",
+        "tags": [],
+    }])
+    out = sources.find_candidates(
+        ["pink hair halo wings"], medium_hint="game", background_key="g-saint",
+        ddg_gate=lambda: True, specific=True)
+    assert fake.calls  # ran before this search returned
+    assert not sources._GEMINI_BG.is_pending("g-saint")
+    assert any(c["name"] == "Hatsune Miku" for c in out)
+
+
+def test_trait_match_is_kept_ahead_of_an_earlier_junk_page(fake, quiet, monkeypatch):
+    fake.text = """```json
+[{"name": "Mika Misono", "series": "Blue Archive", "medium": "game",
+  "description": "She has long pink hair, angel wings on her back, and a halo."}]
+```"""
+    monkeypatch.setattr(wikipedia, "search_characters", lambda q, limit: [{
+        "id": "saint",
+        "name": "The Saint",
+        "series": "The Saint",
+        "medium": "tv",
+        "blurb": "A mystery series about a detective known as The Saint.",
+        "tags": [],
+    }])
+    out = sources.find_candidates(
+        ["pink hair halo wings"], medium_hint="game", limit=1,
+        background_key="g-cut", ddg_gate=lambda: True, specific=True)
+    assert [c["name"] for c in out] == ["Mika Misono"]
+
+
+def test_exclude_names_does_not_hide_a_trait_seed_from_gemini(fake, quiet, monkeypatch):
+    monkeypatch.setattr(wikipedia, "search_characters", lambda q, limit: [{
+        "id": "saint",
+        "name": "The Saint",
+        "series": "The Saint",
+        "medium": "tv",
+        "blurb": "A mystery series about a detective known as The Saint.",
+        "tags": [],
+    }])
+    sources.find_candidates(
+        ["pink hair halo wings"], medium_hint="game", exclude_names={"The Saint"},
+        background_key="g-excl", ddg_gate=lambda: True, specific=True)
+    assert fake.calls
+    assert not sources._GEMINI_BG.is_pending("g-excl")
+
+
 def test_background_when_the_pool_has_candidates(fake, quiet):
     fake.delay = 0.2
     t0 = time.perf_counter()

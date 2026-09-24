@@ -52,6 +52,7 @@ from .traits import (
     MEDIUM_VALUES,
     QUESTION_BANK,
     QUESTIONS_BY_ID,
+    appearance_question_ids,
     clue_likelihood,
     clue_question,
     is_choice,
@@ -319,7 +320,12 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
             terms = [anchor, *[term for term in terms if term != anchor]]
             focus = [anchor, *[fact for fact in focus if fact != anchor]][:FOCUS_TAKE]
         with timing.span("search.llm_gate"):
-            rewritten = None if initial else _llm_queries(sess, medium, stuck)
+            # The first search still uses templates. Starting the prefetch
+            # here means a trait seed is rewritten before the next turn
+            # instead of waiting until the pool is already full of junk.
+            rewritten = _llm_queries(sess, medium, stuck)
+            if initial:
+                rewritten = None
         with timing.span("search.fetch"):
             raws = sources.find_candidates(
                 terms,
@@ -334,6 +340,7 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
                 # broad button facts fall back to the popular pool.
                 specific=bool(_free_text(sess) or rewritten or _confirmed_series(sess)),
                 pool_size=len(sess.alive_candidates()),
+                gemini_inline=_gemini_inline(sess),
             )
     except Exception as exc:  # noqa: BLE001 - search is best effort
         sess.notes.append(f"search failed: {exc}")
@@ -450,13 +457,55 @@ def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
     return out
 
 
+# Asked ahead of school/uniform/teen once the player has named them, or once
+# the series is known and those shared answers no longer separate anyone.
+_SERIES_APPEARANCE = ("hair_color", "look_halo", "look_wings", "look_horns")
+
+
+def _pinned_question_ids(sess: GuessSession) -> list[str]:
+    """Appearance questions the seed named, plus the rest after a series lock.
+
+    Information gain never asked hair colour or halo: every Trinity student
+    shares school, uniform and teen, and halo was buried in one horns/wings
+    question. The traits the player already typed have to be offered early.
+    """
+    ids: list[str] = []
+    for text in _free_text(sess):
+        for qid in appearance_question_ids(text):
+            if qid not in ids:
+                ids.append(qid)
+    if _confirmed_series(sess):
+        for qid in _SERIES_APPEARANCE:
+            if qid not in ids:
+                ids.append(qid)
+    return ids
+
+
+def _gemini_inline(sess: GuessSession) -> bool:
+    """Whether this search should wait for Gemini.
+
+    Inline while nobody alive shows the visual combination in the seed.
+    A junk page stored from Wikipedia must not count as that somebody, or
+    Mika only arrives on the next turn as a background hit.
+    """
+    clue = " ".join(dict.fromkeys(
+        phrase for text in _free_text(sess) for phrase in visual_search_phrases(text)))
+    if len(visual_search_phrases(clue)) < 2:
+        return False
+    return not any(
+        (score := clue_likelihood(clue, c.blurb, c.tags)) is not None and score >= 0.9
+        for c in sess.alive_candidates()
+    )
+
+
 def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
     """Top-N questions worth asking, highest expected information gain first.
 
     Medium ("Where is your character from?") and series ("Which series?")
-    compete in the same ranking as every other question. Forcing medium first
-    burned a turn when the pool already shared one medium; series already
-    ranked by information gain, but only after that forced medium turn.
+    compete in that ranking like any other question. Forcing medium first
+    burned a turn when the pool already shared one medium. Traits the seed
+    already named are pulled in front of that ranking: otherwise hair colour,
+    halo and wings lose to questions the whole school answers the same way.
     """
     asked = sess.asked_ids()
     settled = sess.settled_categories()
@@ -470,7 +519,13 @@ def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
     if not pool:
         pool = [q for q in QUESTION_BANK if q["id"] not in asked]
     pool.sort(key=lambda q: _split_quality(q, weighted), reverse=True)
-    return pool[:CHOICE_WIDTH]
+    order = _pinned_question_ids(sess)
+    pin_ids = set(order)
+    pins = [q for q in pool if q["id"] in pin_ids]
+    # Keep the seed's own order (hair, halo, wings), not the info-gain order.
+    pins.sort(key=lambda q: order.index(q["id"]))
+    rest = [q for q in pool if q["id"] not in pin_ids]
+    return (pins + rest)[:CHOICE_WIDTH]
 
 
 def _laya_state(sess: GuessSession, candidates: list[Candidate]) -> dict[str, Any]:

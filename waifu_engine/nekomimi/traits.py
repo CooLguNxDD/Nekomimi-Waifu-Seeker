@@ -317,6 +317,23 @@ def _clue_slugs(text: str) -> list[str]:
     return [slug for slug, pattern, _search in _VISUAL_PHRASES if pattern.search(raw)]
 
 
+# Seed phrases that should pull a bank question forward. Hair colour is one
+# question; halo, wings and horns are separate so a yes to one does not skip
+# the others.
+_APPEARANCE_QUESTIONS = (
+    ("pink hair", "hair_color"),
+    ("halo", "look_halo"),
+    ("wings", "look_wings"),
+    ("horns", "look_horns"),
+)
+
+
+def appearance_question_ids(text: str) -> list[str]:
+    """Bank question ids for the visual traits named in ``text``, in table order."""
+    phrases = set(visual_search_phrases(text))
+    return [qid for phrase, qid in _APPEARANCE_QUESTIONS if phrase in phrases]
+
+
 def visual_search_phrases(text: str) -> list[str]:
     """Search words for the visual traits named in ``text``.
 

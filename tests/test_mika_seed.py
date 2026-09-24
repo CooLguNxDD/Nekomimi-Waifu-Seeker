@@ -173,6 +173,42 @@ def test_wings_answer_demotes_pink_hair_without_body_wings():
     assert s.by_id("hanako").alive
 
 
+def test_seed_traits_are_asked_ahead_of_shared_school_questions():
+    s = sess_mod.new_session(SEED)
+    s.add_candidates([
+        {"id": f"c{i}", "name": f"Student {i}", "series": "Blue Archive" if i < 4 else "Other Game",
+         "medium": "game",
+         "blurb": "A student at the academy." if i % 2 == 0 else "A hero of the story.",
+         "tags": ["student", "uniform", "teen"] if i % 2 == 0 else ["teen"]}
+        for i in range(6)
+    ])
+    ids = [q["id"] for q in engine.candidate_questions(s)]
+    for qid in ("hair_color", "look_halo", "look_wings"):
+        assert qid in ids
+        assert ids.index(qid) < ids.index("look_uniform")
+    s.asked.append({
+        "qid": "series", "text": "Which series is your character from?", "category": "series",
+        "answer": "s1", "kind": "choice",
+        "options": {"s1": {"label": "Blue Archive", "fact": "Blue Archive",
+                           "series_key": "bluearchive", "prior": 0.0, "tags": []}},
+    })
+    ids = [q["id"] for q in engine.candidate_questions(s)]
+    assert ids[0] in {"hair_color", "look_halo", "look_wings", "look_horns"}
+    assert "look_horns" in ids
+
+
+def test_initial_trait_seed_asks_for_inline_gemini(monkeypatch):
+    seen = []
+    monkeypatch.setattr(engine.sources, "find_candidates",
+                        lambda terms, **k: seen.append(k) or [])
+    engine.start(SEED)
+    assert seen[0]["gemini_inline"] is True
+    s = _pool_session()
+    seen.clear()
+    engine.refresh_candidates(s)
+    assert seen[0]["gemini_inline"] is False
+
+
 def test_seed_plus_signs_become_search_words():
     s = sess_mod.new_session(SEED)
     assert engine._search_terms(s) == ["pink hair halo wings"]
