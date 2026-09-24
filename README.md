@@ -10,7 +10,7 @@ An **Nekomimi character guesser** for **anime, manga, comics, games, movies and 
 
 `notebooks/nekomimi_colab.ipynb` runs this repo on a Colab **L4**. It clones `main`, installs the Python dependencies, builds the SolidJS UI, optionally rewrites search queries with Ollama, and publishes the app with ngrok.
 
-Use an L4 runtime, then run the cells from the top. The server cell prints a public `/nekomimi` URL.
+Use an L4 runtime, then run the cells from the top. The server cell prints a public `/nekomimi` URL. That tunnel has no login, so anyone with the link can play. If `GOOGLE_API_KEY` is set, those visits can run Gemini Search and bill that key.
 
 Before the first cell, add secrets in the Colab sidebar (the key icon). The notebook loads them with `google.colab.userdata`. Tokens stay in Colab secrets.
 
