@@ -348,6 +348,31 @@ def _clue_requirements(text: str) -> list[tuple[str, bool]]:
     return [(slug, not negated) for slug, _search, negated in _visual_mentions(text)]
 
 
+def visual_residual(text: str) -> str:
+    """Return ``text`` with pink-hair, halo, wings and horns phrases removed.
+
+    Those slugs already score through ``clue_likelihood``. A sentence that
+    also said "white dress" used to take only that path, so the dress never
+    reached the mild overlap clue and did not move the posterior.
+    """
+    raw = text or ""
+    spans: list[tuple[int, int]] = []
+    for _slug, pattern, _search in _VISUAL_PHRASES:
+        spans.extend((match.start(), match.end()) for match in pattern.finditer(raw))
+    if not spans:
+        return " ".join(raw.split())
+    spans.sort()
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        if start < cursor:
+            continue
+        parts.append(raw[cursor:start])
+        cursor = end
+    parts.append(raw[cursor:])
+    return " ".join("".join(parts).split())
+
+
 # Seed phrases that should pull a bank question forward. Hair colour is one
 # question; halo, wings and horns are separate so a yes to one does not skip
 # the others.
