@@ -2,7 +2,7 @@ import { createEffect, createSignal, Show } from "solid-js";
 import { CatHost } from "@/components/nekomimi/CatHost";
 import { hostCaption, hostEmotion } from "@/components/nekomimi/emotion";
 import { GuessCard } from "@/components/nekomimi/GuessCard";
-import { chipsFromAsked, type AnswerChipData } from "@/components/nekomimi/history";
+import { useAnswerTranscript } from "@/components/nekomimi/history";
 import { QuestionCard } from "@/components/nekomimi/QuestionCard";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -17,14 +17,13 @@ import type { NekomimiState } from "@/types/game";
 /** Interactive round: the cat asks, the player answers, then a portrait guess. */
 export function NekomimiPage() {
   const [seed, setSeed] = createSignal("");
-  const [history, setHistory] = createSignal<AnswerChipData[]>([]);
   const [sulking, setSulking] = createSignal(false);
-  const [seenSession, setSeenSession] = createSignal<string | null>(null);
   const sessionId = useSessionId();
   const showPool = useShowPool();
   const round = useNekomimiQuery(sessionId);
   const mutations = useNekomimiMutations();
   const state = (): NekomimiState | undefined => round.data;
+  const transcript = useAnswerTranscript(state, sessionId);
   const busy = () => mutations.start.isPending || mutations.answer.isPending || mutations.guess.isPending;
   const tip = useWaitingTip(busy);
   const id = () => state()?.session_id ?? sessionId() ?? "";
@@ -46,21 +45,8 @@ export function NekomimiPage() {
   const line = () => (busy() ? tip() || hostCaption("thinking") : hostCaption(emotion()));
 
   createEffect(() => {
-    const current = state();
-    const sid = current?.session_id;
-    if (!sid || sid === seenSession()) return;
-    setSeenSession(sid);
-    setHistory(chipsFromAsked(current?.seed, current?.asked));
-    setSulking(false);
-  });
-
-  createEffect(() => {
     if (state()?.stage === "asking" && state()?.question?.qid) setSulking(false);
   });
-
-  const remember = (label: string, question: string) => {
-    setHistory((chips) => [...chips, { id: `${chips.length}-${label}`, label, question }]);
-  };
 
   return (
     <div class={play() ? "lg:grid lg:grid-cols-[11rem_minmax(0,1fr)] lg:items-start lg:gap-6" : "mx-auto max-w-[720px]"}>
@@ -101,15 +87,22 @@ export function NekomimiPage() {
               candidatesAlive={state()?.candidates_alive ?? 0}
               laya={Boolean(state()?.laya)}
               top={state()?.top ?? []}
-              history={history()}
+              history={transcript.chips()}
               showPool={showPool()}
               busy={busy()}
               onTogglePool={() => prefsStore.getState().setShowPool(!showPool())}
               onAnswer={(answer, detail, label) => {
-                setSulking(false);
-                const question = state()?.question?.text ?? "";
-                remember(label || answer, question);
-                mutations.answer.mutate({ sessionId: id(), answer, detail });
+                const question = state()?.question;
+                const sid = id();
+                mutations.answer.mutate(
+                  { sessionId: sid, answer, detail },
+                  {
+                    onSuccess: () => {
+                      setSulking(false);
+                      transcript.commitAnswer(sid, question, answer, detail, label);
+                    },
+                  },
+                );
               }}
             />
           </Card>
@@ -122,12 +115,20 @@ export function NekomimiPage() {
               message={state()?.message}
               busy={busy()}
               onResolve={(correct) => {
-                if (!correct) {
-                  const name = state()?.guess?.name;
-                  if (name) remember(`Not ${name}`, "Rejected guess");
-                  setSulking(true);
-                }
-                mutations.guess.mutate({ sessionId: id(), correct });
+                const name = state()?.guess?.name;
+                const candidateId = state()?.guess?.id;
+                const sid = id();
+                mutations.guess.mutate(
+                  { sessionId: sid, correct },
+                  {
+                    onSuccess: () => {
+                      if (!correct && name) {
+                        transcript.commitRejection(sid, name, candidateId);
+                        setSulking(true);
+                      }
+                    },
+                  },
+                );
               }}
             />
           </Card>
@@ -153,11 +154,11 @@ export function NekomimiPage() {
             <Button
               class="mt-3"
               onClick={() => {
+                const sid = id();
                 sessionStore.getState().clearSession();
+                transcript.reset(sid);
                 setSeed("");
-                setHistory([]);
                 setSulking(false);
-                setSeenSession(null);
               }}
             >
               Play again

@@ -57,6 +57,8 @@ export interface AskedTurn {
   text?: string;
   answer?: string | null;
   detail?: string | null;
+  /** Player-facing choice text. Yes/no turns keep the raw answer word. */
+  label?: string | null;
 }
 
 export interface NekomimiState {

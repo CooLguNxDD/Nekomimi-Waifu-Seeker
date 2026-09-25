@@ -417,74 +417,9 @@ def clue_likelihood(clues: str, blurb: str, tags: list[str] | set[str] | None = 
     return 0.22
 
 
-# Player words that name a bank question. Whole words only: "king" must not
-# fire inside "kingdom", and "god" must not fire inside "goddess".
-# A typed chip is soft evidence (see ``chip_likelihood``). It is not a
-# hard filter and it does not answer a different closed question.
-_CHIP_TRAITS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("species_angel", re.compile(r"\b(?:archangel|angel)\b", re.I)),
-    ("species_demon", re.compile(r"\b(?:demon|devil|oni|vampire)\b", re.I)),
-    ("species_god", re.compile(r"\b(?:goddess|deity|god)\b", re.I)),
-    ("species_robot", re.compile(r"\b(?:android|cyborg|robot)\b", re.I)),
-    ("species_beast", re.compile(r"\b(?:beastkin|kemonomimi|nekomimi)\b", re.I)),
-    ("species_alien", re.compile(r"\b(?:extraterrestrial|alien)\b", re.I)),
-    ("species_undead", re.compile(r"\b(?:revenant|undead|ghost)\b", re.I)),
-    ("job_royalty", re.compile(r"\b(?:princess|prince|queen|king|nobility|noble)\b", re.I)),
-)
-_CHIP_BY_ID = {qid: pattern for qid, pattern in _CHIP_TRAITS}
-
-
-def free_text_trait_hits(text: str) -> list[tuple[str, str]]:
-    """``(question id, "yes"|"no")`` for each chip named in ``text``.
-
-    "not a demon" and "not a princess" are nos. The same short window as
-    visual clues ("no wings") decides that, so a negated chip is not stored
-    as a yes and does not boost the trait the player ruled out.
-    """
-    raw = text or ""
-    found: list[tuple[str, str]] = []
-    for qid, pattern in _CHIP_TRAITS:
-        match = pattern.search(raw)
-        if match is None or qid not in QUESTIONS_BY_ID:
-            continue
-        polarity = "no" if _negated_before(raw, match.start()) else "yes"
-        found.append((qid, polarity))
-    return found
-
-
-def free_text_trait_ids(text: str) -> list[str]:
-    """Bank question ids named by player text, in table order.
-
-    "angel" on the human question is a species chip, not a vote against every
-    human. Unknown words are omitted so they stay search text only. Negated
-    chips are included; ``free_text_trait_hits`` carries the polarity.
-    """
-    return [qid for qid, _polarity in free_text_trait_hits(text)]
-
-
-def chip_residual(text: str) -> str:
-    """``text`` with recognized chip phrases removed.
-
-    "princess in a white dress" still has to score "white dress". Leaving the
-    chip words in the overlap clue would count royalty twice and, on a
-    negation, would boost the trait the player denied.
-    """
-    raw = text or ""
-    spans: list[tuple[int, int]] = []
-    for _qid, pattern in _CHIP_TRAITS:
-        spans.extend((match.start(), match.end()) for match in pattern.finditer(raw))
-    if not spans:
-        return " ".join(raw.split())
-    spans.sort()
-    parts: list[str] = []
-    cursor = 0
-    for start, end in spans:
-        if start < cursor:
-            continue
-        parts.append(raw[cursor:start])
-        cursor = end
-    parts.append(raw[cursor:])
-    return " ".join("".join(parts).split())
+# Soft-chip vocabulary lives in ``chips``. Re-exported so existing
+# ``from .traits import free_text_trait_hits`` call sites keep working.
+from .chips import chip_pattern, chip_residual, free_text_trait_hits, free_text_trait_ids
 
 
 def clue_overlap_likelihood(clues: str, blurb: str) -> float:
@@ -514,7 +449,7 @@ def chip_likelihood(qid: str, blurb: str, tags: list[str] | set[str] | None = No
     question = QUESTIONS_BY_ID.get(qid) or {}
     if set(question.get("tags_true") or ()) & set(tags or ()):
         return 0.82
-    pattern = _CHIP_BY_ID.get(qid)
+    pattern = chip_pattern(qid)
     if pattern is not None and pattern.search(blurb or ""):
         return 0.82
     return 0.5

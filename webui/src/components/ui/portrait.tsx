@@ -1,4 +1,4 @@
-import { createSignal, Show } from "solid-js";
+import { createEffect, createSignal, Show } from "solid-js";
 
 /** Hero plate for a guess or win. Missing or broken URLs become a named silhouette. */
 export function Portrait(props: {
@@ -7,6 +7,12 @@ export function Portrait(props: {
   imageUrl?: string | null;
 }) {
   const [failed, setFailed] = createSignal(false);
+  // One Portrait stays mounted across guesses. A broken URL must not stick.
+  createEffect(() => {
+    void props.imageUrl;
+    void props.name;
+    setFailed(false);
+  });
   const show = () => Boolean(props.imageUrl) && !failed();
   return (
     <div class="overflow-hidden rounded-card border border-border bg-portrait shadow-glow">

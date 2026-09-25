@@ -56,6 +56,7 @@ from .session import (
     MAX_TURNS,
     Candidate,
     GuessSession,
+    answer_label,
     new_session,
     popularity_prior,
 )
@@ -68,12 +69,9 @@ from .traits import (
     QUESTIONS_BY_ID,
     appearance_question_ids,
     chip_likelihood,
-    chip_residual,
     clue_likelihood,
     clue_overlap_likelihood,
     clue_question,
-    free_text_trait_hits,
-    free_text_trait_ids,
     is_choice,
     make_dynamic,
     noul_criteria,
@@ -82,6 +80,7 @@ from .traits import (
     visual_search_phrases,
     yesno_visual_likelihood,
 )
+from .chips import chip_residual, free_text_trait_hits, free_text_trait_ids
 from .traits import _clue_requirements
 
 # The medium question's id. A known medium is a hard fact (``MEDIUM_ACCEPTS``):
@@ -1776,7 +1775,15 @@ def state_payload(sess: GuessSession) -> dict[str, Any]:
         "laya_available": laya_client.available(),
         "constraints": sess.constraints,
         "asked": [
-            {"qid": a["qid"], "text": a["text"], "answer": a["answer"], "detail": a["detail"]}
+            {
+                "qid": a["qid"],
+                "text": a["text"],
+                "answer": a["answer"],
+                "detail": a["detail"],
+                # Choice answers are stored as option keys. The label is what
+                # the player picked, so a refresh can rebuild the chip trail.
+                "label": answer_label(a) or None,
+            }
             for a in sess.asked
         ],
         "candidates_alive": len(sess.alive_candidates()),
