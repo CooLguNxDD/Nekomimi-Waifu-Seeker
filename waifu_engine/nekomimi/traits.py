@@ -417,6 +417,70 @@ def clue_likelihood(clues: str, blurb: str, tags: list[str] | set[str] | None = 
     return 0.22
 
 
+# Player words that name a bank question. Whole words only: "king" must not
+# fire inside "kingdom", and "god" must not fire inside "goddess".
+# A typed chip is soft evidence (see ``chip_likelihood``). It is not a
+# hard filter and it does not answer a different closed question.
+_CHIP_TRAITS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("species_angel", re.compile(r"\b(?:archangel|angel)\b", re.I)),
+    ("species_demon", re.compile(r"\b(?:demon|devil|oni|vampire)\b", re.I)),
+    ("species_god", re.compile(r"\b(?:goddess|deity|god)\b", re.I)),
+    ("species_robot", re.compile(r"\b(?:android|cyborg|robot)\b", re.I)),
+    ("species_beast", re.compile(r"\b(?:beastkin|kemonomimi|nekomimi)\b", re.I)),
+    ("species_alien", re.compile(r"\b(?:extraterrestrial|alien)\b", re.I)),
+    ("species_undead", re.compile(r"\b(?:revenant|undead|ghost)\b", re.I)),
+    ("job_royalty", re.compile(r"\b(?:princess|prince|queen|king|nobility|noble)\b", re.I)),
+)
+_CHIP_BY_ID = {qid: pattern for qid, pattern in _CHIP_TRAITS}
+
+
+def free_text_trait_ids(text: str) -> list[str]:
+    """Bank question ids named by player text, in table order.
+
+    "angel" on the human question is a species chip, not a vote against every
+    human. Unknown words are omitted so they stay search text only.
+    """
+    raw = text or ""
+    found: list[str] = []
+    for qid, pattern in _CHIP_TRAITS:
+        if qid in QUESTIONS_BY_ID and pattern.search(raw):
+            found.append(qid)
+    return found
+
+
+def clue_overlap_likelihood(clues: str, blurb: str) -> float:
+    """P(yes) from shared words, kept inside the heuristic band.
+
+    A chip like "white dress" has no bank trait. Mentioning it should nudge a
+    blurb that says the same words. A miss stays near a half: the old path
+    applied a noul of 0 and floored the rest of the pool.
+    """
+    words = list(dict.fromkeys(re.findall(r"[a-z]{4,}", (clues or "").lower())))
+    if not words:
+        return 0.5
+    blob = (blurb or "").lower()
+    hits = sum(1 for word in words if re.search(rf"\b{re.escape(word)}\b", blob))
+    if hits == 0:
+        return 0.45
+    return min(0.6, 0.45 + 0.15 * (hits / len(words)))
+
+
+def chip_likelihood(qid: str, blurb: str, tags: list[str] | set[str] | None = None) -> float:
+    """P(yes) for one typed chip. A miss stays at one half.
+
+    A free-text "yes" used to take Laya's noul even when that noul was ~0 for
+    the whole pool ("angel", "white dress"). One unmatched word then floored
+    every candidate who still fit the earlier facts. Hits rise; misses do not.
+    """
+    question = QUESTIONS_BY_ID.get(qid) or {}
+    if set(question.get("tags_true") or ()) & set(tags or ()):
+        return 0.82
+    pattern = _CHIP_BY_ID.get(qid)
+    if pattern is not None and pattern.search(blurb or ""):
+        return 0.82
+    return 0.5
+
+
 def yesno_visual_likelihood(
     tags_true: list[str] | None, blurb: str, tags: list[str] | set[str] | None = None,
 ) -> float | None:

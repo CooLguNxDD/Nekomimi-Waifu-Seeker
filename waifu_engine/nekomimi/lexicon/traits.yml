@@ -86,6 +86,11 @@ traits:
       - robot
       - cyborg
       - artificial intelligence
+  - id: angel
+    group: species
+    markers:
+      - archangel
+      - angel
   - id: demon
     group: species
     markers:
