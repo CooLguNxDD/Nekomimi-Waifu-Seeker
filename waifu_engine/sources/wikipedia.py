@@ -191,7 +191,8 @@ def _to_candidate(page: dict[str, Any]) -> dict[str, Any] | None:
         "medium": medium,
         "blurb": extract[:900] or f"{name}.",
         "tags": tags,
-        "image_url": (page.get("thumbnail") or {}).get("source"),
+        "image_url": (page.get("thumbnail") or {}).get("source")
+        or (page.get("original") or {}).get("source"),
         "source_url": f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}",
         "popularity": _pageviews(page),
         "source": "wikipedia",
@@ -220,7 +221,7 @@ def search_characters(query: str, limit: int = 8) -> list[dict[str, Any]]:
             "exintro": "1",
             "explaintext": "1",
             "exlimit": "max",
-            "piprop": "thumbnail",
+            "piprop": "thumbnail|original",
             "pithumbsize": "400",
             "clshow": "!hidden",
             "cllimit": "50",
@@ -270,7 +271,7 @@ def pages_by_title(titles: list[str]) -> list[dict[str, Any]]:
                 # title only, and the rest come back bare -- which silently
                 # dropped Hatsune Miku and Pikachu from the catalog.
                 "exlimit": "max",
-                "piprop": "thumbnail",
+                "piprop": "thumbnail|original",
                 "pithumbsize": "400",
                 "clshow": "!hidden",
                 "cllimit": "max",

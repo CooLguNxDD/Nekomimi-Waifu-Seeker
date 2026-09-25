@@ -1,4 +1,5 @@
 import { createEffect, createSignal, Show } from "solid-js";
+import { portraitFailedAfterIdentityChange, portraitShowsImage } from "@/components/ui/portraitState";
 
 /** Hero plate for a guess or win. Missing or broken URLs become a named silhouette. */
 export function Portrait(props: {
@@ -11,9 +12,9 @@ export function Portrait(props: {
   createEffect(() => {
     void props.imageUrl;
     void props.name;
-    setFailed(false);
+    setFailed(portraitFailedAfterIdentityChange());
   });
-  const show = () => Boolean(props.imageUrl) && !failed();
+  const show = () => portraitShowsImage(props.imageUrl, failed());
   return (
     <div class="overflow-hidden rounded-card border border-border bg-portrait shadow-glow">
       <Show
@@ -40,7 +41,7 @@ export function Portrait(props: {
           alt={props.name}
           loading="lazy"
           referrerPolicy="no-referrer"
-          class="mx-auto block max-h-96 w-full object-contain"
+          class="mx-auto block max-h-96 w-full bg-portrait object-contain"
           onError={() => setFailed(true)}
         />
       </Show>

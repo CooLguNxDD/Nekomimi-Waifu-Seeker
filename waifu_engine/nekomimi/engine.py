@@ -1337,8 +1337,22 @@ def _question_payload(sess: GuessSession, question: dict[str, Any]) -> dict[str,
     return out
 
 
+def _fill_portraits(cands: list[Candidate]) -> None:
+    """Resolve a public image for shown candidates that still have none.
+
+    Search often stored the Wikipedia or index row before AniList's portrait
+    existed on that object. The cat placeholder is what the page draws for a
+    null URL, so the guess and the top list ask once before they are sent.
+    """
+    from ..sources.portraits import fill_portraits
+
+    fill_portraits(cands, limit=4)
+
+
 def _top_payload(sess: GuessSession, n: int = 3) -> list[dict[str, Any]]:
-    return [c.public(p) for c, p in sess.posterior()[:n]]
+    ranked = sess.posterior()[:n]
+    _fill_portraits([c for c, _p in ranked])
+    return [c.public(p) for c, p in ranked]
 
 
 def _alias_split_blocks_guess(sess: GuessSession) -> bool:
@@ -1372,6 +1386,7 @@ def _guess_payload(sess: GuessSession) -> dict[str, Any]:
             "top": [],
         }
     cand, prob = ranked[0]
+    _fill_portraits([cand])
     sess.stage = "guessing"
     sess.pending_guess = cand.id
     sess.guesses_made += 1
@@ -1805,11 +1820,13 @@ def state_payload(sess: GuessSession) -> dict[str, Any]:
         cand = sess.by_id(sess.pending_guess)
         if cand is not None:
             prob = next((p for c, p in sess.posterior() if c.id == cand.id), 0.0)
+            _fill_portraits([cand])
             payload["guess"] = cand.public(prob)
             payload["guess_number"] = sess.guesses_made
     elif sess.stage == "done" and sess.winner:
         cand = sess.by_id(sess.winner)
         if cand is not None:
+            _fill_portraits([cand])
             payload["winner"] = cand.public(1.0)
             payload["correct"] = True
             payload["turns"] = sess.turn

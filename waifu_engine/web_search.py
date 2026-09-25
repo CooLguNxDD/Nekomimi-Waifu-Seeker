@@ -1128,11 +1128,17 @@ def search_characters_multiround(
     return out, logs
 
 
-def fetch_image_url(query: str) -> str | None:
+def fetch_image_url(query: str, extra: str = " anime character") -> str | None:
+    """First non-SVG image hit for ``query``.
+
+    ``extra`` defaults to " anime character" so the one-shot attach path
+    stays as it was. Portrait backfill passes "" and puts the series in
+    ``query`` itself, because a game character is not an anime result.
+    """
     try:
         DDGS = _ddgs()
         with DDGS() as ddgs:
-            for item in ddgs.images(f"{query} anime character", max_results=6):
+            for item in ddgs.images(f"{query}{extra}", max_results=6):
                 url = (item.get("image") or item.get("url") or "").strip()
                 if url and not url.lower().endswith(".svg"):
                     return url
