@@ -140,7 +140,7 @@ def test_set_maps_keep_the_old_membership():
 def test_trait_patterns_come_from_the_lexicon_in_order():
     """Mined slugs stay in the old order, and wings stay body-wing markers."""
     assert [slug for slug, _ in TRAIT_PATTERNS][:2] == ["female", "male"]
-    assert len(TRAIT_PATTERNS) == 42
+    assert len(TRAIT_PATTERNS) == 43
     wings = dict(TRAIT_PATTERNS)["wings"]
     assert wings == ("angel wings", "feathered wings")
     assert web_search.TRAIT_PATTERNS == TRAIT_PATTERNS

@@ -67,8 +67,13 @@ from .traits import (
     QUESTION_BANK,
     QUESTIONS_BY_ID,
     appearance_question_ids,
+    chip_likelihood,
+    chip_residual,
     clue_likelihood,
+    clue_overlap_likelihood,
     clue_question,
+    free_text_trait_hits,
+    free_text_trait_ids,
     is_choice,
     make_dynamic,
     noul_criteria,
@@ -77,6 +82,7 @@ from .traits import (
     visual_search_phrases,
     yesno_visual_likelihood,
 )
+from .traits import _clue_requirements
 
 # The medium question's id. A known medium is a hard fact (``MEDIUM_ACCEPTS``):
 # candidates of a known, non-accepted medium are removed outright. "other"
@@ -1018,6 +1024,8 @@ def _rescore_candidates(sess: GuessSession) -> None:
 
     The caller holds the session lock. Only known medium contradictions and
     rejected guesses remove identities; uncertain evidence must be recoverable.
+    Typed chips and free-text clues never take a raw noul, so one unmatched
+    word cannot floor the pool.
     A visual clue the profile clearly misses is a strong down-rank, not a
     removal, so a thin blurb can still recover on a later answer. Alias rows
     are one identity before any of that is added up.
@@ -1044,6 +1052,30 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 dist = (known.get(c.id) or sess.choice_cache.get((c.id, qid))
                         or _tag_choice(question, c))
                 c.logodds += math.log(min(0.98, max(0.02, dist.get(answer, 0.0))))
+            continue
+        # A typed chip is a nudge, not a model vote. Laya's noul on the raw
+        # words ("angel", "white dress") came back near 0 for the whole pool
+        # and floored everyone the earlier facts still fit.
+        if question.get("soft_chip"):
+            for c in live:
+                p = chip_likelihood(question["id"], c.blurb, c.tags)
+                # "not a demon" is stored as no. Invert so the named trait
+                # falls, and a profile that simply lacks it stays near a half.
+                if answer != "yes":
+                    p = 1.0 - p
+                c.logodds += math.log(min(0.98, max(0.02, p)))
+            continue
+        # Free-text clues are not a Laya vote. A noul of ~0 on "angel" or
+        # "white dress" floored every candidate the earlier facts still fit.
+        # Visual combinations still use the profile likelihood; anything else
+        # stays in the heuristic band.
+        if question.get("clues"):
+            for c in live:
+                visual = _profile_likelihood(question, c)
+                if visual is None:
+                    visual = clue_overlap_likelihood(question["clues"], c.blurb)
+                likelihood = visual if answer == "yes" else 1.0 - visual
+                c.logodds += math.log(min(0.98, max(0.02, likelihood)))
             continue
         missing = [c for c in live if (c.id, qid) not in sess.match_cache]
         probs = _match_probabilities(missing, question)
@@ -1546,12 +1578,61 @@ def _advance(sess: GuessSession) -> dict[str, Any]:
     return _emit_asking(sess, question)
 
 
+def _coerce_free_answer(current: dict[str, Any], answer: str, detail: str) -> tuple[str, str]:
+    """Return ``(answer, detail)``. An empty answer means "reject".
+
+    "angel" is not a yes/no key on "Is your character human?". Rejecting it
+    handed the client an error payload with no pool. A known species word or
+    a phrase becomes a detail and the closed question stays unanswered. A
+    stray token such as "maybe" is still rejected.
+    """
+    answer = (answer or "").strip().lower()
+    detail = (detail or "").strip()
+    if answer in valid_answers(current):
+        return answer, detail
+    # A phrase or a known species/job word is a detail. A stray token such as
+    # "maybe", or "yes" on a choice question, is still a bad answer.
+    if not answer or not (free_text_trait_ids(answer) or any(ch in answer for ch in " ,")):
+        return "", detail
+    merged = " ".join(part for part in (detail, answer) if part)
+    return "detail", merged[:300]
+
+
+def _score_free_text(sess: GuessSession, text: str, qid: str) -> None:
+    """Record a typed clue as visual evidence plus soft trait chips.
+
+    The whole sentence used to be one ``yes`` clue. Laya then had to accept
+    every chip at once, and a miss on "white dress" or "angel" floored
+    candidates who still matched the rest. Unrecognised words stay search
+    text: they are already on ``constraints``.
+    """
+    text = (text or "").strip()
+    if not text:
+        return
+    hits = free_text_trait_hits(text)
+    # Visual traits still use the full sentence ("pink hair, princess").
+    # Otherwise score the words that are not chips: "princess in a white
+    # dress" used to keep only royalty and drop "white dress".
+    if _clue_requirements(text):
+        score_candidates(sess, clue_question(qid, text), "yes")
+    else:
+        leftover = chip_residual(text) if hits else text
+        if leftover.strip():
+            score_candidates(sess, clue_question(qid, leftover), "yes")
+    for trait_id, polarity in hits:
+        if trait_id in sess.evidence:
+            continue
+        question = dict(QUESTIONS_BY_ID[trait_id])
+        question["soft_chip"] = True
+        score_candidates(sess, question, polarity)
+
+
 @timing.traced("start")
 def start(seed: str = "") -> dict[str, Any]:
     sess = new_session(seed)
     if seed:
         sess.constraints.append(seed)
-        score_candidates(sess, clue_question("clue_seed", seed), "yes")
+        _score_free_text(sess, seed, "clue_seed")
     refresh_candidates(sess, limit=16, initial=True)
     payload = _advance(sess)
     payload["seed"] = sess.seed
@@ -1563,13 +1644,13 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
     if sess.stage != "asking" or not sess.asked:
         return {"error": "no question is pending", "session_id": sess.id, "stage": sess.stage}
     current = sess.asked[-1]
-    answer = (answer or "").strip().lower()
-    allowed = valid_answers(current)
-    if answer not in allowed:
+    answer, detail = _coerce_free_answer(current, answer, detail)
+    if not answer:
+        allowed = valid_answers(current)
         return {"error": f"answer must be one of {sorted(allowed)}", "session_id": sess.id}
 
     current["answer"] = answer
-    current["detail"] = detail.strip() or None
+    current["detail"] = detail or None
 
     question = {
         "id": current["qid"],
@@ -1602,7 +1683,7 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
 
     score_candidates(sess, question, answer)
     if current["detail"]:
-        score_candidates(sess, clue_question(f"clue_{sess.turn}", current["detail"]), "yes")
+        _score_free_text(sess, current["detail"], f"clue_{sess.turn}")
 
     # Every answer opens a new search branch. Discover and replay evidence
     # before choosing the next question or declaring a winner.
