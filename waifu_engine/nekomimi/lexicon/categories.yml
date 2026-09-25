@@ -1,6 +1,8 @@
 # Category policy sets. Skip-on-yes and pin order stay in engine.py.
-# series_appearance flags mark separate look questions; hair_color is prepended
-# by the engine because appearance_question_ids() already pins it from the seed.
+# series_appearance flags mark the angel kit (halo, wings, horns). hair_color
+# is prepended by the loader. The engine pins that kit after a series lock
+# only when the player already named it. series_split flags are rare looks
+# the engine pins when they divide the locked cast.
 # popular titles feed sources.popular_characters. Runtime never reads catalog.json.
 categories:
   medium: { broad: true }
@@ -11,6 +13,10 @@ categories:
   look_halo: { series_appearance: true }
   look_wings: { series_appearance: true }
   look_horns: { series_appearance: true }
+  look_prosthetic: { series_split: true }
+  look_ears: { series_split: true }
+  look_eyepatch: { series_split: true }
+  look_tail: { series_split: true }
 popular:
   game:
     - "Category:Female characters in video games"

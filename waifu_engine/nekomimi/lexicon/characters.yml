@@ -26,6 +26,20 @@ identities:
       - Diana Prince
       - Diana of Themyscira
       - Princess Diana of Themyscira
+  - id: batman
+    names:
+      - Batman
+      - Bruce Wayne
+      - Absolute Batman
+  - id: monkey-d-luffy
+    names:
+      - Monkey D. Luffy
+      - Monkey D Luffy
+      - Luffy
+  - id: trafalgar-law
+    names:
+      - Trafalgar Law
+      - Trafalgar D. Water Law
 
 # phrases: player text that names the work (whole phrase, longest wins).
 # names: title characters. Supporting cast must not outrank these when the
@@ -55,6 +69,34 @@ headliners:
       - diana of themyscira
     names:
       - Wonder Woman
+  - franchise: Fullmetal Alchemist
+    phrases:
+      - fullmetal alchemist brotherhood
+      - fullmetal alchemist
+      - full metal alchemist
+    names:
+      - Edward Elric
+  - franchise: Batman
+    phrases:
+      - bruce wayne
+      - batman
+    names:
+      - Batman
+  - franchise: Spice and Wolf
+    phrases:
+      - ookami to koushinryou
+      - ookami to koshinryo
+      - ookami to ningen
+      - "spice & wolf"
+      - spice and wolf
+      - spice wolf
+    names:
+      - Holo
+  - franchise: One Piece
+    phrases:
+      - one piece
+    names:
+      - Monkey D. Luffy
 
 # Exact page titles that are a work, a species, or a group. Guessing filters
 # these even when the blurb never says "list of".
@@ -64,3 +106,4 @@ non_characters:
   - Angels
   - Final Fantasy
   - Final Fantasy VII
+  - Spice and Wolf

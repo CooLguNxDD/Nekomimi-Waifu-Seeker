@@ -50,6 +50,7 @@ from .lexicon import BROAD_CATEGORIES as _BROAD_CATEGORIES
 from .lexicon import EXACT_ALIASES as _EXACT_ALIASES
 from .lexicon import HAIR_CATEGORIES as _HAIR_CATEGORIES
 from .lexicon import SERIES_APPEARANCE as _SERIES_APPEARANCE
+from .lexicon import SERIES_SPLIT as _SERIES_SPLIT
 from .lexicon import TYPED_ALIASES as _FRANCHISE_ALIASES
 from .session import (
     MAX_GUESSES,
@@ -522,16 +523,84 @@ def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
     return out
 
 
-# Appearance pin order: lexicon/categories.yml (hair_color, then the
-# series_appearance flags). ``_pinned_question_ids`` still decides when.
+# Appearance pin order: lexicon/categories.yml. hair_color plus the
+# series_appearance flags (the angel kit). ``_pinned_question_ids`` still
+# decides when. series_split categories become question ids below.
+_ANGEL_KIT = frozenset(qid for qid in _SERIES_APPEARANCE if qid != "hair_color")
+# A same-work runner below this mass is an extra, not a near-twin. Deferring
+# a settled guess for that extra spent turns the leader had already earned.
+_NEAR_TWIN_MASS = 0.10
+
+
+def _series_split_qids() -> tuple[str, ...]:
+    """Bank question ids for ``series_split`` categories, in lexicon order.
+
+    ``look_ears`` is the category and ``look_animal_ears`` is the question.
+    Pinning the category name would never match the bank.
+    """
+    found: list[str] = []
+    for cat in _SERIES_SPLIT:
+        for question in QUESTION_BANK:
+            if question["id"] in found:
+                continue
+            if question["category"] == cat or question["id"] == cat:
+                found.append(question["id"])
+                break
+    return tuple(found)
+
+
+_SERIES_SPLIT_QIDS = _series_split_qids()
+
+
+def _candidate_has_trait(question: dict[str, Any], cand: Candidate) -> bool:
+    """Whether ``cand`` shows one of ``question``'s yes-tags.
+
+    Tags are checked first. A blurb that only says "automail" or "wolf ears"
+    still counts: those rows often never received the mined slug as a tag,
+    and a silent side is not a confirmed "no" until the question is asked.
+    """
+    true = set(question.get("tags_true") or [])
+    if not true:
+        return False
+    if true & set(cand.tags):
+        return True
+    blob = f"{cand.name} {cand.blurb}"
+    return bool(true & set(web_search.mine_trait_slugs(blob)))
+
+
+def _split_look_ids(sess: GuessSession) -> list[str]:
+    """Rare-look questions that divide the locked franchise's living cast.
+
+    Halo, wings and horns used to be pinned on every series lock and burned
+    the turns that would have asked a prosthetic or animal ears. A look
+    nobody in that cast differs on is left to information gain.
+    """
+    franchise = _confirmed_series(sess)
+    if not franchise:
+        return []
+    cast = [c for c in sess.alive_candidates() if _in_franchise(c, franchise)]
+    if len(cast) < 2:
+        return []
+    out: list[str] = []
+    for qid in _SERIES_SPLIT_QIDS:
+        question = QUESTIONS_BY_ID.get(qid)
+        if question is None:
+            continue
+        present = sum(1 for cand in cast if _candidate_has_trait(question, cand))
+        if 0 < present < len(cast):
+            out.append(qid)
+    return out
 
 
 def _pinned_question_ids(sess: GuessSession) -> list[str]:
-    """Appearance questions the seed named, plus the rest after a series lock.
+    """Appearance questions the seed named, plus cast-splitting looks after a series lock.
 
     Information gain never asked hair colour or halo: every Trinity student
     shares school, uniform and teen, and halo was buried in one horns/wings
     question. The traits the player already typed have to be offered early.
+    The angel kit is not forced again once the series is known unless that
+    text already named it. A prosthetic or animal ears that splits the cast
+    is pinned instead, or it loses to the kit and is never asked.
     """
     ids: list[str] = []
     for text in _free_text(sess):
@@ -540,6 +609,11 @@ def _pinned_question_ids(sess: GuessSession) -> list[str]:
                 ids.append(qid)
     if _confirmed_series(sess):
         for qid in _SERIES_APPEARANCE:
+            if qid in _ANGEL_KIT:
+                continue
+            if qid not in ids:
+                ids.append(qid)
+        for qid in _split_look_ids(sess):
             if qid not in ids:
                 ids.append(qid)
     return ids
@@ -1570,8 +1644,42 @@ def _emit_asking(sess: GuessSession, question: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _near_twin_question(sess: GuessSession) -> dict[str, Any] | None:
+    """An unasked rare look that splits the top two same-work candidates.
+
+    Heinkel, Myuri and Mihawk were guessed while a prosthetic, animal ears
+    or an eyepatch was still sitting in the bank. Recovery only runs after a
+    wrong guess, and its poles require both rows to carry an explicit tag.
+    A rare look separates when exactly one of the two shows it. The turn cap
+    still guesses: deferring there would hide the best name we have.
+    """
+    if sess.turn >= MAX_TURNS:
+        return None
+    ranked = sess.posterior()
+    if len(ranked) < 2 or ranked[1][1] < _NEAR_TWIN_MASS:
+        return None
+    leader, runner = ranked[0][0], ranked[1][0]
+    if not _same_work(leader, runner):
+        return None
+    asked = sess.asked_ids()
+    for qid in _SERIES_SPLIT_QIDS:
+        if qid in asked:
+            continue
+        question = QUESTIONS_BY_ID.get(qid)
+        if question is None:
+            continue
+        if _candidate_has_trait(question, leader) != _candidate_has_trait(question, runner):
+            return question
+    return None
+
+
 def _advance(sess: GuessSession) -> dict[str, Any]:
-    """Emit the next question, or a guess when the evidence is strong enough."""
+    """Emit the next question, or a guess when the evidence is strong enough.
+
+    A same-work near-twin with an unasked rare look is asked that look
+    instead of committing. Alias-split still refuses the guess and keeps
+    the information-gain question: those two rows are one person.
+    """
     if sess.turn < MAX_TURNS:
         recovery = _recovery_question(sess)
         if recovery is not None:
@@ -1585,6 +1693,11 @@ def _advance(sess: GuessSession) -> dict[str, Any]:
     # that, so a merge that just succeeded is allowed to commit.
     should = _should_guess(sess, laya_answers)
     blocked = bool(question) and _alias_split_blocks_guess(sess) and sess.turn < MAX_TURNS
+    if should and not blocked and sess.turn < MAX_TURNS:
+        twin = _near_twin_question(sess)
+        if twin is not None:
+            timing.note(defer=twin["id"])
+            return _emit_asking(sess, twin)
     if (should or not question) and not blocked:
         timing.note(guess=True)
         return _guess_payload(sess)

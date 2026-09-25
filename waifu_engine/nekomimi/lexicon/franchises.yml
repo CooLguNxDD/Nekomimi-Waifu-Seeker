@@ -52,6 +52,12 @@ markers:
   - { phrase: tokyo revengers, label: Tokyo Revengers }
   - { phrase: black clover, label: Black Clover }
   - { phrase: fullmetal alchemist, label: Fullmetal Alchemist }
+  - { phrase: ookami to koushinryou, label: Spice and Wolf }
+  - { phrase: ookami to koshinryo, label: Spice and Wolf }
+  - { phrase: ookami to ningen, label: Spice and Wolf }
+  - { phrase: "spice & wolf", label: Spice and Wolf }
+  - { phrase: spice and wolf, label: Spice and Wolf }
+  - { phrase: spice wolf, label: Spice and Wolf }
   - { phrase: my hero academia, label: My Hero Academia }
   - { phrase: assassination classroom, label: Assassination Classroom }
   - { phrase: food wars, label: Food Wars }
@@ -69,6 +75,12 @@ typed_aliases:
   - { phrase: spider man, label: "Spider-Man" }
   - { phrase: the simpsons, label: The Simpsons }
   - { phrase: simpsons, label: The Simpsons }
+  - { phrase: ookami to koushinryou, label: Spice and Wolf }
+  - { phrase: ookami to koshinryo, label: Spice and Wolf }
+  - { phrase: ookami to ningen, label: Spice and Wolf }
+  - { phrase: "spice & wolf", label: Spice and Wolf }
+  - { phrase: spice and wolf, label: Spice and Wolf }
+  - { phrase: spice wolf, label: Spice and Wolf }
   - { phrase: mario, label: Super Mario, exact: true }
 
 # Exact normalized string match in web_search.series_is_crumb.
@@ -115,6 +127,7 @@ name_block:
   - all time
   - honkai
   - fullmetal alchemist
+  - spice and wolf
   - frieren
   - bungou stray dogs
   - mob psycho
