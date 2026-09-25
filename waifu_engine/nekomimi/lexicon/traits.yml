@@ -261,3 +261,127 @@ traits:
       - school
       - classroom
       - academy
+  - id: eyepatch
+    group: look_eyepatch
+    markers:
+      - eyepatch
+      - eye patch
+  - id: cape
+    group: look_cape
+    markers:
+      - cape
+      - cloak
+      - mantle
+  - id: animal-ears
+    group: look_ears
+    markers:
+      - cat ears
+      - fox ears
+      - animal ears
+  - id: tail
+    group: look_tail
+    markers:
+      - tail
+      - tailed
+  - id: prosthetic
+    group: look_prosthetic
+    markers:
+      - prosthetic
+      - mechanical arm
+      - cybernetic arm
+  - id: staff
+    group: weapon_staff
+    markers:
+      - magic staff
+      - wizard staff
+      - mage staff
+      - wand
+  - id: spear
+    group: weapon_spear
+    markers:
+      - spear
+      - lance
+      - polearm
+  - id: sibling
+    group: bond_sibling
+    markers:
+      - older sister
+      - older brother
+      - younger sister
+      - younger brother
+      - sibling
+  - id: orphan
+    group: bond_orphan
+    markers:
+      - orphan
+      - orphaned
+  - id: twin
+    group: bond_twin
+    markers:
+      - twin sister
+      - twin brother
+      - twin
+  - id: hero-team
+    group: team_hero
+    markers:
+      - hero team
+      - superhero team
+      - sentai
+  - id: military
+    group: team_military
+    markers:
+      - military
+      - soldier of
+      - armed forces
+  - id: elf
+    group: species
+    markers:
+      - elf
+      - elves
+      - elven
+  - id: dragon
+    group: species
+    markers:
+      - dragon
+      - dragonkin
+  - id: isekai-travel
+    group: trope_isekai
+    markers:
+      - isekai
+      - another world
+      - reincarnated
+  - id: amnesia
+    group: trope_amnesia
+    markers:
+      - amnesia
+      - memory loss
+      - lost their memory
+  - id: chosen-one
+    group: trope_chosen
+    markers:
+      - chosen one
+      - the prophecy
+  - id: silent
+    group: voice_silent
+    markers:
+      - mute
+      - rarely speaks
+      - silent protagonist
+  - id: formal
+    group: voice_formal
+    markers:
+      - speaks formally
+      - polite speech
+      - archaic speech
+  - id: instrument
+    group: prop_instrument
+    markers:
+      - guitar
+      - violin
+      - piano
+      - musical instrument
+  - id: vigilante
+    group: role_vigilante
+    markers:
+      - vigilante
+      - masked hero

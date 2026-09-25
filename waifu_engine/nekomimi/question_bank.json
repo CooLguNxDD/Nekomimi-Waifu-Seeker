@@ -1213,6 +1213,216 @@
         "war"
       ],
       "prior": 0.2
+    },
+    {
+      "template": "yesno",
+      "id": "look_eyepatch",
+      "category": "look_eyepatch",
+      "text": "Does your character wear an eyepatch?",
+      "instructions": "Does the character in `candidate` wear an eyepatch?",
+      "criteria_detail": "regularly wear an eyepatch over one eye",
+      "tags_true": ["eyepatch"],
+      "prior": 0.04
+    },
+    {
+      "template": "yesno",
+      "id": "look_cape",
+      "category": "look_cape",
+      "text": "Does your character wear a cape or cloak?",
+      "instructions": "Does the character in `candidate` wear a cape?",
+      "criteria_detail": "usually wear a cape, cloak or mantle",
+      "tags_true": ["cape"],
+      "prior": 0.1
+    },
+    {
+      "template": "yesno",
+      "id": "look_animal_ears",
+      "category": "look_ears",
+      "text": "Does your character have animal ears?",
+      "instructions": "Does the character in `candidate` have animal ears?",
+      "criteria_detail": "have visible animal ears, such as cat ears or fox ears",
+      "tags_true": ["animal-ears"],
+      "prior": 0.08
+    },
+    {
+      "template": "yesno",
+      "id": "look_tail",
+      "category": "look_tail",
+      "text": "Does your character have a tail?",
+      "instructions": "Does the character in `candidate` have a tail?",
+      "criteria_detail": "have an animal or demonic tail",
+      "tags_true": ["tail"],
+      "prior": 0.08
+    },
+    {
+      "template": "yesno",
+      "id": "look_prosthetic",
+      "category": "look_prosthetic",
+      "text": "Does your character have a prosthetic or mechanical limb?",
+      "instructions": "Does the character in `candidate` have a prosthetic limb?",
+      "criteria_detail": "have a prosthetic, mechanical or cybernetic arm or leg",
+      "tags_true": ["prosthetic"],
+      "prior": 0.05
+    },
+    {
+      "template": "yesno",
+      "id": "weapon_staff",
+      "category": "weapon_staff",
+      "text": "Is your character's signature weapon a staff or wand?",
+      "instructions": "Does the character in `candidate` wield a staff?",
+      "criteria_detail": "fight or cast mainly with a staff or wand",
+      "tags_true": ["staff"],
+      "prior": 0.08
+    },
+    {
+      "template": "yesno",
+      "id": "weapon_spear",
+      "category": "weapon_spear",
+      "text": "Is your character's signature weapon a spear or lance?",
+      "instructions": "Does the character in `candidate` wield a spear?",
+      "criteria_detail": "fight mainly with a spear, lance or polearm",
+      "tags_true": ["spear"],
+      "prior": 0.06
+    },
+    {
+      "template": "yesno",
+      "id": "bond_sibling",
+      "category": "bond_sibling",
+      "text": "Does your character have a sibling who also appears in the story?",
+      "instructions": "Does the character in `candidate` have a sibling in the story?",
+      "criteria_detail": "have a brother or sister who is also a character in the work",
+      "tags_true": ["sibling"],
+      "prior": 0.18
+    },
+    {
+      "template": "yesno",
+      "id": "bond_orphan",
+      "category": "bond_orphan",
+      "text": "Is your character an orphan?",
+      "instructions": "Is the character in `candidate` an orphan?",
+      "criteria_detail": "be an orphan, or have lost both parents",
+      "tags_true": ["orphan"],
+      "prior": 0.15
+    },
+    {
+      "template": "yesno",
+      "id": "bond_twin",
+      "category": "bond_twin",
+      "text": "Does your character have a twin?",
+      "instructions": "Does the character in `candidate` have a twin?",
+      "criteria_detail": "have a twin brother or twin sister",
+      "tags_true": ["twin"],
+      "prior": 0.04
+    },
+    {
+      "template": "yesno",
+      "id": "team_hero",
+      "category": "team_hero",
+      "text": "Is your character on a named hero team?",
+      "instructions": "Is the character in `candidate` on a hero team?",
+      "criteria_detail": "belong to a named hero team, superhero group or sentai squad",
+      "tags_true": ["hero-team"],
+      "prior": 0.12
+    },
+    {
+      "template": "yesno",
+      "id": "team_military",
+      "category": "team_military",
+      "text": "Does your character serve in a military or army?",
+      "instructions": "Does the character in `candidate` serve in a military?",
+      "criteria_detail": "serve in an army, navy, military unit or formal armed force",
+      "tags_true": ["military"],
+      "prior": 0.14
+    },
+    {
+      "template": "yesno",
+      "id": "species_elf",
+      "category": "species",
+      "text": "Is your character an elf?",
+      "instructions": "Is the character in `candidate` an elf?",
+      "criteria_detail": "an elf or elven",
+      "tags_true": ["elf"],
+      "prior": 0.05
+    },
+    {
+      "template": "yesno",
+      "id": "species_dragon",
+      "category": "species",
+      "text": "Is your character a dragon, or part dragon?",
+      "instructions": "Is the character in `candidate` a dragon?",
+      "criteria_detail": "a dragon, dragonkin or part-dragon being",
+      "tags_true": ["dragon"],
+      "prior": 0.04
+    },
+    {
+      "template": "yesno",
+      "id": "trope_isekai",
+      "category": "trope_isekai",
+      "text": "Was your character transported to another world?",
+      "instructions": "Was the character in `candidate` transported to another world?",
+      "criteria_detail": "be an isekai protagonist, summoned or reborn in another world",
+      "tags_true": ["isekai-travel"],
+      "prior": 0.08
+    },
+    {
+      "template": "yesno",
+      "id": "trope_amnesia",
+      "category": "trope_amnesia",
+      "text": "Did your character lose their memory?",
+      "instructions": "Did the character in `candidate` lose their memory?",
+      "criteria_detail": "suffer amnesia or a major loss of memory",
+      "tags_true": ["amnesia"],
+      "prior": 0.08
+    },
+    {
+      "template": "yesno",
+      "id": "trope_chosen",
+      "category": "trope_chosen",
+      "text": "Is your character a chosen one?",
+      "instructions": "Is the character in `candidate` a chosen one?",
+      "criteria_detail": "be a chosen one, or the subject of a prophecy",
+      "tags_true": ["chosen-one"],
+      "prior": 0.08
+    },
+    {
+      "template": "yesno",
+      "id": "voice_silent",
+      "category": "voice_silent",
+      "text": "Is your character mostly silent?",
+      "instructions": "Is the character in `candidate` mostly silent?",
+      "criteria_detail": "be mute, or rarely speak",
+      "tags_true": ["silent"],
+      "prior": 0.05
+    },
+    {
+      "template": "yesno",
+      "id": "voice_formal",
+      "category": "voice_formal",
+      "text": "Does your character speak in a very formal or polite way?",
+      "instructions": "Does the character in `candidate` speak formally?",
+      "criteria_detail": "speak in a notably formal, polite or archaic way",
+      "tags_true": ["formal"],
+      "prior": 0.1
+    },
+    {
+      "template": "yesno",
+      "id": "prop_instrument",
+      "category": "prop_instrument",
+      "text": "Does your character play a musical instrument?",
+      "instructions": "Does the character in `candidate` play an instrument?",
+      "criteria_detail": "be known for playing a musical instrument",
+      "tags_true": ["instrument"],
+      "prior": 0.06
+    },
+    {
+      "template": "yesno",
+      "id": "role_vigilante",
+      "category": "role_vigilante",
+      "text": "Is your character a vigilante or masked hero?",
+      "instructions": "Is the character in `candidate` a vigilante?",
+      "criteria_detail": "fight crime as a vigilante or masked hero outside an official force",
+      "tags_true": ["vigilante"],
+      "prior": 0.08
     }
   ]
 }
