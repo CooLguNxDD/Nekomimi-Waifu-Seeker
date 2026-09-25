@@ -93,6 +93,55 @@ def test_detail_field_angel_matches_the_raw_answer(_harsh_laya):
     assert sess.evidence["species_angel"][1] == "yes"
 
 
+def test_mixed_chip_keeps_the_non_chip_words(_harsh_laya):
+    """"princess in a white dress" still ranks a white dress, not only royalty."""
+    dress = {
+        "id": "seam", "name": "Seam", "series": "Crown Tale", "medium": "anime",
+        "blurb": "She wears a white dress and sews costumes for the court.",
+        "tags": ["female", "human"], "popularity": 10,
+    }
+    plain = {
+        "id": "clerk", "name": "Clerk", "series": "Crown Tale", "medium": "anime",
+        "blurb": "She works in a shop and wears a heavy coat.",
+        "tags": ["female", "human"], "popularity": 10,
+    }
+    state = engine.start("princess in a white dress")
+    sess = sess_mod.get_session(state["session_id"])
+    sess.add_candidates([dress, plain, _rows()[0]])
+    engine._rescore_candidates(sess)
+    clues = [q.get("clues") or "" for q, _a in sess.evidence.values()]
+    assert any("dress" in clue for clue in clues)
+    assert sess.evidence["job_royalty"][1] == "yes"
+    by = {c.id: c.logodds for c in sess.alive_candidates()}
+    assert by["seam"] > by["clerk"]
+    assert "aria" in by
+
+
+def test_negated_chips_are_not_yes_evidence(_harsh_laya):
+    """"not a demon" / "not a princess" must not boost those traits."""
+    state = engine.start("not a demon")
+    sess = sess_mod.get_session(state["session_id"])
+    sess.add_candidates([
+        {"id": "mio", "name": "Mio", "series": "Crown Tale", "medium": "anime",
+         "blurb": "She is a knight in the same court.", "tags": ["female"], "popularity": 10},
+        {"id": "imp", "name": "Imp", "series": "Crown Tale", "medium": "anime",
+         "blurb": "She is a demon who hunts in the old city.", "tags": ["demon"], "popularity": 10},
+    ])
+    engine._rescore_candidates(sess)
+    question, answer = sess.evidence["species_demon"]
+    assert answer == "no" and question.get("soft_chip") is True
+    by = {c.id: c.logodds for c in sess.alive_candidates()}
+    assert by["mio"] > by["imp"]
+
+    state = engine.start("not a princess")
+    sess = sess_mod.get_session(state["session_id"])
+    sess.add_candidates(_rows())
+    engine._rescore_candidates(sess)
+    assert sess.evidence["job_royalty"][1] == "no"
+    by = {c.id: c.logodds for c in sess.alive_candidates()}
+    assert by["mio"] > by["aria"]
+
+
 def test_princess_chip_ranks_without_dropping_the_others(_harsh_laya):
     """Royalty is a nudge. Missing "princess" does not zero a pink-haired peer."""
     state = engine.start("pink hair, white dress, princess")

@@ -434,18 +434,57 @@ _CHIP_TRAITS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _CHIP_BY_ID = {qid: pattern for qid, pattern in _CHIP_TRAITS}
 
 
+def free_text_trait_hits(text: str) -> list[tuple[str, str]]:
+    """``(question id, "yes"|"no")`` for each chip named in ``text``.
+
+    "not a demon" and "not a princess" are nos. The same short window as
+    visual clues ("no wings") decides that, so a negated chip is not stored
+    as a yes and does not boost the trait the player ruled out.
+    """
+    raw = text or ""
+    found: list[tuple[str, str]] = []
+    for qid, pattern in _CHIP_TRAITS:
+        match = pattern.search(raw)
+        if match is None or qid not in QUESTIONS_BY_ID:
+            continue
+        polarity = "no" if _negated_before(raw, match.start()) else "yes"
+        found.append((qid, polarity))
+    return found
+
+
 def free_text_trait_ids(text: str) -> list[str]:
     """Bank question ids named by player text, in table order.
 
     "angel" on the human question is a species chip, not a vote against every
-    human. Unknown words are omitted so they stay search text only.
+    human. Unknown words are omitted so they stay search text only. Negated
+    chips are included; ``free_text_trait_hits`` carries the polarity.
+    """
+    return [qid for qid, _polarity in free_text_trait_hits(text)]
+
+
+def chip_residual(text: str) -> str:
+    """``text`` with recognized chip phrases removed.
+
+    "princess in a white dress" still has to score "white dress". Leaving the
+    chip words in the overlap clue would count royalty twice and, on a
+    negation, would boost the trait the player denied.
     """
     raw = text or ""
-    found: list[str] = []
-    for qid, pattern in _CHIP_TRAITS:
-        if qid in QUESTIONS_BY_ID and pattern.search(raw):
-            found.append(qid)
-    return found
+    spans: list[tuple[int, int]] = []
+    for _qid, pattern in _CHIP_TRAITS:
+        spans.extend((match.start(), match.end()) for match in pattern.finditer(raw))
+    if not spans:
+        return " ".join(raw.split())
+    spans.sort()
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        if start < cursor:
+            continue
+        parts.append(raw[cursor:start])
+        cursor = end
+    parts.append(raw[cursor:])
+    return " ".join("".join(parts).split())
 
 
 def clue_overlap_likelihood(clues: str, blurb: str) -> float:

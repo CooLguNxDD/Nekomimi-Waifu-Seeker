@@ -68,9 +68,11 @@ from .traits import (
     QUESTIONS_BY_ID,
     appearance_question_ids,
     chip_likelihood,
+    chip_residual,
     clue_likelihood,
     clue_overlap_likelihood,
     clue_question,
+    free_text_trait_hits,
     free_text_trait_ids,
     is_choice,
     make_dynamic,
@@ -1057,6 +1059,10 @@ def _rescore_candidates(sess: GuessSession) -> None:
         if question.get("soft_chip"):
             for c in live:
                 p = chip_likelihood(question["id"], c.blurb, c.tags)
+                # "not a demon" is stored as no. Invert so the named trait
+                # falls, and a profile that simply lacks it stays near a half.
+                if answer != "yes":
+                    p = 1.0 - p
                 c.logodds += math.log(min(0.98, max(0.02, p)))
             continue
         # Free-text clues are not a Laya vote. A noul of ~0 on "angel" or
@@ -1603,16 +1609,22 @@ def _score_free_text(sess: GuessSession, text: str, qid: str) -> None:
     text = (text or "").strip()
     if not text:
         return
-    # A species word is a soft chip, not a second clue on the same text.
-    # Other sentences still count as overlap so "white dress" can rank.
-    if _clue_requirements(text) or not free_text_trait_ids(text):
+    hits = free_text_trait_hits(text)
+    # Visual traits still use the full sentence ("pink hair, princess").
+    # Otherwise score the words that are not chips: "princess in a white
+    # dress" used to keep only royalty and drop "white dress".
+    if _clue_requirements(text):
         score_candidates(sess, clue_question(qid, text), "yes")
-    for trait_id in free_text_trait_ids(text):
+    else:
+        leftover = chip_residual(text) if hits else text
+        if leftover.strip():
+            score_candidates(sess, clue_question(qid, leftover), "yes")
+    for trait_id, polarity in hits:
         if trait_id in sess.evidence:
             continue
         question = dict(QUESTIONS_BY_ID[trait_id])
         question["soft_chip"] = True
-        score_candidates(sess, question, "yes")
+        score_candidates(sess, question, polarity)
 
 
 @timing.traced("start")
