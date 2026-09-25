@@ -19,6 +19,8 @@ CHIP_TRAITS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("species_beast", re.compile(r"\b(?:beastkin|kemonomimi|nekomimi)\b", re.I)),
     ("species_alien", re.compile(r"\b(?:extraterrestrial|alien)\b", re.I)),
     ("species_undead", re.compile(r"\b(?:revenant|undead|ghost)\b", re.I)),
+    ("species_elf", re.compile(r"\b(?:elves|elven|elf)\b", re.I)),
+    ("species_dragon", re.compile(r"\b(?:dragonkin|dragon)\b", re.I)),
     ("job_royalty", re.compile(r"\b(?:princess|prince|queen|king|nobility|noble)\b", re.I)),
 )
 _CHIP_BY_ID = {qid: pattern for qid, pattern in CHIP_TRAITS}
