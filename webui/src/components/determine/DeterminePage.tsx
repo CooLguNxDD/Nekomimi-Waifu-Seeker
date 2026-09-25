@@ -32,7 +32,7 @@ export function DeterminePage() {
           value={query()}
           onInput={(event) => setQuery(event.currentTarget.value)}
         />
-        <label class="mt-2 flex items-center gap-2 text-sm text-[#c5c8ce]">
+        <label class="mt-2 flex items-center gap-2 text-sm text-ink-soft">
           <input
             type="checkbox"
             checked={fallback()}
@@ -40,7 +40,7 @@ export function DeterminePage() {
           />
           Force keyword fallback (skip Laya)
         </label>
-        <label class="mt-2 flex items-center gap-2 text-sm text-[#c5c8ce]">
+        <label class="mt-2 flex items-center gap-2 text-sm text-ink-soft">
           Rounds
           <Input
             type="number"

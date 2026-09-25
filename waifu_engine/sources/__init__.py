@@ -426,6 +426,9 @@ def find_candidates(
 
     hits: dict[str, int] = {}
     taken_names: list[str] = []
+    # Portraits for people already in the pool. Kept out of ``found`` so they
+    # do not consume the new-candidate limit.
+    carried: list[dict[str, Any]] = []
 
     def take(items: list[dict[str, Any]], source: str = "") -> None:
         """Add hits whose character is new; count them under ``source``.
@@ -442,7 +445,16 @@ def find_candidates(
             keys = name_keys(name)
             # Identity aliases (Diana Prince beside Wonder Woman) stay in the
             # list so the session can absorb their tags. Same spellings drop.
-            if not keys or plain_duplicate(name, excluded) or plain_duplicate(name, taken_names):
+            if not keys or plain_duplicate(name, excluded):
+                # Already in the pool. Still hand the portrait across so a
+                # later source can fill a null image_url on the next absorb.
+                if keys and plain_duplicate(name, excluded) and cand.get("image_url"):
+                    carried.append(cand)
+                continue
+            if plain_duplicate(name, taken_names):
+                from .portraits import donate_image
+
+                donate_image(list(found.values()), cand)
                 continue
             if web_search.is_aggregate_page(
                 name, cand.get("source_url") or "", cand.get("blurb") or ""
@@ -594,6 +606,12 @@ def find_candidates(
             matched_ids = {id(c) for c in matched}
             out = matched + [c for c in out if id(c) not in matched_ids]
     out = out[:limit]
+    # Portrait-only updates ride along after the limit so a known name can
+    # still absorb an image found by a later source.
+    out.extend(carried[:8])
+    from .portraits import fill_portraits
+
+    fill_portraits(out, limit=4)
     with timing.span("fetch.enrich"):
         if web_search._enrich_on() and out:
             web_search._set_state("enrich")

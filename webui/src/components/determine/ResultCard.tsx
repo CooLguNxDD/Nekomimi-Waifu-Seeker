@@ -9,7 +9,7 @@ function Portrait(props: { card: CharacterCard; tall?: boolean }) {
     <Show
       when={props.card.image_url}
       fallback={
-        <div class="flex h-[120px] items-center justify-center text-xs text-[#666]">no image</div>
+        <div class="flex h-[120px] items-center justify-center text-xs text-muted">no image</div>
       }
     >
       <img
@@ -19,8 +19,8 @@ function Portrait(props: { card: CharacterCard; tall?: boolean }) {
         referrerPolicy="no-referrer"
         class={
           props.tall
-            ? "mb-3 block max-h-[360px] w-full rounded-[10px] bg-[#0b0d11] object-contain"
-            : "block h-[120px] w-full bg-[#0b0d11] object-cover"
+            ? "mb-3 block max-h-96 w-full rounded-control bg-portrait object-contain"
+            : "block h-[120px] w-full bg-portrait object-cover"
         }
       />
     </Show>
@@ -46,7 +46,7 @@ export function ResultCard(props: { result: DetermineResult | undefined }) {
             <Portrait card={card()} tall />
             <p>{card().blurb}</p>
             <Show when={card().source_url}>
-              <a class="text-[#9db7ff]" href={card().source_url!} target="_blank" rel="noopener">
+              <a class="focus-ring text-link" href={card().source_url!} target="_blank" rel="noopener">
                 source
               </a>
             </Show>
@@ -75,7 +75,7 @@ export function ResultCard(props: { result: DetermineResult | undefined }) {
               <div class="mt-2 grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3">
                 <For each={props.result?.runners_up ?? []}>
                   {(runner) => (
-                    <article class="overflow-hidden rounded-[10px] border border-border bg-[#12151b]">
+                    <article class="overflow-hidden rounded-control border border-border bg-surface-sunken">
                       <Portrait card={runner} />
                       <p class="p-2 text-xs">
                         <b>{runner.name}</b>

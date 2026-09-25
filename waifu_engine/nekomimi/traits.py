@@ -417,6 +417,44 @@ def clue_likelihood(clues: str, blurb: str, tags: list[str] | set[str] | None = 
     return 0.22
 
 
+# Soft-chip vocabulary lives in ``chips``. Re-exported so existing
+# ``from .traits import free_text_trait_hits`` call sites keep working.
+from .chips import chip_pattern, chip_residual, free_text_trait_hits, free_text_trait_ids
+
+
+def clue_overlap_likelihood(clues: str, blurb: str) -> float:
+    """P(yes) from shared words, kept inside the heuristic band.
+
+    A chip like "white dress" has no bank trait. Mentioning it should nudge a
+    blurb that says the same words. A miss stays near a half: the old path
+    applied a noul of 0 and floored the rest of the pool.
+    """
+    words = list(dict.fromkeys(re.findall(r"[a-z]{4,}", (clues or "").lower())))
+    if not words:
+        return 0.5
+    blob = (blurb or "").lower()
+    hits = sum(1 for word in words if re.search(rf"\b{re.escape(word)}\b", blob))
+    if hits == 0:
+        return 0.45
+    return min(0.6, 0.45 + 0.15 * (hits / len(words)))
+
+
+def chip_likelihood(qid: str, blurb: str, tags: list[str] | set[str] | None = None) -> float:
+    """P(yes) for one typed chip. A miss stays at one half.
+
+    A free-text "yes" used to take Laya's noul even when that noul was ~0 for
+    the whole pool ("angel", "white dress"). One unmatched word then floored
+    every candidate who still fit the earlier facts. Hits rise; misses do not.
+    """
+    question = QUESTIONS_BY_ID.get(qid) or {}
+    if set(question.get("tags_true") or ()) & set(tags or ()):
+        return 0.82
+    pattern = chip_pattern(qid)
+    if pattern is not None and pattern.search(blurb or ""):
+        return 0.82
+    return 0.5
+
+
 def yesno_visual_likelihood(
     tags_true: list[str] | None, blurb: str, tags: list[str] | set[str] | None = None,
 ) -> float | None:

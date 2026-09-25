@@ -21,3 +21,4 @@ export const prefsStore = createStore<PrefsSlice>()(
 export const useSessionId = () => useStore(sessionStore, (s) => s.sessionId);
 export const useFallback = () => useStore(prefsStore, (s) => s.fallback);
 export const useRounds = () => useStore(prefsStore, (s) => s.rounds);
+export const useShowPool = () => useStore(prefsStore, (s) => s.showPool);

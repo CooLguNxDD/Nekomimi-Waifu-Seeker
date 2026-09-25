@@ -211,6 +211,18 @@
     },
     {
       "template": "yesno",
+      "id": "species_angel",
+      "category": "species",
+      "text": "Is your character an angel?",
+      "instructions": "Is the character in `candidate` an angel?",
+      "criteria_detail": "an angel, archangel or other celestial being",
+      "tags_true": [
+        "angel"
+      ],
+      "prior": 0.06
+    },
+    {
+      "template": "yesno",
       "id": "species_robot",
       "category": "species",
       "text": "Is your character a robot, android or AI?",

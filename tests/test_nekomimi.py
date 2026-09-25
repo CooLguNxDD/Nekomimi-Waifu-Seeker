@@ -489,14 +489,15 @@ def test_a_single_unverified_search_result_is_not_enough_to_guess():
         "noul": 0.99, "action": {"act_probability": 0.99}}})
 
 
-def test_free_text_clues_are_evaluated_by_laya(monkeypatch):
+def test_free_text_clues_are_not_a_laya_vote(monkeypatch):
+    """A typed clue is stored, but a harsh noul must not be asked to score it."""
     seen = []
     monkeypatch.setattr(laya_client, "ask", lambda state, questions:
-                        seen.append(state) or {"match": {"noul": 0.8}})
+                        seen.append(state) or {"match": {"noul": 0.0}})
     state = engine.start("Italian plumber")
     s = sess_mod.get_session(state["session_id"])
     assert "clue_seed" in s.evidence
-    assert any(x.get("clues") == "Italian plumber" for x in seen)
+    assert not any(x.get("clues") == "Italian plumber" for x in seen)
 
 
 def test_runtime_never_reads_local_catalog(monkeypatch):
