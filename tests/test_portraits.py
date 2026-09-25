@@ -1,112 +1,101 @@
-"""Portrait backfill: AniList art for a gacha name, and no face from the wrong series."""
+"""Portrait backfill searches by name and series. It does not scrape a wiki page."""
 
 from waifu_engine.sources import portraits
 
 
-HOSHINO = {
-    "name": "Hoshino Takanashi",
-    "series": "Blue Archive The Animation",
-    "image_url": "https://s4.anilist.co/file/anilistcdn/character/large/b264242-PISUyKo5o6xr.png",
-}
-AI = {
-    "name": "Ai Hoshino",
-    "series": "OSHI NO KO",
-    "image_url": "https://s4.anilist.co/file/anilistcdn/character/large/b172759-cccVhJ2fQA92.png",
-}
+HOSHINO_ART = "https://cdn.example/hoshino-blue-archive.png"
+ROSSINA_ART = "https://cdn.example/rossina-endfield.png"
 
 
-def test_blue_archive_hoshino_gets_the_anilist_portrait(monkeypatch):
-    """The guess name is the full name. AniList has the art; Wikipedia does not."""
+def test_portrait_query_names_the_series():
+    """The series is what makes the image search this Hoshino, not another."""
+    assert portraits.portrait_query("Hoshino Takanashi", "Blue Archive") == (
+        "Hoshino Takanashi Blue Archive character"
+    )
+    assert portraits.portrait_query(
+        "Rossina Wulfperl Luppino", "Arknights: Endfield", "game"
+    ) == "Rossina Wulfperl Luppino Arknights: Endfield character"
+    assert portraits.portrait_query("Abby", "", "game") == "Abby game character"
+
+
+def test_missing_image_is_filled_from_the_image_search(monkeypatch):
+    """Guess/win rows with a null URL take the first HTTPS hit for that query."""
     monkeypatch.setenv("WAIFU_PORTRAITS", "1")
+    seen = []
 
-    def search(query, limit=5):
-        assert "Hoshino Takanashi" in query
-        return [HOSHINO]
+    def fetch(query, extra=" anime character"):
+        seen.append((query, extra))
+        if "Rossina" in query:
+            return ROSSINA_ART
+        return HOSHINO_ART
 
-    monkeypatch.setattr("waifu_engine.sources.anilist.search_characters", search)
-    monkeypatch.setattr("waifu_engine.sources.wikipedia.search_characters", lambda *a, **k: [])
-    row = {"name": "Hoshino Takanashi", "series": "Blue Archive", "image_url": None}
-    assert portraits.fill_portraits([row]) == 1
-    assert row["image_url"] == HOSHINO["image_url"]
+    monkeypatch.setattr("waifu_engine.web_search.fetch_image_url", fetch)
+    rows = [
+        {"name": "Hoshino Takanashi", "series": "Blue Archive", "image_url": None},
+        {"name": "Rossina Wulfperl Luppino", "series": "Arknights: Endfield", "image_url": ""},
+    ]
+    assert portraits.fill_portraits(rows) == 2
+    assert rows[0]["image_url"] == HOSHINO_ART
+    assert rows[1]["image_url"] == ROSSINA_ART
+    assert seen[0] == ("Hoshino Takanashi Blue Archive character", "")
+    assert "anime character" not in seen[0][0]
 
 
-def test_a_shared_token_does_not_steal_another_series_face(monkeypatch):
-    """Searching "Hoshino" must not attach Ai Hoshino when the series is Blue Archive."""
+def test_a_bare_given_name_is_not_searched(monkeypatch):
+    """'Hoshino' alone is several people. No series means no image search."""
     monkeypatch.setenv("WAIFU_PORTRAITS", "1")
-    monkeypatch.setattr("waifu_engine.sources.anilist.search_characters", lambda *a, **k: [AI])
-    monkeypatch.setattr("waifu_engine.sources.wikipedia.search_characters", lambda *a, **k: [])
-    monkeypatch.setattr(portraits, "_from_source_page", lambda *a, **k: None)
-    monkeypatch.setattr(portraits, "_from_ddg", lambda *a, **k: None)
-    row = {"name": "Hoshino", "series": "Blue Archive", "image_url": None, "source_url": ""}
+    called = []
+    monkeypatch.setattr(
+        "waifu_engine.web_search.fetch_image_url",
+        lambda *a, **k: called.append(1) or HOSHINO_ART,
+    )
+    row = {"name": "Hoshino", "series": "", "image_url": None}
     assert portraits.fill_portraits([row]) == 0
+    assert called == []
     assert row["image_url"] is None
 
 
-def test_wikipedia_thumbnail_fills_when_anilist_has_nobody(monkeypatch):
-    """Abby-style pages: no AniList row, but the Wikipedia page image is usable."""
+def test_an_existing_https_portrait_is_not_replaced(monkeypatch):
+    """A URL already on the row is the portrait. Search is for the gaps."""
     monkeypatch.setenv("WAIFU_PORTRAITS", "1")
-    monkeypatch.setattr("waifu_engine.sources.anilist.search_characters", lambda *a, **k: [])
+    called = []
     monkeypatch.setattr(
-        "waifu_engine.sources.wikipedia.search_characters",
-        lambda *a, **k: [{
-            "name": "Abby",
-            "series": "The Last of Us",
-            "image_url": "http://upload.wikimedia.org/wikipedia/en/thumb/abby.jpg",
-        }],
+        "waifu_engine.web_search.fetch_image_url",
+        lambda *a, **k: called.append(1) or ROSSINA_ART,
     )
-    row = {"name": "Abby", "series": "The Last of Us", "image_url": None}
-    assert portraits.fill_portraits([row]) == 1
-    assert row["image_url"].startswith("https://upload.wikimedia.org/")
+    row = {"name": "Hoshino Takanashi", "series": "Blue Archive", "image_url": HOSHINO_ART}
+    assert portraits.fill_portraits([row]) == 0
+    assert called == []
+    assert row["image_url"] == HOSHINO_ART
 
 
-def test_fair_use_page_uses_the_rest_summary(monkeypatch):
-    """pageimages leaves Abby null. The REST summary still has the lead file."""
+def test_svg_and_http_are_not_kept():
+    """Icons and plain HTTP are not a portrait. HTTP is upgraded when it is an image."""
+    assert portraits.usable_image("https://cdn.example/icon.svg") is None
+    assert portraits.usable_image("http://cdn.example/face.png") == "https://cdn.example/face.png"
+    assert portraits.usable_image(None) is None
+
+
+def test_search_silence_leaves_the_cat(monkeypatch):
+    """When the image search returns nothing, the URL stays empty."""
     monkeypatch.setenv("WAIFU_PORTRAITS", "1")
-    monkeypatch.setattr("waifu_engine.sources.anilist.search_characters", lambda *a, **k: [])
-    monkeypatch.setattr(
-        "waifu_engine.sources.wikipedia.search_characters",
-        lambda *a, **k: [{
-            "name": "Abby",
-            "series": "The Last of Us",
-            "image_url": None,
-            "source_url": "https://en.wikipedia.org/wiki/Abby_(The_Last_of_Us)",
-        }],
-    )
-
-    def summary(url, params, accept="application/json"):
-        assert "Abby_(The_Last_of_Us)" in url
-        return {
-            "originalimage": {
-                "source": "https://upload.wikimedia.org/wikipedia/en/b/b8/Abby_in_The_Last_of_Us_Part_II.png",
-            }
-        }
-
-    monkeypatch.setattr("waifu_engine.sources._http.get_json", summary)
-    row = {"name": "Abby", "series": "The Last of Us", "image_url": None, "source_url": ""}
-    assert portraits.fill_portraits([row]) == 1
-    assert row["image_url"].endswith("Abby_in_The_Last_of_Us_Part_II.png")
-
-
-def test_a_neighbour_page_does_not_donate_its_face():
-    """Rossi's splash must not become Rossina's portrait."""
-    assert portraits._page_is_this_person(
-        "Rossina Wulfperl Luppino", "Arknights: Endfield", "Rossi", ""
-    ) is False
-    assert portraits._filename_conflicts(
-        "Rossina Wulfperl Luppino",
-        "https://endfield.wiki.gg/images/thumb/Rossi_Splash_Art.png/1200px-Rossi_Splash_Art.png",
-    ) is True
-    assert portraits._page_is_this_person(
-        "Rossina Wulfperl Luppino", "Arknights: Endfield", "Rossina", ""
-    ) is True
+    monkeypatch.setattr("waifu_engine.web_search.fetch_image_url", lambda *a, **k: None)
+    row = {
+        "name": "Rossina Wulfperl Luppino",
+        "series": "Arknights: Endfield",
+        "image_url": None,
+    }
+    assert portraits.fill_portraits([row]) == 0
+    assert row["image_url"] is None
 
 
 def test_duplicate_search_hit_donates_its_image():
     """The first row wins the slot. A later hit must still be able to give it a face."""
     rows = [{"name": "Hoshino Takanashi", "series": "Blue Archive", "image_url": None}]
-    assert portraits.donate_image(rows, HOSHINO) is True
-    assert rows[0]["image_url"] == HOSHINO["image_url"]
-    assert portraits.donate_image(rows, HOSHINO) is False
+    incoming = {"name": "Takanashi Hoshino", "image_url": HOSHINO_ART}
+    assert portraits.donate_image(rows, incoming) is True
+    assert rows[0]["image_url"] == HOSHINO_ART
+    assert portraits.donate_image(rows, incoming) is False
 
 
 def test_portraits_stay_off_in_the_offline_suite(monkeypatch):
@@ -114,8 +103,8 @@ def test_portraits_stay_off_in_the_offline_suite(monkeypatch):
     monkeypatch.setenv("WAIFU_PORTRAITS", "0")
     called = []
     monkeypatch.setattr(
-        "waifu_engine.sources.anilist.search_characters",
-        lambda *a, **k: called.append(1) or [HOSHINO],
+        "waifu_engine.web_search.fetch_image_url",
+        lambda *a, **k: called.append(1) or HOSHINO_ART,
     )
     row = {"name": "Hoshino Takanashi", "series": "Blue Archive", "image_url": None}
     assert portraits.fill_portraits([row]) == 0

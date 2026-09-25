@@ -1340,9 +1340,8 @@ def _question_payload(sess: GuessSession, question: dict[str, Any]) -> dict[str,
 def _fill_portraits(cands: list[Candidate]) -> None:
     """Resolve a public image for shown candidates that still have none.
 
-    Search often stored the Wikipedia or index row before AniList's portrait
-    existed on that object. The cat placeholder is what the page draws for a
-    null URL, so the guess and the top list ask once before they are sent.
+    The cat is what the page draws for a null URL. Guess, win, and the top
+    list search once for "name series character" before they are sent.
     """
     from ..sources.portraits import fill_portraits
 
