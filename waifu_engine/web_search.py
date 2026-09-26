@@ -31,6 +31,7 @@ from .nekomimi.lexicon import (
     AGGREGATE_EXACT as _AGGREGATE_EXACT,
     CHARACTER_IDENTITIES as _CHARACTER_IDENTITIES,
     COLOR_WORDS as _COLOR_WORDS,
+    COVERAGE as _COVERAGE,
     HEADLINERS as _HEADLINERS,
     NAME_BLOCK as SERIES_BLOCK,
     NON_CHARACTERS as _NON_CHARACTERS,
@@ -309,6 +310,55 @@ def _phrase_re(phrase: str) -> re.Pattern[str]:
 
 
 _SERIES_MARKER_RES = tuple((_phrase_re(m), label) for m, label in _SERIES_MARKERS)
+
+
+@lru_cache(maxsize=1)
+def _coverage_patterns() -> tuple[tuple[tuple[tuple[re.Pattern[str], ...], ...], tuple[str, ...]], ...]:
+    """Compile coverage groups once. The same whole-phrase rule as franchise markers."""
+    compiled: list[tuple[tuple[tuple[re.Pattern[str], ...], ...], tuple[str, ...]]] = []
+    for cluster in _COVERAGE:
+        groups = tuple(tuple(_phrase_re(marker) for marker in group) for group in cluster["groups"])
+        compiled.append((groups, cluster["queries"]))
+    return tuple(compiled)
+
+
+def _coverage_hit(groups: tuple[tuple[re.Pattern[str], ...], ...], text: str) -> bool:
+    """Whether every marker of any group appears in ``text`` as a whole phrase.
+
+    A look group needs both the prosthetic fact and blonde hair, which is the
+    empty-seed pair the bank can confirm. An alias group is one phrase, so a
+    thin seed that already names the work still searches the title character
+    after a rewrite drops that phrase.
+    """
+    return any(all(pattern.search(text) for pattern in group) for group in groups)
+
+
+def coverage_queries(facts: Iterable[str]) -> list[str]:
+    """Name searches to add when ``facts`` match a coverage cluster, else ``[]``.
+
+    Empty-seed button answers never contain "Edward Elric", and AniList only
+    matches character names. A prosthetic-and-blonde pair, or a typed FMA
+    alias, has to ask for him by name or the popular page fills the shortlist
+    without him. Negatives are dropped: search engines ignore them, and a
+    "not prosthetic" line must not count as the limb.
+    """
+    kept: list[str] = []
+    for fact in facts:
+        text = " ".join((fact or "").split())
+        if not text or re.match(r"(?:not true:|the character is not\b)", text, re.I):
+            continue
+        kept.append(text)
+    blob = " ".join(kept).lower()
+    if not blob:
+        return []
+    out: list[str] = []
+    for groups, queries in _coverage_patterns():
+        if not _coverage_hit(groups, blob):
+            continue
+        for query in queries:
+            if query not in out:
+                out.append(query)
+    return out
 
 
 def franchise_label(text: str) -> str:

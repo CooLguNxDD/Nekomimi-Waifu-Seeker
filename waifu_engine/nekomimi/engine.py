@@ -374,6 +374,9 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
     real prose and a popularity number); DuckDuckGo fills remaining slots
     inside ``find_candidates``. Once a series is known, ``pin`` keeps that
     work in every template group, next to the rare visual traits from the seed.
+    Button-only facts stay off the name-search loops and top up from the
+    popular pool. ``find_candidates`` still name-searches a coverage cluster
+    on that path, so a prosthetic-and-blonde answer asks for Edward Elric.
     """
     if not ONLINE:
         return 0
@@ -422,8 +425,9 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
                 rewritten=rewritten or None,
                 background_key=sess.id,
                 ddg_gate=None if initial else stuck,
-                # Only typed text (or an LLM rewrite of it) can match names;
-                # broad button facts fall back to the popular pool.
+                # Only typed text (or an LLM rewrite of it) can match names.
+                # Broad button facts fall back to the popular pool. Coverage
+                # name searches still run inside find_candidates.
                 specific=bool(_free_text(sess) or rewritten or _confirmed_series(sess)),
                 pool_size=len(sess.alive_candidates()),
                 gemini_inline=_gemini_inline(sess),

@@ -52,6 +52,8 @@ markers:
   - { phrase: tokyo revengers, label: Tokyo Revengers }
   - { phrase: black clover, label: Black Clover }
   - { phrase: fullmetal alchemist, label: Fullmetal Alchemist }
+  - { phrase: full metal alchemist, label: Fullmetal Alchemist }
+  - { phrase: hagane no renkinjutsushi, label: Fullmetal Alchemist }
   - { phrase: ookami to koushinryou, label: Spice and Wolf }
   - { phrase: ookami to koshinryo, label: Spice and Wolf }
   - { phrase: ookami to ningen, label: Spice and Wolf }
@@ -147,6 +149,8 @@ name_block:
   - all time
   - honkai
   - fullmetal alchemist
+  - full metal alchemist
+  - hagane no renkinjutsushi
   - spice and wolf
   - frieren
   - bungou stray dogs

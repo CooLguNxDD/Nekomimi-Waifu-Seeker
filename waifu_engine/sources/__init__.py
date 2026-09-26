@@ -404,6 +404,10 @@ def find_candidates(
     they are skipped, DuckDuckGo never runs inline, and the pool is topped up
     from ``popular_characters`` instead, up to ``pool_size`` (candidates
     still in play; defaults to ``len(exclude_names)``) of ``popular_limit()``.
+    A coverage cluster (prosthetic and blonde, or an FMA alias such as
+    automail) still name-searches before that fill. AniList only matches
+    character names, so the popular page used to fill the shortlist with
+    Naruto and never ask for Edward Elric. Those queries are retrieval only.
 
     ``pin`` is a resolved work. Every template group keeps it, so the narrow
     retry cannot become a series-free trait query. When that work has lexicon
@@ -468,6 +472,25 @@ def find_candidates(
 
     queries = _queries(constraints, medium_hint, focus=focus, rewritten=rewritten, pin=pin)
     web_search._LAST_SEARCH["queries"] = list(queries)
+    # Button answers leave ``specific`` false, so the loops below never ask
+    # for a name. Coverage hits are taken first: the later ``limit`` slice
+    # keeps provider order, and a popular fill must not crowd the title
+    # character off the shortlist. A rewrite that drops the alias still
+    # loses to this loop, because it reads the original facts.
+    coverage = web_search.coverage_queries(constraints)
+    if coverage:
+        with timing.span("fetch.coverage"):
+            anilist_ok = medium_hint in (None, "anime", "manga", "game")
+            for query in coverage:
+                try:
+                    take(wikipedia.search_characters(query, limit=4), "coverage")
+                except Exception as exc:  # noqa: BLE001
+                    web_search._note_error(f"coverage: {exc}")
+                if anilist_ok and not _http.host_blocked(anilist.ENDPOINT):
+                    try:
+                        take(anilist.search_characters(query, limit=3), "coverage")
+                    except Exception as exc:  # noqa: BLE001
+                        web_search._note_error(f"coverage: {exc}")
     pw_ok = False
     pw_empty = True
     pw_error = False

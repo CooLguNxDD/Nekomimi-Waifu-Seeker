@@ -14,6 +14,7 @@ _FRANCHISES = _LEXICON["franchises"]
 _TRAITS = _LEXICON["traits"]
 _CATEGORIES = _LEXICON["categories"]
 _CHARACTERS = _LEXICON["characters"]
+_COVERAGE = _LEXICON["coverage"]
 
 # medium.yml — engine._eliminate_by_medium / _known_choice. Empty other is no filter.
 MEDIUM_VALUES = _MEDIUM["media"]
@@ -52,11 +53,15 @@ CHARACTER_IDENTITIES = _CHARACTERS["identities"]
 HEADLINERS = _CHARACTERS["headliners"]
 NON_CHARACTERS = _CHARACTERS["non_characters"]
 
+# coverage.yml — web_search.coverage_queries. Name searches, not score pins.
+COVERAGE = _COVERAGE
+
 __all__ = [
     "AGGREGATE_EXACT",
     "BROAD_CATEGORIES",
     "CHARACTER_IDENTITIES",
     "COLOR_WORDS",
+    "COVERAGE",
     "EXACT_ALIASES",
     "HEADLINERS",
     "NON_CHARACTERS",

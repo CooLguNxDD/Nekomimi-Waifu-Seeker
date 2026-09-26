@@ -116,7 +116,7 @@ def test_medium_other_is_present_and_does_not_filter():
 def test_marker_and_alias_sequences_match_the_old_tables():
     """First-match order and the Mario exact flag survive the move."""
     assert SERIES_MARKERS[:5] == _VOCALOID_FIRST
-    assert len(SERIES_MARKERS) == 65
+    assert len(SERIES_MARKERS) == 67
     assert SERIES_MARKERS[5] == ("blue archive", "Blue Archive")
     assert TYPED_ALIASES == _TYPED
     assert EXACT_ALIASES == frozenset({"mario"})
@@ -135,7 +135,8 @@ def test_set_maps_keep_the_old_membership():
     assert len(SERIES_CRUMBS) == 13
     assert {"internet meme", "voice bank", "software"} <= SERIES_CRUMBS
     assert AGGREGATE_EXACT == {"vocaloids", "fanloid", "fanloids", "vocaloid characters"}
-    assert "vocaloid" in NAME_BLOCK and "spice and wolf" in NAME_BLOCK and len(NAME_BLOCK) == 64
+    assert "vocaloid" in NAME_BLOCK and "spice and wolf" in NAME_BLOCK and len(NAME_BLOCK) == 66
+    assert "hagane no renkinjutsushi" in NAME_BLOCK and "full metal alchemist" in NAME_BLOCK
     assert web_search.SERIES_BLOCK == NAME_BLOCK
     assert PUBLISHER_LABELS == {
         "marvel comics", "dc comics", "image comics", "dark horse comics", "dark horse",
