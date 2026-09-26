@@ -8,7 +8,7 @@ An **Nekomimi character guesser** for **anime, manga, comics, games, movies and 
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CooLguNxDD/Nekomimi-Waifu-Seeker/blob/main/notebooks/nekomimi_colab.ipynb)
 
-`notebooks/nekomimi_colab.ipynb` runs this repo on a Colab **L4**. The setup cell checks out `BRANCH` (a branch name or a full commit SHA), then installs Ollama, Python, and the SolidJS UI at the same time. The query-rewriter GGUF (~17 GB) starts downloading as soon as Ollama is up, while pip and `npm` are still running. Laya's weights are prefetched into the Hugging Face cache in that same window. The server cell prints a public `/nekomimi` URL after Ollama has warmed up on the GPU.
+`notebooks/nekomimi_colab.ipynb` runs this repo on a Colab **L4**. The setup cell checks out `BRANCH` (a branch name or a full commit SHA), then installs Ollama, Python, and the SolidJS UI at the same time. The query-rewriter GGUF (Unsloth `gemma-4-26B-A4B-it-GGUF` `UD-Q3_K_M`, ~12.7 GB) starts downloading as soon as Ollama is up, while pip and `npm` are still running. Laya's weights are prefetched into the Hugging Face cache in that same window. The server cell prints a public `/nekomimi` URL after Ollama has warmed up on the GPU.
 
 Use an L4 runtime, then run the cells from the top. That tunnel has no login, so anyone with the link can play. If `GOOGLE_API_KEY` is set, those visits can run Gemini Search and bill that key.
 
@@ -95,7 +95,7 @@ Laya does **not** generate text. It only answers typed decision questions.
 
 ## Set up a new machine
 
-Python **3.10 or newer** (the Docker image uses 3.12). A GPU is optional on your own machine: Laya runs on CPU (~26 s to load, ~1.2 s per batch of 10). The Colab notebook asks for an **L4** because the optional query rewriter is a ~17 GB GGUF. Node.js **22** is required to build the web UI (Vite 7; the Docker UI stage uses `node:22`).
+Python **3.10 or newer** (the Docker image uses 3.12). A GPU is optional on your own machine: Laya runs on CPU (~26 s to load, ~1.2 s per batch of 10). The Colab notebook asks for an **L4** because the optional query rewriter is Unsloth `gemma-4-26B-A4B-it` `UD-Q3_K_M` (~12.7 GB). The previous Qwen GGUF (`unsloth/Qwen3.6-35B-A3B-GGUF`, ~17 GB) is still available by setting `HF_REPO`, `QUANT`, and `MODEL_NAME` in the notebook config cell. Node.js **22** is required to build the web UI (Vite 7; the Docker UI stage uses `node:22`).
 
 No account is required to play locally. Optional keys stay out of the repo:
 

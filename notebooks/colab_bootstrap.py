@@ -5,9 +5,9 @@ The notebook embeds this file (Colab downloads the ipynb only) and calls
 and the GGUF pull, the Node/UI build, pip, and the Laya weight prefetch.
 
 The GGUF pull starts as soon as ``ollama serve`` is up. ``bootstrap`` does not
-wait for it. The warmup cell joins the pull and loads Qwen onto the GPU
-before uvicorn, so Laya's preload does not take VRAM the 17 GB model needs
-on an L4.
+wait for it. The warmup cell joins the pull and loads the query GGUF onto the
+GPU before uvicorn, so Laya's preload does not take VRAM the ~12.7 GB model
+needs on an L4.
 
 ``python notebooks/colab_bootstrap.py`` prints the plan and does not install
 anything. ``--run`` is the notebook's ``bootstrap`` path from a shell.
@@ -1059,10 +1059,10 @@ def _default_config() -> Config:
         repo_url="https://github.com/CooLguNxDD/Nekomimi-Waifu-Seeker.git",
         ref=os.environ.get("BRANCH", "main"),
         app_dir=os.environ.get("APP_DIR", "Nekomimi-Waifu-Seeker"),
-        hf_repo=os.environ.get("HF_REPO", "unsloth/Qwen3.6-35B-A3B-GGUF"),
+        hf_repo=os.environ.get("HF_REPO", "unsloth/gemma-4-26B-A4B-it-GGUF"),
         quant=os.environ.get("QUANT", "UD-Q3_K_M"),
         ctx=int(os.environ.get("CTX", "10000")),
-        model_name=os.environ.get("MODEL_NAME", "Qwen3.6-35B-A3B-GGUF"),
+        model_name=os.environ.get("MODEL_NAME", "gemma-4-26B-A4B-it-GGUF"),
         ollama_url=os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434"),
     )
 
@@ -1071,7 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
     """Print the setup plan, or run it when ``--run`` is passed.
 
     The default is a dry run so executing this file on a laptop does not
-    install Ollama or start a 17 GB download. The notebook calls ``bootstrap``.
+    install Ollama or start the ~12.7 GB GGUF download. The notebook calls ``bootstrap``.
     """
     parser = argparse.ArgumentParser(description="Colab cold-start helper")
     parser.add_argument(
