@@ -253,6 +253,27 @@ def _series_fold_map() -> dict[str, str]:
 
 
 _SERIES_FOLD = _series_fold_map()
+# Longest first, so a longer fold spelling wins over one it starts with.
+_SERIES_FOLD_PREFIXES = tuple(
+    sorted((k for k in _SERIES_FOLD if len(k) >= 5), key=len, reverse=True)
+)
+
+
+def _fold_series_key(key: str) -> str:
+    """``key`` with a lexicon fold spelling at its start replaced by the label key.
+
+    AniList files seasons and remakes as "Ookami to Koushinryou II" or
+    "...: Merchant Meets the Wise Wolf". An exact-key fold missed those, so
+    that row was not "Spice and Wolf" and its look pin switched off. The rest
+    of the key is kept so the prefix rule still separates what it did before.
+    """
+    canon = _SERIES_FOLD.get(key)
+    if canon is not None:
+        return canon
+    for fold in _SERIES_FOLD_PREFIXES:
+        if key.startswith(fold):
+            return _SERIES_FOLD[fold] + key[len(fold):]
+    return key
 
 
 def same_series(a: str, b: str) -> bool:
@@ -269,12 +290,13 @@ def same_series(a: str, b: str) -> bool:
 def same_series_key(ka: str, kb: str) -> bool:
     """``same_series`` on keys already made by ``series_key``.
 
-    Folded spellings are compared as the label key before the prefix rule.
+    Folded spellings (and seasons that start with one) are compared as the
+    label key before the prefix rule.
     """
     if not ka or not kb:
         return False
-    ka = _SERIES_FOLD.get(ka, ka)
-    kb = _SERIES_FOLD.get(kb, kb)
+    ka = _fold_series_key(ka)
+    kb = _fold_series_key(kb)
     if ka == kb:
         return True
     short, long_ = sorted((ka, kb), key=len)

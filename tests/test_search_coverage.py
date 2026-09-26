@@ -148,8 +148,44 @@ def test_rewrite_cannot_drop_the_edward_name_search(monkeypatch):
         rewritten=rewritten,
         focus=["blonde braid"],
     )
-    assert ani[:len(_ED_QUERIES)] == _ED_QUERIES
+    assert ani[0] == "Edward Elric"
     assert "blonde boy anime character" in " ".join(ani)
+
+
+def test_a_common_look_cannot_fill_the_shortlist_with_coverage(monkeypatch):
+    """"blonde braid" matches the Ed cluster; the typed name still gets searched."""
+    monkeypatch.setattr(web_search, "_want_playwright", lambda: False)
+    monkeypatch.setattr(web_search, "_enrich_on", lambda: False)
+    monkeypatch.setattr(sources, "_COVERAGE_MAX", 3)
+    ani: list[str] = []
+
+    def ani_search(query, limit=10):
+        ani.append(query)
+        if query in _ED_QUERIES:
+            return [{"id": f"{query}-{i}", "name": f"Cast {query} {i}", "popularity": 1}
+                    for i in range(limit)]
+        if "Elsa" in query:
+            return [{"id": "elsa", "name": "Elsa", "series": "Frozen", "popularity": 5}]
+        return []
+
+    def wiki_search(query, limit=10):
+        if query in _ED_QUERIES:
+            return [{"id": f"w-{query}-{i}", "name": f"Page {query} {i}", "popularity": 1}
+                    for i in range(limit)]
+        return []
+
+    monkeypatch.setattr(anilist, "search_characters", ani_search)
+    monkeypatch.setattr(wikipedia, "search_characters", wiki_search)
+    out = sources.find_candidates(
+        ["Elsa", "blonde braid"],
+        medium_hint="anime",
+        limit=8,
+        use_ddg=False,
+        specific=True,
+    )
+    names = [c["name"] for c in out]
+    assert "Elsa" in names
+    assert sum(1 for n in names if n.startswith(("Cast ", "Page "))) <= 3
 
 
 def test_coverage_loader_rejects_a_duplicate_cluster():

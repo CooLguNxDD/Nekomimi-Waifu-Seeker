@@ -187,6 +187,10 @@ class _Background:
 
 
 _BG_MAX_KEYS = 256
+# New candidates one search may take from lexicon coverage queries. The
+# first query is the character's own name, so three is enough to land them
+# without crowding out the player's own search.
+_COVERAGE_MAX = 3
 # One worker each: parallel requests only make DuckDuckGo throttle harder, and
 # Gemini calls are billed.
 _DDG_BG = _Background("ddg", "WAIFU_DDG_BG_MAX_PENDING", 4)
@@ -405,9 +409,10 @@ def find_candidates(
     from ``popular_characters`` instead, up to ``pool_size`` (candidates
     still in play; defaults to ``len(exclude_names)``) of ``popular_limit()``.
     A coverage cluster (prosthetic and blonde, or an FMA alias such as
-    automail) still name-searches before that fill. AniList only matches
-    character names, so the popular page used to fill the shortlist with
-    Naruto and never ask for Edward Elric. Those queries are retrieval only.
+    automail) still name-searches before that fill, capped at
+    ``_COVERAGE_MAX`` new hits so a common look cannot fill the shortlist.
+    AniList only matches character names, so the popular page used to fill
+    the shortlist with Naruto and never ask for Edward Elric. Those queries are retrieval only.
 
     ``pin`` is a resolved work. Every template group keeps it, so the narrow
     retry cannot become a series-free trait query. When that work has lexicon
@@ -476,19 +481,26 @@ def find_candidates(
     # for a name. Coverage hits are taken first: the later ``limit`` slice
     # keeps provider order, and a popular fill must not crowd the title
     # character off the shortlist. A rewrite that drops the alias still
-    # loses to this loop, because it reads the original facts.
+    # loses to this loop, because it reads the original facts. The hits are
+    # capped: "blonde braid" is a common look, and an uncapped FMA cast
+    # filled the limit so a typed name ("Elsa") was never searched.
     coverage = web_search.coverage_queries(constraints)
     if coverage:
         with timing.span("fetch.coverage"):
             anilist_ok = medium_hint in (None, "anime", "manga", "game")
+            cap = min(_COVERAGE_MAX, limit)
             for query in coverage:
+                if hits.get("coverage", 0) >= cap:
+                    break
                 try:
-                    take(wikipedia.search_characters(query, limit=4), "coverage")
+                    room = cap - hits.get("coverage", 0)
+                    take(wikipedia.search_characters(query, limit=4)[:room], "coverage")
                 except Exception as exc:  # noqa: BLE001
                     web_search._note_error(f"coverage: {exc}")
-                if anilist_ok and not _http.host_blocked(anilist.ENDPOINT):
+                room = cap - hits.get("coverage", 0)
+                if room > 0 and anilist_ok and not _http.host_blocked(anilist.ENDPOINT):
                     try:
-                        take(anilist.search_characters(query, limit=3), "coverage")
+                        take(anilist.search_characters(query, limit=3)[:room], "coverage")
                     except Exception as exc:  # noqa: BLE001
                         web_search._note_error(f"coverage: {exc}")
     pw_ok = False

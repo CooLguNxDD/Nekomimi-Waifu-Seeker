@@ -1539,7 +1539,7 @@ def _rescore_candidates(sess: GuessSession) -> None:
     Typed chips and free-text clues never take a raw noul, so one unmatched
     word cannot floor the pool.
     A visual clue the profile clearly misses is a strong down-rank, not a
-    removal, so a thin blurb can still recover on a later answer.     Alias rows
+    removal, so a thin blurb can still recover on a later answer. Alias rows
     are one identity before any of that is added up. A lexicon look pin then
     separates a same-work pair the blurb did not, without writing tags.
     Soft cast (popularity, and a fame-only series lead) is then pulled back

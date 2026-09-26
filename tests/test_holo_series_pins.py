@@ -377,3 +377,16 @@ def test_question_bank_did_not_grow_a_wolf_question():
     assert engine._SERIES_SPLIT_QIDS == (
         "look_prosthetic", "look_animal_ears", "look_eyepatch", "look_tail",
     )
+
+
+def test_season_and_remake_titles_fold_onto_the_pin_work():
+    """AniList files seasons as "Ookami to Koushinryou II"; the pin must still hold."""
+    assert same_series("Ookami to Koushinryou II", "Spice and Wolf")
+    assert same_series(
+        "Ookami to Koushinryou: Merchant Meets the Wise Wolf", "Spice & Wolf")
+    assert same_series("Ookami to Koushinryou II", "Ookami to Koushinryou")
+    assert same_series("Ookami to Ningen", "Spice and Wolf")
+    assert not same_series("Ookami Kodomo no Ame to Yuki", "Spice and Wolf")
+    holo = Candidate(id="holo", name="Holo", series="Ookami to Koushinryou II")
+    row = engine._appearance_pin(holo)
+    assert row is not None and row["id"] == "holo"
