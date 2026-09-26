@@ -455,6 +455,48 @@ def build_characters(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_coverage(doc: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Return search-coverage clusters: marker groups and the name queries they add.
+
+    A group is AND; clusters fire when any group matches. The queries are
+    retrieval strings only. The loader does not decide who to guess.
+    """
+    _require_keys(doc, "coverage.yml", {"clusters"}, {"clusters"})
+    rows = doc["clusters"]
+    if not isinstance(rows, list) or not rows:
+        raise LexiconError("coverage.yml clusters must be a non-empty list")
+    clusters: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, row in enumerate(rows):
+        where = f"coverage.yml clusters[{index}]"
+        if not isinstance(row, dict):
+            raise LexiconError(f"{where} must be a mapping")
+        _require_keys(row, where, {"id", "groups", "queries"}, {"id", "groups", "queries"})
+        slug = row["id"]
+        if not isinstance(slug, str) or not slug.strip():
+            raise LexiconError(f"{where}.id must be a string")
+        if slug in seen_ids:
+            raise LexiconError(f"coverage.yml has duplicate id {slug!r}")
+        seen_ids.add(slug)
+        raw_groups = row["groups"]
+        if not isinstance(raw_groups, list) or not raw_groups:
+            raise LexiconError(f"{where}.groups must be a non-empty list")
+        groups: list[tuple[str, ...]] = []
+        for gindex, group in enumerate(raw_groups):
+            markers = _str_list(group, f"{where}.groups[{gindex}]", unique=True)
+            if not markers:
+                raise LexiconError(f"{where}.groups[{gindex}] must not be empty")
+            folded = tuple(" ".join(marker.lower().split()) for marker in markers)
+            if len(folded) != len(set(folded)):
+                raise LexiconError(f"{where}.groups[{gindex}] repeats a marker")
+            groups.append(folded)
+        queries = _str_list(row["queries"], f"{where}.queries", unique=True)
+        if not queries:
+            raise LexiconError(f"{where}.queries must not be empty")
+        clusters.append({"id": slug, "groups": tuple(groups), "queries": tuple(queries)})
+    return tuple(clusters)
+
+
 def load_lexicon() -> dict[str, Any]:
     """Load and validate every lexicon file. Called once at import."""
     return {
@@ -464,4 +506,5 @@ def load_lexicon() -> dict[str, Any]:
         "traits": build_traits(load_document("traits.yml")),
         "categories": build_categories(load_document("categories.yml")),
         "characters": build_characters(load_document("characters.yml")),
+        "coverage": build_coverage(load_document("coverage.yml")),
     }

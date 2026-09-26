@@ -72,6 +72,7 @@ headliners:
   - franchise: Fullmetal Alchemist
     phrases:
       - fullmetal alchemist brotherhood
+      - hagane no renkinjutsushi
       - fullmetal alchemist
       - full metal alchemist
     names:
@@ -107,3 +108,5 @@ non_characters:
   - Final Fantasy
   - Final Fantasy VII
   - Spice and Wolf
+  - Fullmetal Alchemist
+  - Hagane no Renkinjutsushi
