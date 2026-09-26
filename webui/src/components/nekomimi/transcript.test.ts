@@ -3,8 +3,12 @@ import {
   appendChip,
   chipForAnswer,
   chipsFromAsked,
+  clearTranscript,
   displayLabel,
+  isTranscriptRetired,
+  loadTranscript,
   mergeChips,
+  saveTranscript,
 } from "./transcript.ts";
 
 const choice = chipsFromAsked("silver hair", [
@@ -36,5 +40,12 @@ const merged = mergeChips(choice, [
 ]);
 assert.equal(merged.at(-1)?.label, "Not Asuka");
 assert.equal(merged.filter((chip) => chip.id === "series").length, 1);
+
+saveTranscript("round-a", [{ id: "yes", label: "Yes", question: "Wings?" }]);
+clearTranscript("round-a");
+assert.equal(isTranscriptRetired("round-a"), true);
+assert.deepEqual(loadTranscript("round-a"), []);
+saveTranscript("round-a", [{ id: "yes", label: "Yes", question: "Wings?" }]);
+assert.deepEqual(loadTranscript("round-a"), []);
 
 console.log("transcript tests ok");

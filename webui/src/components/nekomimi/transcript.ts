@@ -9,20 +9,35 @@ export interface AnswerChipData {
 /** Chips for the live round, kept outside the page so a remount does not drop them. */
 const transcripts = new Map<string, AnswerChipData[]>();
 
+/**
+ * Rounds the player already left.
+ *
+ * A snapshot requested before Restart can resolve after the next session id
+ * is on screen. Applying it would put the old trail under the new question.
+ */
+const retired = new Set<string>();
+
+/** Whether ``sessionId`` was cleared and must not accept another trail write. */
+export function isTranscriptRetired(sessionId: string): boolean {
+  return retired.has(sessionId);
+}
+
 /** The trail remembered for ``sessionId``, or an empty list. */
 export function loadTranscript(sessionId: string): AnswerChipData[] {
+  if (retired.has(sessionId)) return [];
   return transcripts.get(sessionId) ?? [];
 }
 
-/** Replace the remembered trail. */
+/** Replace the remembered trail. A retired round stays empty. */
 export function saveTranscript(sessionId: string, chips: AnswerChipData[]): void {
-  if (!sessionId) return;
+  if (!sessionId || retired.has(sessionId)) return;
   transcripts.set(sessionId, chips);
 }
 
-/** Drop one round's trail when the player starts over. */
+/** Drop one round's trail when the player starts over, and ignore its late snapshots. */
 export function clearTranscript(sessionId: string): void {
   transcripts.delete(sessionId);
+  if (sessionId) retired.add(sessionId);
 }
 
 /** Player-facing chip text. Choice snapshots carry ``label``; yes/no stay words. */
