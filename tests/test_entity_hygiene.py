@@ -555,6 +555,91 @@ def _arm_guess(sess, leader_id: str) -> None:
         sess.match_cache[(leader_id, qid)] = p
 
 
+def test_fairy_tail_title_is_not_a_physical_tail_split():
+    """The guild name is not a body part, and a real tail still splits the cast."""
+    question = traits.QUESTIONS_BY_ID["look_tail"]
+    guild = Candidate(
+        id="lucy", name="Lucy Heartfilia", series="Fairy Tail",
+        blurb="A celestial mage in the Fairy Tail guild.", tags=["tail"],
+    )
+    quiet = Candidate(
+        id="gray", name="Gray Fullbuster", series="Fairy Tail",
+        blurb="An ice mage.",
+    )
+    tailed = Candidate(
+        id="happy", name="Happy", series="Fairy Tail",
+        blurb="A blue cat with a tail who travels with Fairy Tail.",
+    )
+    assert "tail" in web_search.mine_trait_slugs(guild.blurb)
+    assert engine._candidate_has_trait(question, guild) is False
+    assert engine._candidate_has_trait(question, quiet) is False
+    assert engine._candidate_has_trait(question, tailed) is True
+
+    sess = sess_mod.new_session()
+    sess.candidates = [guild, quiet]
+    sess.asked.append({
+        "qid": "series", "text": "Which series?", "answer": "fairytail",
+        "kind": "choice", "detail": None,
+        "options": {"fairytail": {
+            "label": "Fairy Tail", "series_key": "fairytail", "fact": "Fairy Tail",
+        }},
+    })
+    assert "look_tail" not in engine._split_look_ids(sess)
+    _arm_guess(sess, "lucy")
+    guild.logodds = 3.0
+    quiet.logodds = 1.6
+    assert engine._advance(sess)["stage"] == "guessing"
+
+    split = sess_mod.new_session()
+    happy = Candidate(
+        id="happy", name="Happy", series="Fairy Tail", logodds=1.6,
+        tags=["male"], blurb="A blue cat with a tail.",
+    )
+    natsu = Candidate(
+        id="natsu", name="Natsu Dragneel", series="Fairy Tail", logodds=3.0,
+        tags=["male"], blurb="A fire mage in the Fairy Tail guild.",
+    )
+    split.candidates = [natsu, happy]
+    _arm_guess(split, "natsu")
+    state = engine._advance(split)
+    assert state["stage"] == "asking"
+    assert state["question"]["qid"] == "look_tail"
+
+
+def test_near_twin_defers_once_per_pair():
+    """The same leader and runner are not deferred twice; another pair still is."""
+    sess = sess_mod.new_session()
+    sess.candidates = [
+        Candidate(id="heinkel", name="Heinkel", series="Fullmetal Alchemist",
+                  logodds=3.0, popularity=3000, tags=["male"]),
+        Candidate(id="ed", name="Edward Elric", series="Fullmetal Alchemist",
+                  logodds=1.6, popularity=5000, tags=["male", "prosthetic", "eyepatch"],
+                  blurb="An automail arm and an eyepatch."),
+    ]
+    _arm_guess(sess, "heinkel")
+    first = engine._advance(sess)
+    assert first["stage"] == "asking"
+    assert first["question"]["qid"] == "look_prosthetic"
+    assert tuple(sorted(("heinkel", "ed"))) in sess.near_twin_pairs
+    sess.asked[-1]["answer"] = "no"
+    second = engine._advance(sess)
+    assert second["stage"] == "guessing"
+    assert "look_eyepatch" not in {row["qid"] for row in sess.asked}
+
+    other = sess_mod.new_session()
+    other.near_twin_pairs.add(tuple(sorted(("heinkel", "ed"))))
+    other.candidates = [
+        Candidate(id="mihawk", name="Dracule Mihawk", series="One Piece",
+                  logodds=3.0, popularity=4000, tags=["male", "eyepatch"]),
+        Candidate(id="law", name="Trafalgar Law", series="One Piece",
+                  logodds=1.6, popularity=5000, tags=["male"]),
+    ]
+    _arm_guess(other, "mihawk")
+    state = engine._advance(other)
+    assert state["stage"] == "asking"
+    assert state["question"]["qid"] == "look_eyepatch"
+
+
 def test_near_twin_rare_look_defers_the_guess():
     """A same-work pair that disagrees on a prosthetic is asked that, not guessed."""
     sess = sess_mod.new_session()

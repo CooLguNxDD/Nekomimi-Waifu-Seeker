@@ -50,7 +50,9 @@ from . import laya_client
 from .lexicon import BROAD_CATEGORIES as _BROAD_CATEGORIES
 from .lexicon import EXACT_ALIASES as _EXACT_ALIASES
 from .lexicon import HAIR_CATEGORIES as _HAIR_CATEGORIES
+from .lexicon import NAME_BLOCK as _NAME_BLOCK
 from .lexicon import SERIES_APPEARANCE as _SERIES_APPEARANCE
+from .lexicon import SERIES_MARKERS as _SERIES_MARKERS
 from .lexicon import SERIES_SPLIT as _SERIES_SPLIT
 from .lexicon import TYPED_ALIASES as _FRANCHISE_ALIASES
 from .session import (
@@ -564,6 +566,66 @@ def _series_split_qids() -> tuple[str, ...]:
 
 _SERIES_SPLIT_QIDS = _series_split_qids()
 
+# Series-split markers that are also ordinary words inside a work title.
+# "Fairy Tail" is the case that showed up: ``tail`` is a whole word of the
+# guild name, so two blurbs that only disagree on naming the work look split.
+_TITLE_SPLIT_WORD = re.compile(
+    r"(?<![a-z])(?:tail|tailed|prosthetic|automail|eyepatch|eye patch|"
+    r"cat ears|fox ears|wolf ears|animal ears)(?![a-z])",
+    re.I,
+)
+_TAIL_WORD = re.compile(r"(?<![a-z])(?:tail|tailed)(?![a-z])", re.I)
+
+
+def _split_title_phrases() -> tuple[str, ...]:
+    """Known work titles that contain a series-split marker, longest first.
+
+    Only those titles are blanked. Dropping the ``tail`` slug itself would
+    hide a real tail on every other character.
+    """
+    raw = list(_NAME_BLOCK)
+    for row in _SERIES_MARKERS:
+        phrase = row.get("phrase") if isinstance(row, dict) else ""
+        if phrase:
+            raw.append(phrase)
+    found: list[str] = []
+    seen: set[str] = set()
+    for phrase in raw:
+        key = " ".join(phrase.lower().split())
+        if len(key) < 4 or key in seen or not _TITLE_SPLIT_WORD.search(key):
+            continue
+        seen.add(key)
+        found.append(key)
+    found.sort(key=len, reverse=True)
+    return tuple(found)
+
+
+_SPLIT_TITLE_PHRASES = _split_title_phrases()
+
+
+def _mask_split_titles(text: str, cand: Candidate) -> str:
+    """Blank work titles in ``text`` so their words are not appearance traits.
+
+    The candidate's own series is blanked too, even when the lexicon has no
+    marker for that spelling. A blurb that only repeats the guild name must
+    not count as a physical tail.
+    """
+    phrases = list(_SPLIT_TITLE_PHRASES)
+    series = " ".join((cand.series or "").split())
+    if series_key(series):
+        phrases.append(series.lower())
+    masked = text
+    for phrase in sorted(set(phrases), key=len, reverse=True):
+        if len(phrase) < 4:
+            continue
+        masked = re.sub(
+            r"(?<!\w)" + re.escape(phrase) + r"(?!\w)",
+            " ",
+            masked,
+            flags=re.I,
+        )
+    return masked
+
 
 def _candidate_has_trait(question: dict[str, Any], cand: Candidate) -> bool:
     """Whether ``cand`` shows one of ``question``'s yes-tags.
@@ -571,14 +633,29 @@ def _candidate_has_trait(question: dict[str, Any], cand: Candidate) -> bool:
     Tags are checked first. A blurb that only says "automail" or "wolf ears"
     still counts: those rows often never received the mined slug as a tag,
     and a silent side is not a confirmed "no" until the question is asked.
+    Work titles are blanked before that mine. ``tail`` inside "Fairy Tail"
+    is the guild, not a body part. A ``tail`` tag is kept when the blurb
+    still says tail after the title is removed, or when the blurb never
+    used the word at all.
     """
     true = set(question.get("tags_true") or [])
     if not true:
         return False
-    if true & set(cand.tags):
-        return True
     blob = f"{cand.name} {cand.blurb}"
-    return bool(true & set(web_search.mine_trait_slugs(blob)))
+    masked = _mask_split_titles(blob, cand)
+    mined = set(web_search.mine_trait_slugs(masked))
+    tags = set(cand.tags)
+    if (
+        "tail" in tags
+        and "tail" in true
+        and "tail" not in mined
+        and _TAIL_WORD.search(blob)
+        and not _TAIL_WORD.search(masked)
+    ):
+        tags.discard("tail")
+    if true & tags:
+        return True
+    return bool(true & mined)
 
 
 def _split_look_ids(sess: GuessSession) -> list[str]:
@@ -1822,7 +1899,9 @@ def _near_twin_question(sess: GuessSession) -> dict[str, Any] | None:
     or an eyepatch was still sitting in the bank. Recovery only runs after a
     wrong guess, and its poles require both rows to carry an explicit tag.
     A rare look separates when exactly one of the two shows it. The turn cap
-    still guesses: deferring there would hide the best name we have.
+    still guesses: deferring there would hide the best name we have. The same
+    leader/runner pair is deferred once. Skipping every series_split question
+    already in evidence would also block a different pair later in the round.
     """
     if sess.turn >= MAX_TURNS:
         return None
@@ -1832,6 +1911,9 @@ def _near_twin_question(sess: GuessSession) -> dict[str, Any] | None:
     leader, runner = ranked[0][0], ranked[1][0]
     if not _same_work(leader, runner):
         return None
+    pair = tuple(sorted((leader.id, runner.id)))
+    if pair in sess.near_twin_pairs:
+        return None
     asked = sess.asked_ids()
     for qid in _SERIES_SPLIT_QIDS:
         if qid in asked:
@@ -1840,6 +1922,7 @@ def _near_twin_question(sess: GuessSession) -> dict[str, Any] | None:
         if question is None:
             continue
         if _candidate_has_trait(question, leader) != _candidate_has_trait(question, runner):
+            sess.near_twin_pairs.add(pair)
             return question
     return None
 

@@ -171,6 +171,10 @@ class GuessSession:
     # Id of a rejected guess that still shares a work with the live pool.
     # The next turn asks one trait that separates them, then clears this.
     recovery_from: str = ""
+    # Leader/runner ids already given one near-twin deferral. A second
+    # series_split question for the same pair would burn the turns the first
+    # answer was supposed to free. A different pair is not in this set.
+    near_twin_pairs: set[tuple[str, str]] = field(default_factory=set)
 
     # -- candidate pool ------------------------------------------------
     def alive_candidates(self) -> list[Candidate]:
