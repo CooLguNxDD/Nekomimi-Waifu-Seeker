@@ -325,8 +325,9 @@ def build_traits(doc: dict[str, Any]) -> dict[str, Any]:
 def build_categories(doc: dict[str, Any]) -> dict[str, Any]:
     """Return broad and colour-detail sets, appearance pin order, and popular titles.
 
-    Pin order is hair_color, then categories flagged ``series_appearance`` in
-    file order. The engine still decides when to ask them.
+    ``series_appearance`` is hair_color, then the angel-kit categories, in file
+    order. ``series_split`` is the rare-look categories the engine may pin
+    when a locked cast disagrees. The engine still decides when to ask them.
     """
     _require_keys(doc, "categories.yml", {"categories", "popular"}, {"categories", "popular"})
     rows = doc["categories"]
@@ -335,7 +336,8 @@ def build_categories(doc: dict[str, Any]) -> dict[str, Any]:
     broad: list[str] = []
     color_detail: list[str] = []
     appearance: list[str] = []
-    flag_keys = {"broad", "color_detail", "series_appearance"}
+    split: list[str] = []
+    flag_keys = {"broad", "color_detail", "series_appearance", "series_split"}
     for name, row in rows.items():
         if not isinstance(name, str) or not name:
             raise LexiconError("categories.yml category names must be strings")
@@ -353,6 +355,8 @@ def build_categories(doc: dict[str, Any]) -> dict[str, Any]:
             color_detail.append(name)
         if row.get("series_appearance"):
             appearance.append(name)
+        if row.get("series_split"):
+            split.append(name)
     popular = doc["popular"]
     if not isinstance(popular, dict) or not popular:
         raise LexiconError("categories.yml popular must be a mapping")
@@ -369,6 +373,7 @@ def build_categories(doc: dict[str, Any]) -> dict[str, Any]:
         "broad": frozenset(broad),
         "color_detail": frozenset(color_detail),
         "series_appearance": ("hair_color", *appearance),
+        "series_split": tuple(split),
         "popular": titles,
     }
 

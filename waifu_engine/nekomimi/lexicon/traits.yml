@@ -277,6 +277,7 @@ traits:
     markers:
       - cat ears
       - fox ears
+      - wolf ears
       - animal ears
   - id: tail
     group: look_tail
@@ -289,6 +290,7 @@ traits:
       - prosthetic
       - mechanical arm
       - cybernetic arm
+      - automail
   - id: staff
     group: weapon_staff
     markers:

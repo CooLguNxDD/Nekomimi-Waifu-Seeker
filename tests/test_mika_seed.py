@@ -194,8 +194,11 @@ def test_seed_traits_are_asked_ahead_of_shared_school_questions():
                            "series_key": "bluearchive", "prior": 0.0, "tags": []}},
     })
     ids = [q["id"] for q in engine.candidate_questions(s)]
-    assert ids[0] in {"hair_color", "look_halo", "look_wings", "look_horns"}
-    assert "look_horns" in ids
+    pins = engine._pinned_question_ids(s)
+    assert ids[0] in {"hair_color", "look_halo", "look_wings"}
+    assert "look_halo" in pins and "look_wings" in pins
+    # Series lock must not force the angel kit the seed did not name.
+    assert "look_horns" not in pins
 
 
 def test_initial_trait_seed_asks_for_inline_gemini(monkeypatch):

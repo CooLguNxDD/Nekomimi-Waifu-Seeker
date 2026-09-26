@@ -380,3 +380,312 @@ def test_wonder_woman_and_ff7_resolve_without_breaking_mario():
     assert engine._typed_franchise(ww) == "Wonder Woman"
     assert engine._typed_franchise(sess_mod.new_session("mario")) == "Super Mario"
     assert engine._typed_franchise(sess_mod.new_session("Mario Rossi")) == ""
+
+
+def test_spice_and_wolf_aliases_confirm_the_series():
+    """Typed Spice and Wolf aliases pin the work the way Fullmetal Alchemist does."""
+    for detail in (
+        "spice and wolf",
+        "spice & wolf",
+        "spice wolf",
+        "ookami to koushinryou",
+        "ookami to koshinryo",
+        "ookami to ningen",
+    ):
+        sess = sess_mod.new_session()
+        sess.asked.append(_series_detail(detail))
+        assert engine._confirmed_series(sess) == "Spice and Wolf"
+        assert engine._typed_franchise(sess) == "Spice and Wolf"
+    assert web_search.is_non_character("Spice and Wolf")
+    assert not web_search.is_non_character("Holo")
+
+
+def test_batman_spellings_collapse_and_lead_the_cast():
+    """Batman, Bruce Wayne and Absolute Batman are one row, ahead of mantle-holders."""
+    sess = sess_mod.new_session()
+    added = sess.add_candidates([
+        {"id": "bats", "name": "Batman", "series": "Batman", "medium": "comic",
+         "popularity": 8000, "tags": ["male"], "blurb": "The Dark Knight of Gotham."},
+        {"id": "bruce", "name": "Bruce Wayne", "series": "DC Comics", "medium": "comic",
+         "popularity": 6000, "tags": ["vigilante"], "blurb": "Bruce Wayne is Batman."},
+        {"id": "abs", "name": "Absolute Batman", "series": "Batman", "medium": "comic",
+         "popularity": 1000, "tags": ["cape"], "blurb": "Absolute Batman in Gotham."},
+    ])
+    assert added == 1
+    row = sess.by_id("bats")
+    assert row is not None and row.name == "Batman"
+    assert {"male", "vigilante", "cape"} <= set(row.tags)
+    ranked, _sess = _rank(
+        [
+            {"id": "bats", "name": "Batman", "series": "Batman", "medium": "comic",
+             "popularity": 4000, "tags": ["male", "vigilante", "cape"],
+             "blurb": "Bruce Wayne fights crime in Gotham as Batman."},
+            {"id": "dick", "name": "Dick Grayson", "series": "Batman", "medium": "comic",
+             "popularity": 9000, "tags": ["male", "vigilante", "cape"],
+             "blurb": "A vigilante who wore the Batman mantle."},
+            {"id": "jp", "name": "Jean-Paul Valley", "series": "Batman", "medium": "comic",
+             "popularity": 9000, "tags": ["male", "vigilante", "cape", "armor"],
+             "blurb": "Jean-Paul Valley took the Batman mantle and wears armor."},
+        ],
+        [("role_vigilante", "yes"), ("look_cape", "yes")],
+        detail="batman",
+    )
+    names = [name for name, _p in ranked]
+    assert names[0] == "Batman"
+    assert "Dick Grayson" in names and "Jean-Paul Valley" in names
+    assert web_search.fulltext_pin_parts(["batman"])[:2] == ["Batman", "Bruce Wayne"]
+
+
+def test_trafalgar_law_spellings_collapse_and_luffy_is_the_one_piece_lead():
+    """Law's full name merges. The One Piece prior is Luffy's, not a Warlord's."""
+    sess = sess_mod.new_session()
+    added = sess.add_candidates([
+        {"id": "law", "name": "Trafalgar Law", "series": "One Piece", "medium": "anime",
+         "popularity": 5000, "tags": ["male"]},
+        {"id": "full", "name": "Trafalgar D. Water Law", "series": "One Piece",
+         "medium": "anime", "popularity": 1000, "tags": ["surgeon"]},
+    ])
+    assert added == 1
+    assert sess.by_id("law").name == "Trafalgar Law"
+    assert "surgeon" in sess.by_id("law").tags
+    luffy = sess_mod.new_session()
+    assert luffy.add_candidates([
+        {"id": "short", "name": "Luffy", "series": "One Piece", "popularity": 10},
+        {"id": "full", "name": "Monkey D. Luffy", "series": "One Piece", "popularity": 10},
+    ]) == 1
+    assert [c.name for c in luffy.alive_candidates()] == ["Monkey D. Luffy"]
+    ranked, _sess = _rank(
+        [
+            {"id": "luffy", "name": "Monkey D. Luffy", "series": "One Piece",
+             "medium": "anime", "popularity": 4000, "tags": ["male", "protagonist"],
+             "blurb": "The captain of the Straw Hat Pirates in One Piece."},
+            {"id": "law", "name": "Trafalgar Law", "series": "One Piece",
+             "medium": "anime", "popularity": 9000, "tags": ["male"],
+             "blurb": "Captain of the Heart Pirates in One Piece."},
+            {"id": "mihawk", "name": "Dracule Mihawk", "series": "One Piece",
+             "medium": "anime", "popularity": 9000, "tags": ["male", "eyepatch"],
+             "blurb": "A swordsman with an eyepatch in One Piece."},
+        ],
+        [("gender_male", "yes")],
+        detail="one piece",
+    )
+    assert ranked[0][0] == "Monkey D. Luffy"
+    assert "Trafalgar Law" in [name for name, _p in ranked]
+    assert web_search.fulltext_pin_parts(["one piece"]) == ["One Piece", "Monkey D. Luffy"]
+
+
+def test_edward_and_holo_outrank_same_work_lookalikes():
+    """Naming the work lifts the title character over a tagged side character."""
+    edward, _sess = _rank(
+        [
+            {"id": "ed", "name": "Edward Elric", "series": "Fullmetal Alchemist",
+             "medium": "anime", "popularity": 4000, "tags": ["male", "sibling", "military"],
+             "blurb": "The Fullmetal Alchemist, a boy with an automail arm."},
+            {"id": "heinkel", "name": "Heinkel", "series": "Fullmetal Alchemist",
+             "medium": "anime", "popularity": 9000, "tags": ["male", "sibling", "military"],
+             "blurb": "A chimera soldier in the Amestrian military."},
+        ],
+        [("bond_sibling", "yes"), ("team_military", "yes")],
+        detail="fullmetal alchemist",
+    )
+    assert edward[0][0] == "Edward Elric"
+    assert "Heinkel" in [name for name, _p in edward]
+    assert web_search.fulltext_pin_parts(["fullmetal alchemist"]) == [
+        "Fullmetal Alchemist", "Edward Elric",
+    ]
+    holo, _sess = _rank(
+        [
+            {"id": "holo", "name": "Holo", "series": "Spice and Wolf",
+             "medium": "anime", "popularity": 3000, "tags": ["female", "animal-ears", "tail"],
+             "blurb": "The wolf harvest goddess of Spice and Wolf."},
+            {"id": "myuri", "name": "Myuri", "series": "Spice and Wolf",
+             "medium": "anime", "popularity": 9000, "tags": ["female", "animal-ears", "tail"],
+             "blurb": "Holo's daughter, a girl with wolf ears and a tail."},
+        ],
+        [("gender_female", "yes"), ("look_tail", "yes")],
+        detail="spice and wolf",
+    )
+    assert holo[0][0] == "Holo"
+    assert web_search.fulltext_pin_parts(["ookami to koushinryou"]) == ["Spice and Wolf", "Holo"]
+
+
+def test_series_lock_pins_a_splitting_look_instead_of_the_angel_kit():
+    """After the work is known, a prosthetic that splits the cast leads halo."""
+    sess = sess_mod.new_session()
+    sess.add_candidates([
+        {"id": "ed", "name": "Edward Elric", "series": "Fullmetal Alchemist",
+         "medium": "anime", "tags": ["male", "prosthetic"],
+         "blurb": "A short alchemist."},
+        {"id": "heinkel", "name": "Heinkel", "series": "Fullmetal Alchemist",
+         "medium": "anime", "tags": ["male"], "blurb": "A chimera soldier."},
+        {"id": "roy", "name": "Roy Mustang", "series": "Fullmetal Alchemist",
+         "medium": "anime", "tags": ["male"], "blurb": "A flame alchemist."},
+        {"id": "mika", "name": "Misono Mika", "series": "Blue Archive",
+         "medium": "game", "tags": ["animal-ears"], "blurb": "A student with animal ears."},
+    ])
+    sess.asked.append(_series_detail("fullmetal alchemist"))
+    pins = engine._pinned_question_ids(sess)
+    assert pins[0] == "hair_color"
+    assert "look_prosthetic" in pins
+    assert "look_animal_ears" not in pins
+    assert "look_halo" not in pins and "look_wings" not in pins and "look_horns" not in pins
+    ids = [q["id"] for q in engine.candidate_questions(sess)]
+    assert ids[0] == "hair_color"
+    assert ids[1] == "look_prosthetic"
+
+    ears = sess_mod.new_session()
+    ears.add_candidates([
+        {"id": "holo", "name": "Holo", "series": "Spice and Wolf", "medium": "anime",
+         "tags": ["female"], "blurb": "She keeps her wolf ears when she travels."},
+        {"id": "lawrence", "name": "Kraft Lawrence", "series": "Spice and Wolf",
+         "medium": "anime", "tags": ["male"], "blurb": "A traveling merchant."},
+    ])
+    ears.asked.append(_series_detail("spice & wolf"))
+    ear_pins = engine._pinned_question_ids(ears)
+    assert "look_animal_ears" in ear_pins
+    assert "look_halo" not in ear_pins
+
+
+def _arm_guess(sess, leader_id: str) -> None:
+    """Two strong model judgments so an early guess is otherwise allowed."""
+    sess.turn = 8
+    for qid, p in (("gender_male", 0.9), ("age_adult", 0.8)):
+        question = traits.QUESTIONS_BY_ID[qid]
+        sess.evidence[qid] = (question, "yes")
+        sess.match_cache[(leader_id, qid)] = p
+
+
+def test_fairy_tail_title_is_not_a_physical_tail_split():
+    """The guild name is not a body part, and a real tail still splits the cast."""
+    question = traits.QUESTIONS_BY_ID["look_tail"]
+    guild = Candidate(
+        id="lucy", name="Lucy Heartfilia", series="Fairy Tail",
+        blurb="A celestial mage in the Fairy Tail guild.", tags=["tail"],
+    )
+    quiet = Candidate(
+        id="gray", name="Gray Fullbuster", series="Fairy Tail",
+        blurb="An ice mage.",
+    )
+    tailed = Candidate(
+        id="happy", name="Happy", series="Fairy Tail",
+        blurb="A blue cat with a tail who travels with Fairy Tail.",
+    )
+    assert "tail" in web_search.mine_trait_slugs(guild.blurb)
+    assert engine._candidate_has_trait(question, guild) is False
+    assert engine._candidate_has_trait(question, quiet) is False
+    assert engine._candidate_has_trait(question, tailed) is True
+
+    sess = sess_mod.new_session()
+    sess.candidates = [guild, quiet]
+    sess.asked.append({
+        "qid": "series", "text": "Which series?", "answer": "fairytail",
+        "kind": "choice", "detail": None,
+        "options": {"fairytail": {
+            "label": "Fairy Tail", "series_key": "fairytail", "fact": "Fairy Tail",
+        }},
+    })
+    assert "look_tail" not in engine._split_look_ids(sess)
+    _arm_guess(sess, "lucy")
+    guild.logodds = 3.0
+    quiet.logodds = 1.6
+    assert engine._advance(sess)["stage"] == "guessing"
+
+    split = sess_mod.new_session()
+    happy = Candidate(
+        id="happy", name="Happy", series="Fairy Tail", logodds=1.6,
+        tags=["male"], blurb="A blue cat with a tail.",
+    )
+    natsu = Candidate(
+        id="natsu", name="Natsu Dragneel", series="Fairy Tail", logodds=3.0,
+        tags=["male"], blurb="A fire mage in the Fairy Tail guild.",
+    )
+    split.candidates = [natsu, happy]
+    _arm_guess(split, "natsu")
+    state = engine._advance(split)
+    assert state["stage"] == "asking"
+    assert state["question"]["qid"] == "look_tail"
+
+
+def test_near_twin_defers_once_per_pair():
+    """The same leader and runner are not deferred twice; another pair still is."""
+    sess = sess_mod.new_session()
+    sess.candidates = [
+        Candidate(id="heinkel", name="Heinkel", series="Fullmetal Alchemist",
+                  logodds=3.0, popularity=3000, tags=["male"]),
+        Candidate(id="ed", name="Edward Elric", series="Fullmetal Alchemist",
+                  logodds=1.6, popularity=5000, tags=["male", "prosthetic", "eyepatch"],
+                  blurb="An automail arm and an eyepatch."),
+    ]
+    _arm_guess(sess, "heinkel")
+    first = engine._advance(sess)
+    assert first["stage"] == "asking"
+    assert first["question"]["qid"] == "look_prosthetic"
+    assert tuple(sorted(("heinkel", "ed"))) in sess.near_twin_pairs
+    sess.asked[-1]["answer"] = "no"
+    second = engine._advance(sess)
+    assert second["stage"] == "guessing"
+    assert "look_eyepatch" not in {row["qid"] for row in sess.asked}
+
+    other = sess_mod.new_session()
+    other.near_twin_pairs.add(tuple(sorted(("heinkel", "ed"))))
+    other.candidates = [
+        Candidate(id="mihawk", name="Dracule Mihawk", series="One Piece",
+                  logodds=3.0, popularity=4000, tags=["male", "eyepatch"]),
+        Candidate(id="law", name="Trafalgar Law", series="One Piece",
+                  logodds=1.6, popularity=5000, tags=["male"]),
+    ]
+    _arm_guess(other, "mihawk")
+    state = engine._advance(other)
+    assert state["stage"] == "asking"
+    assert state["question"]["qid"] == "look_eyepatch"
+
+
+def test_near_twin_rare_look_defers_the_guess():
+    """A same-work pair that disagrees on a prosthetic is asked that, not guessed."""
+    sess = sess_mod.new_session()
+    sess.candidates = [
+        Candidate(id="heinkel", name="Heinkel", series="Fullmetal Alchemist",
+                  logodds=3.0, popularity=3000, tags=["male"]),
+        Candidate(id="ed", name="Edward Elric", series="Fullmetal Alchemist",
+                  logodds=1.6, popularity=5000, tags=["male", "prosthetic"],
+                  blurb="An automail arm."),
+    ]
+    _arm_guess(sess, "heinkel")
+    assert engine._should_guess(sess, None) is True
+    state = engine._advance(sess)
+    assert state["stage"] == "asking"
+    assert state["question"]["qid"] == "look_prosthetic"
+
+
+def test_near_twin_deferral_does_not_block_a_settled_or_capped_guess():
+    """No rare split, a different work, or the turn cap still commits."""
+    same = sess_mod.new_session()
+    same.candidates = [
+        Candidate(id="asuka", name="Asuka Langley Soryu", series="Neon Genesis Evangelion",
+                  logodds=3.0, popularity=4000, tags=["female"]),
+        Candidate(id="kyoko", name="Kyoko Zeppelin Soryu", series="Neon Genesis Evangelion",
+                  logodds=1.6, popularity=2000, tags=["female"]),
+    ]
+    _arm_guess(same, "asuka")
+    assert engine._advance(same)["stage"] == "guessing"
+
+    other = sess_mod.new_session()
+    other.candidates = [
+        Candidate(id="heinkel", name="Heinkel", series="Fullmetal Alchemist",
+                  logodds=3.0, popularity=3000, tags=["male"]),
+        Candidate(id="ed", name="Edward Elric", series="Cowboy Bebop",
+                  logodds=1.6, popularity=5000, tags=["male", "prosthetic"]),
+    ]
+    _arm_guess(other, "heinkel")
+    assert engine._advance(other)["stage"] == "guessing"
+
+    capped = sess_mod.new_session()
+    capped.candidates = [
+        Candidate(id="mihawk", name="Dracule Mihawk", series="One Piece",
+                  logodds=3.0, popularity=4000, tags=["male", "eyepatch"]),
+        Candidate(id="law", name="Trafalgar Law", series="One Piece",
+                  logodds=1.6, popularity=5000, tags=["male"]),
+    ]
+    _arm_guess(capped, "mihawk")
+    capped.turn = engine.MAX_TURNS
+    assert engine._advance(capped)["stage"] == "guessing"

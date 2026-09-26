@@ -28,6 +28,7 @@ entropy heuristics, so the loop still plays (less sharply) with no model.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -49,7 +50,10 @@ from . import laya_client
 from .lexicon import BROAD_CATEGORIES as _BROAD_CATEGORIES
 from .lexicon import EXACT_ALIASES as _EXACT_ALIASES
 from .lexicon import HAIR_CATEGORIES as _HAIR_CATEGORIES
+from .lexicon import NAME_BLOCK as _NAME_BLOCK
 from .lexicon import SERIES_APPEARANCE as _SERIES_APPEARANCE
+from .lexicon import SERIES_MARKERS as _SERIES_MARKERS
+from .lexicon import SERIES_SPLIT as _SERIES_SPLIT
 from .lexicon import TYPED_ALIASES as _FRANCHISE_ALIASES
 from .session import (
     MAX_GUESSES,
@@ -77,6 +81,7 @@ from .traits import (
     noul_criteria,
     series_question,
     valid_answers,
+    visual_residual,
     visual_search_phrases,
     yesno_visual_likelihood,
 )
@@ -283,6 +288,17 @@ _POOL_FITS = {
         "criteria": {
             "true": "yes, at least one listed character fits all the confirmed facts",
             "false": "no, none of the listed characters fits all the confirmed facts",
+        },
+    }
+}
+# Hoisted so the state-window budget and ``_pick_question`` share one head.
+_READY_TO_GUESS = {
+    "ready_to_guess": {
+        "type": "noul",
+        "instructions": "Do `confirmed_facts` name one character?",
+        "criteria": {
+            "true": "yes, the facts so far point at one specific character",
+            "false": "no, several different characters still fit the facts",
         },
     }
 }
@@ -522,16 +538,159 @@ def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
     return out
 
 
-# Appearance pin order: lexicon/categories.yml (hair_color, then the
-# series_appearance flags). ``_pinned_question_ids`` still decides when.
+# Appearance pin order: lexicon/categories.yml. hair_color plus the
+# series_appearance flags (the angel kit). ``_pinned_question_ids`` still
+# decides when. series_split categories become question ids below.
+_ANGEL_KIT = frozenset(qid for qid in _SERIES_APPEARANCE if qid != "hair_color")
+# A same-work runner below this mass is an extra, not a near-twin. Deferring
+# a settled guess for that extra spent turns the leader had already earned.
+_NEAR_TWIN_MASS = 0.10
+
+
+def _series_split_qids() -> tuple[str, ...]:
+    """Bank question ids for ``series_split`` categories, in lexicon order.
+
+    ``look_ears`` is the category and ``look_animal_ears`` is the question.
+    Pinning the category name would never match the bank.
+    """
+    found: list[str] = []
+    for cat in _SERIES_SPLIT:
+        for question in QUESTION_BANK:
+            if question["id"] in found:
+                continue
+            if question["category"] == cat or question["id"] == cat:
+                found.append(question["id"])
+                break
+    return tuple(found)
+
+
+_SERIES_SPLIT_QIDS = _series_split_qids()
+
+# Series-split markers that are also ordinary words inside a work title.
+# "Fairy Tail" is the case that showed up: ``tail`` is a whole word of the
+# guild name, so two blurbs that only disagree on naming the work look split.
+_TITLE_SPLIT_WORD = re.compile(
+    r"(?<![a-z])(?:tail|tailed|prosthetic|automail|eyepatch|eye patch|"
+    r"cat ears|fox ears|wolf ears|animal ears)(?![a-z])",
+    re.I,
+)
+_TAIL_WORD = re.compile(r"(?<![a-z])(?:tail|tailed)(?![a-z])", re.I)
+
+
+def _split_title_phrases() -> tuple[str, ...]:
+    """Known work titles that contain a series-split marker, longest first.
+
+    Only those titles are blanked. Dropping the ``tail`` slug itself would
+    hide a real tail on every other character.
+    """
+    raw = list(_NAME_BLOCK)
+    for row in _SERIES_MARKERS:
+        phrase = row.get("phrase") if isinstance(row, dict) else ""
+        if phrase:
+            raw.append(phrase)
+    found: list[str] = []
+    seen: set[str] = set()
+    for phrase in raw:
+        key = " ".join(phrase.lower().split())
+        if len(key) < 4 or key in seen or not _TITLE_SPLIT_WORD.search(key):
+            continue
+        seen.add(key)
+        found.append(key)
+    found.sort(key=len, reverse=True)
+    return tuple(found)
+
+
+_SPLIT_TITLE_PHRASES = _split_title_phrases()
+
+
+def _mask_split_titles(text: str, cand: Candidate) -> str:
+    """Blank work titles in ``text`` so their words are not appearance traits.
+
+    The candidate's own series is blanked too, even when the lexicon has no
+    marker for that spelling. A blurb that only repeats the guild name must
+    not count as a physical tail.
+    """
+    phrases = list(_SPLIT_TITLE_PHRASES)
+    series = " ".join((cand.series or "").split())
+    if series_key(series):
+        phrases.append(series.lower())
+    masked = text
+    for phrase in sorted(set(phrases), key=len, reverse=True):
+        if len(phrase) < 4:
+            continue
+        masked = re.sub(
+            r"(?<!\w)" + re.escape(phrase) + r"(?!\w)",
+            " ",
+            masked,
+            flags=re.I,
+        )
+    return masked
+
+
+def _candidate_has_trait(question: dict[str, Any], cand: Candidate) -> bool:
+    """Whether ``cand`` shows one of ``question``'s yes-tags.
+
+    Tags are checked first. A blurb that only says "automail" or "wolf ears"
+    still counts: those rows often never received the mined slug as a tag,
+    and a silent side is not a confirmed "no" until the question is asked.
+    Work titles are blanked before that mine. ``tail`` inside "Fairy Tail"
+    is the guild, not a body part. A ``tail`` tag is kept when the blurb
+    still says tail after the title is removed, or when the blurb never
+    used the word at all.
+    """
+    true = set(question.get("tags_true") or [])
+    if not true:
+        return False
+    blob = f"{cand.name} {cand.blurb}"
+    masked = _mask_split_titles(blob, cand)
+    mined = set(web_search.mine_trait_slugs(masked))
+    tags = set(cand.tags)
+    if (
+        "tail" in tags
+        and "tail" in true
+        and "tail" not in mined
+        and _TAIL_WORD.search(blob)
+        and not _TAIL_WORD.search(masked)
+    ):
+        tags.discard("tail")
+    if true & tags:
+        return True
+    return bool(true & mined)
+
+
+def _split_look_ids(sess: GuessSession) -> list[str]:
+    """Rare-look questions that divide the locked franchise's living cast.
+
+    Halo, wings and horns used to be pinned on every series lock and burned
+    the turns that would have asked a prosthetic or animal ears. A look
+    nobody in that cast differs on is left to information gain.
+    """
+    franchise = _confirmed_series(sess)
+    if not franchise:
+        return []
+    cast = [c for c in sess.alive_candidates() if _in_franchise(c, franchise)]
+    if len(cast) < 2:
+        return []
+    out: list[str] = []
+    for qid in _SERIES_SPLIT_QIDS:
+        question = QUESTIONS_BY_ID.get(qid)
+        if question is None:
+            continue
+        present = sum(1 for cand in cast if _candidate_has_trait(question, cand))
+        if 0 < present < len(cast):
+            out.append(qid)
+    return out
 
 
 def _pinned_question_ids(sess: GuessSession) -> list[str]:
-    """Appearance questions the seed named, plus the rest after a series lock.
+    """Appearance questions the seed named, plus cast-splitting looks after a series lock.
 
     Information gain never asked hair colour or halo: every Trinity student
     shares school, uniform and teen, and halo was buried in one horns/wings
     question. The traits the player already typed have to be offered early.
+    The angel kit is not forced again once the series is known unless that
+    text already named it. A prosthetic or animal ears that splits the cast
+    is pinned instead, or it loses to the kit and is never asked.
     """
     ids: list[str] = []
     for text in _free_text(sess):
@@ -540,6 +699,11 @@ def _pinned_question_ids(sess: GuessSession) -> list[str]:
                 ids.append(qid)
     if _confirmed_series(sess):
         for qid in _SERIES_APPEARANCE:
+            if qid in _ANGEL_KIT:
+                continue
+            if qid not in ids:
+                ids.append(qid)
+        for qid in _split_look_ids(sess):
             if qid not in ids:
                 ids.append(qid)
     return ids
@@ -592,32 +756,163 @@ def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
     return (pins + rest)[:CHOICE_WIDTH]
 
 
-# Round-level calls share one 512-token sequence, and the state is truncated
-# from the end. Ten full 600-character profiles plus the whole transcript
-# pushed the characters off the end of `pool_fits` / `ready_to_guess`.
+# Round-level calls share one 512-token sequence. ``laya.common.build_sequence``
+# serializes the state with ``json.dumps`` and keeps only the first state
+# tokens (right truncation). Profiles used to lead that JSON, so answered
+# traits were the first thing cut. Trait rows lead now; identities, prose
+# facts and history are the padding the cut may remove.
 _LAYA_ROUND_PROFILE = 160
 _LAYA_ROUND_FACTS = 8
 _LAYA_ROUND_HISTORY = 6
+# Column order for every durable row. A button answer is 1.0 (yes) or 0.0
+# (no). A typed chip stays at the top of the mild band so it cannot read as
+# that hard yes — the same reason a raw "angel" noul is not applied.
+_TRAIT_FIELDS = ("id", "answer", "score")
+_SOFT_YES_SCORE = 0.6
+_SOFT_NO_SCORE = 0.4
+# Wordpiece stand-in: letters, numbers and punctuation are separate pieces,
+# so this cuts at least as much as the English window. No tokenizer in the
+# offline suite, and the real one must not be downloaded from a test.
+_TOKEN_PIECE = re.compile(r"[A-Za-z]+|[0-9]+|[^\s]")
+
+
+def _piece_count(text: str) -> int:
+    """How many pessimistic wordpieces ``text`` is."""
+    return sum(1 for _ in _TOKEN_PIECE.finditer(text or ""))
+
+
+def _noul_head_tokens(instructions: str, criteria: dict[str, str]) -> int:
+    """Tokens ``build_sequence`` spends before the state on one noul question.
+
+    CLS, ``noul question:`` plus the instruction, SEP, a masked false option,
+    a masked true option, SEP. Each option is capped at 48 pieces, matching
+    the library. The state then receives ``max_len - head - 1`` tokens.
+    """
+    ins = "noul question: " + instructions
+    options = (
+        " false: " + (criteria.get("false") or "no, the statement does not hold"),
+        " true: " + (criteria.get("true") or "yes, the statement holds"),
+    )
+    option_tokens = sum(min(48, 1 + _piece_count(option)) for option in options)
+    return 1 + _piece_count(ins) + 1 + option_tokens + 1
+
+
+def _shared_state_room() -> int:
+    """State tokens left for ``pool_fits`` and ``ready_to_guess``.
+
+    The tighter of those two heads wins. Per-candidate ``match`` is its own
+    sequence and is not this budget.
+    """
+    heads = [
+        _noul_head_tokens(spec["instructions"], spec["criteria"])
+        for spec in (_POOL_FITS["pool_fits"], _READY_TO_GUESS["ready_to_guess"])
+    ]
+    return max(0, laya_client.MAX_LEN - max(heads) - 1)
+
+
+def _prefix_by_tokens(text: str, room: int) -> str:
+    """The leading slice of ``text`` that fits in ``room`` pieces.
+
+    Whitespace is not a piece, same as the wordpiece stand-in. ``room`` <= 0
+    keeps nothing: the head already filled the window.
+    """
+    if room <= 0:
+        return ""
+    count = 0
+    end = 0
+    for match in _TOKEN_PIECE.finditer(text):
+        count += 1
+        end = match.end()
+        if count >= room:
+            return text[:end]
+    return text
+
+
+def _trait_score(question: dict[str, Any], answer: str) -> float | None:
+    """Numeric score for one evidence row, or None if it is not a bank trait.
+
+    Free-text clues are prose. They stay on the overlap path and are not
+    copied into the window, where Laya would treat the sentence as a fact.
+    """
+    if question.get("clues") or question.get("category") == "clue":
+        return None
+    if not question.get("id"):
+        return None
+    if question.get("soft_chip"):
+        return _SOFT_YES_SCORE if answer == "yes" else _SOFT_NO_SCORE
+    if is_choice(question):
+        return 1.0
+    if answer == "yes":
+        return 1.0
+    if answer == "no":
+        return 0.0
+    return None
+
+
+def _answered_trait_pack(sess: GuessSession) -> dict[str, Any]:
+    """Durable rows for every answered bank or chip trait, in evidence order.
+
+    Each row is ``[id, answer, score]``. Query-LLM rewrites are not rows:
+    they are search strings, and pasting them here would make Laya treat
+    generated prose as identity evidence.
+    """
+    rows: list[list[Any]] = []
+    for question, answer in sess.evidence.values():
+        score = _trait_score(question, answer)
+        if score is None:
+            continue
+        rows.append([question["id"], answer, score])
+    return {"fields": list(_TRAIT_FIELDS), "rows": rows}
+
+
+def _trait_signature(state: dict[str, Any]) -> list[tuple[str, str, float]]:
+    """``(id, answer, score)`` for every durable row in ``state``."""
+    rows = (state.get("answered_traits") or {}).get("rows") or []
+    return [(row[0], row[1], row[2]) for row in rows]
+
+
+def _traits_surviving_window(
+    state: dict[str, Any], room: int | None = None,
+) -> list[tuple[str, str, float]]:
+    """Rows whose JSON is still intact after the English-window cut.
+
+    Compare this to ``_trait_signature``. A shorter list means the cut still
+    landed inside the trait block.
+    """
+    budget = _shared_state_room() if room is None else room
+    prefix = _prefix_by_tokens(json.dumps(state, ensure_ascii=False), budget)
+    kept: list[tuple[str, str, float]] = []
+    for row in (state.get("answered_traits") or {}).get("rows") or []:
+        if json.dumps(row, ensure_ascii=False) not in prefix:
+            break
+        kept.append((row[0], row[1], row[2]))
+    return kept
 
 
 def _laya_state(sess: GuessSession, candidates: list[Candidate]) -> dict[str, Any]:
-    """Compact state for one round-level Laya call.
+    """Compact state for one shared Laya call (``pool_fits``, ``ready_to_guess``).
 
-    Characters come first, each as a short profile, so truncation cuts old
-    answers rather than the identities the question names. Per-candidate
-    ``match`` still uses the full profile; this budget is only the shared call.
+    Answered trait rows lead so the right-truncation drops profiles and
+    history first. Per-candidate ``match`` carries the same rows ahead of
+    that candidate's profile.
     """
     facts = sess.constraints[-_LAYA_ROUND_FACTS:] or ["nothing confirmed yet"]
     history = sess.history()[-_LAYA_ROUND_HISTORY:] or [
         {"question": "none yet", "answer": "", "detail": ""},
     ]
-    return {
+    state = {
+        "answered_traits": _answered_trait_pack(sess),
         "goal": GOAL,
         "characters": {c.name: c.profile(budget=_LAYA_ROUND_PROFILE) for c in candidates},
         "confirmed_facts": facts,
         "answer_history": history,
         "questions_asked": sess.turn,
     }
+    if _traits_surviving_window(state) != _trait_signature(state):
+        # Still truncation: readiness and pool_fits would judge without
+        # those answers. Do not raise — the turn has to keep playing.
+        timing.note(trait_window="truncated")
+    return state
 
 
 def _pick_question(sess: GuessSession) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -633,17 +928,7 @@ def _pick_question(sess: GuessSession) -> tuple[dict[str, Any], dict[str, Any] |
         options = candidate_questions(sess)
     if not options:
         return {}, None
-    questions = {
-        "ready_to_guess": {
-            "type": "noul",
-            "instructions": "Do `confirmed_facts` name one character?",
-            "criteria": {
-                "true": "yes, the facts so far point at one specific character",
-                "false": "no, several different characters still fit the facts",
-            },
-        },
-    }
-    answers = laya_client.ask(_laya_state(sess, sess.scoring_pool()), questions)
+    answers = laya_client.ask(_laya_state(sess, sess.scoring_pool()), _READY_TO_GUESS)
     if answers:
         sess.laya_used = True
     return options[0], answers
@@ -903,20 +1188,57 @@ def _tag_choice(question: dict[str, Any], cand: Candidate,
     return {k: w / total for k, w in weights.items()}
 
 
+def _candidate_laya_state(
+    cand: Candidate, question: dict[str, Any], prior: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """One candidate's match state: durable rows, then the profile.
+
+    The question being scored is omitted from ``prior``. Including its own
+    answer would leak the label into the judgment. A long profile follows
+    the rows, so the window cuts the blurb rather than the traits.
+    """
+    state: dict[str, Any] = {
+        "answered_traits": prior or {"fields": list(_TRAIT_FIELDS), "rows": []},
+        "candidate": cand.profile(),
+    }
+    if question.get("clues"):
+        state["clues"] = question["clues"]
+    return state
+
+
+def _prior_trait_pack(sess: GuessSession, skip_id: str) -> dict[str, Any]:
+    """Trait rows answered before ``skip_id``, not the question being scored.
+
+    Later rows are omitted so a replay for a new candidate sees the same
+    prefix the first cohort saw. Including answers that landed afterwards
+    would change the match prompt and make the cache lie.
+    """
+    pack = _answered_trait_pack(sess)
+    earlier: list[list[Any]] = []
+    for row in pack["rows"]:
+        if row[0] == skip_id:
+            break
+        earlier.append(row)
+    pack["rows"] = earlier
+    return pack
+
+
 def _choice_probabilities(
-    pool: list[Candidate], question: dict[str, Any]
+    pool: list[Candidate], question: dict[str, Any],
+    prior: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, float]]:
     """Option probabilities per candidate, one Laya ``choice`` call each.
 
     Same reasoning as ``_match_probabilities``: a shared state blurs the
     candidates together. Answers that do not cover every option, or carry
-    non-probabilities, are dropped so the heuristic takes over.
+    non-probabilities, are dropped so the heuristic takes over. Prior trait
+    rows lead each state so a wide option head cannot cut them first.
     """
     out: dict[str, dict[str, float]] = {}
     keys = list(question["options"])
     for c in pool:
         answers = laya_client.ask(
-            {"candidate": c.profile()},
+            _candidate_laya_state(c, question, prior),
             {
                 "match": {
                     "type": "choice",
@@ -942,7 +1264,8 @@ def _choice_probabilities(
 
 
 def _match_probabilities(
-    pool: list[Candidate], question: dict[str, Any]
+    pool: list[Candidate], question: dict[str, Any],
+    prior: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     """P(question is true) for each candidate, one Laya call per candidate.
 
@@ -950,18 +1273,16 @@ def _match_probabilities(
     the whole state, so a batch of ``match_<i>`` questions comes back with
     near-identical probabilities (measured: 1.0 for all ten, anime and games
     alike). Scoring each candidate against its own state separates them cleanly
-    -- and is faster, because each sequence is short.
+    -- and is faster, because each sequence is short. Answered traits lead
+    that state so the profile tail is what a tight head cuts.
     """
     probs: dict[str, float] = {}
     # Explicit true/false option text beats Laya's generic "yes, the statement
     # holds" -- the model is scoring against a restatement of the real claim.
     criteria = question.get("criteria") or noul_criteria(question["instructions"])
     for c in pool:
-        state = {"candidate": c.profile()}
-        if question.get("clues"):
-            state["clues"] = question["clues"]
         answers = laya_client.ask(
-            state,
+            _candidate_laya_state(c, question, prior),
             {
                 "match": {
                     "type": "noul",
@@ -1038,12 +1359,13 @@ def _rescore_candidates(sess: GuessSession) -> None:
     for c in live:
         c.logodds = popularity_prior(c.popularity)
     for qid, (question, answer) in sess.evidence.items():
+        prior = _prior_trait_pack(sess, qid)
         if is_choice(question):
             # Known medium/series is data, not a judgment: no model call.
             known = {c.id: d for c in live if (d := _known_choice(question, c))}
             missing = [c for c in live
                        if c.id not in known and (c.id, qid) not in sess.choice_cache]
-            dists = _choice_probabilities(missing, question)
+            dists = _choice_probabilities(missing, question, prior)
             if dists:
                 sess.laya_used = True
                 sess.choice_cache.update({(cid, qid): d for cid, d in dists.items()})
@@ -1077,7 +1399,7 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 c.logodds += math.log(min(0.98, max(0.02, likelihood)))
             continue
         missing = [c for c in live if (c.id, qid) not in sess.match_cache]
-        probs = _match_probabilities(missing, question)
+        probs = _match_probabilities(missing, question, prior)
         if probs:
             sess.laya_used = True
             sess.match_cache.update({(cid, qid): p for cid, p in probs.items()})
@@ -1570,8 +1892,48 @@ def _emit_asking(sess: GuessSession, question: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _near_twin_question(sess: GuessSession) -> dict[str, Any] | None:
+    """An unasked rare look that splits the top two same-work candidates.
+
+    Heinkel, Myuri and Mihawk were guessed while a prosthetic, animal ears
+    or an eyepatch was still sitting in the bank. Recovery only runs after a
+    wrong guess, and its poles require both rows to carry an explicit tag.
+    A rare look separates when exactly one of the two shows it. The turn cap
+    still guesses: deferring there would hide the best name we have. The same
+    leader/runner pair is deferred once. Skipping every series_split question
+    already in evidence would also block a different pair later in the round.
+    """
+    if sess.turn >= MAX_TURNS:
+        return None
+    ranked = sess.posterior()
+    if len(ranked) < 2 or ranked[1][1] < _NEAR_TWIN_MASS:
+        return None
+    leader, runner = ranked[0][0], ranked[1][0]
+    if not _same_work(leader, runner):
+        return None
+    pair = tuple(sorted((leader.id, runner.id)))
+    if pair in sess.near_twin_pairs:
+        return None
+    asked = sess.asked_ids()
+    for qid in _SERIES_SPLIT_QIDS:
+        if qid in asked:
+            continue
+        question = QUESTIONS_BY_ID.get(qid)
+        if question is None:
+            continue
+        if _candidate_has_trait(question, leader) != _candidate_has_trait(question, runner):
+            sess.near_twin_pairs.add(pair)
+            return question
+    return None
+
+
 def _advance(sess: GuessSession) -> dict[str, Any]:
-    """Emit the next question, or a guess when the evidence is strong enough."""
+    """Emit the next question, or a guess when the evidence is strong enough.
+
+    A same-work near-twin with an unasked rare look is asked that look
+    instead of committing. Alias-split still refuses the guess and keeps
+    the information-gain question: those two rows are one person.
+    """
     if sess.turn < MAX_TURNS:
         recovery = _recovery_question(sess)
         if recovery is not None:
@@ -1585,6 +1947,11 @@ def _advance(sess: GuessSession) -> dict[str, Any]:
     # that, so a merge that just succeeded is allowed to commit.
     should = _should_guess(sess, laya_answers)
     blocked = bool(question) and _alias_split_blocks_guess(sess) and sess.turn < MAX_TURNS
+    if should and not blocked and sess.turn < MAX_TURNS:
+        twin = _near_twin_question(sess)
+        if twin is not None:
+            timing.note(defer=twin["id"])
+            return _emit_asking(sess, twin)
     if (should or not question) and not blocked:
         timing.note(guess=True)
         return _guess_payload(sess)
@@ -1611,27 +1978,38 @@ def _coerce_free_answer(current: dict[str, Any], answer: str, detail: str) -> tu
     return "detail", merged[:300]
 
 
-def _score_free_text(sess: GuessSession, text: str, qid: str) -> None:
-    """Record a typed clue as visual evidence plus soft trait chips.
+def _overlap_words(text: str) -> bool:
+    """Whether ``text`` has a word the mild overlap clue will actually read.
 
-    The whole sentence used to be one ``yes`` clue. Laya then had to accept
-    every chip at once, and a miss on "white dress" or "angel" floored
-    candidates who still matched the rest. Unrecognised words stay search
-    text: they are already on ``constraints``.
+    ``clue_overlap_likelihood`` ignores tokens under four letters. An empty
+    residue would store a clue that adds the same half to every candidate.
+    """
+    return bool(re.search(r"[A-Za-z]{4,}", text or ""))
+
+
+def _score_free_text(sess: GuessSession, text: str, qid: str) -> None:
+    """Record a typed clue as a visual judgment, soft chips, and mild overlap.
+
+    Visual phrases and chip words are stripped before the overlap clue, so
+    "pink hair and a white dress" still ranks the dress. Nothing here writes
+    a hard bank yes: chips stay ``soft_chip``, and other words stay a clue.
     """
     text = (text or "").strip()
     if not text:
         return
     hits = free_text_trait_hits(text)
-    # Visual traits still use the full sentence ("pink hair, princess").
-    # Otherwise score the words that are not chips: "princess in a white
-    # dress" used to keep only royalty and drop "white dress".
-    if _clue_requirements(text):
+    visual = bool(_clue_requirements(text))
+    if visual:
         score_candidates(sess, clue_question(qid, text), "yes")
-    else:
-        leftover = chip_residual(text) if hits else text
-        if leftover.strip():
-            score_candidates(sess, clue_question(qid, leftover), "yes")
+    residual = visual_residual(text) if visual else text
+    if hits:
+        residual = chip_residual(residual)
+    residual = " ".join(residual.split())
+    if residual and _overlap_words(residual):
+        # Evidence is keyed by question id. Reusing the visual clue's id
+        # would replace that judgment with the leftover words.
+        overlap_id = f"{qid}_rest" if visual else qid
+        score_candidates(sess, clue_question(overlap_id, residual), "yes")
     for trait_id, polarity in hits:
         if trait_id in sess.evidence:
             continue

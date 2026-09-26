@@ -43,6 +43,7 @@ TRAIT_RECONCILE = _TRAITS["reconcile"]
 BROAD_CATEGORIES = _CATEGORIES["broad"]
 HAIR_CATEGORIES = _CATEGORIES["color_detail"]
 SERIES_APPEARANCE = _CATEGORIES["series_appearance"]
+SERIES_SPLIT = _CATEGORIES["series_split"]
 POPULAR_CATEGORIES = _CATEGORIES["popular"]
 
 # characters.yml — names.identity_id, web_search.headliner_label / is_non_character.
@@ -71,6 +72,7 @@ __all__ = [
     "SEARCH_SUFFIX",
     "SERIES_APPEARANCE",
     "SERIES_CRUMBS",
+    "SERIES_SPLIT",
     "SERIES_MARKERS",
     "TRAIT_PATTERNS",
     "TRAIT_RECONCILE",

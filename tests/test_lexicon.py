@@ -30,6 +30,7 @@ from waifu_engine.nekomimi.lexicon import (
     SERIES_APPEARANCE,
     SERIES_CRUMBS,
     SERIES_MARKERS,
+    SERIES_SPLIT,
     TRAIT_PATTERNS,
     TYPED_ALIASES,
 )
@@ -64,6 +65,12 @@ _TYPED = (
     ("spider man", "Spider-Man"),
     ("the simpsons", "The Simpsons"),
     ("simpsons", "The Simpsons"),
+    ("ookami to koushinryou", "Spice and Wolf"),
+    ("ookami to koshinryo", "Spice and Wolf"),
+    ("ookami to ningen", "Spice and Wolf"),
+    ("spice & wolf", "Spice and Wolf"),
+    ("spice and wolf", "Spice and Wolf"),
+    ("spice wolf", "Spice and Wolf"),
     ("mario", "Super Mario"),
 )
 
@@ -105,7 +112,7 @@ def test_medium_other_is_present_and_does_not_filter():
 def test_marker_and_alias_sequences_match_the_old_tables():
     """First-match order and the Mario exact flag survive the move."""
     assert SERIES_MARKERS[:5] == _VOCALOID_FIRST
-    assert len(SERIES_MARKERS) == 56
+    assert len(SERIES_MARKERS) == 62
     assert SERIES_MARKERS[5] == ("blue archive", "Blue Archive")
     assert TYPED_ALIASES == _TYPED
     assert EXACT_ALIASES == frozenset({"mario"})
@@ -124,7 +131,7 @@ def test_set_maps_keep_the_old_membership():
     assert len(SERIES_CRUMBS) == 13
     assert {"internet meme", "voice bank", "software"} <= SERIES_CRUMBS
     assert AGGREGATE_EXACT == {"vocaloids", "fanloid", "fanloids", "vocaloid characters"}
-    assert "vocaloid" in NAME_BLOCK and len(NAME_BLOCK) == 63
+    assert "vocaloid" in NAME_BLOCK and "spice and wolf" in NAME_BLOCK and len(NAME_BLOCK) == 64
     assert web_search.SERIES_BLOCK == NAME_BLOCK
     assert PUBLISHER_LABELS == {
         "marvel comics", "dc comics", "image comics", "dark horse comics", "dark horse",
@@ -133,6 +140,7 @@ def test_set_maps_keep_the_old_membership():
     assert wikipedia._PUBLISHER_SERIES == PUBLISHER_LABELS
     assert len(GENERIC_SERIES) == 11 and "video game" in GENERIC_SERIES
     assert SERIES_APPEARANCE == ("hair_color", "look_halo", "look_wings", "look_horns")
+    assert SERIES_SPLIT == ("look_prosthetic", "look_ears", "look_eyepatch", "look_tail")
     assert list(POPULAR_CATEGORIES) == ["game", "comic", "movie", "tv"]
     assert POPULAR_CATEGORIES["comic"][0] == "Category:Marvel Comics superheroes"
 

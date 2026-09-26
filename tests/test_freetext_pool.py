@@ -7,6 +7,8 @@ who did not literally match that word.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from waifu_engine.nekomimi import engine, laya_client, session as sess_mod
@@ -130,6 +132,8 @@ def test_negated_chips_are_not_yes_evidence(_harsh_laya):
     engine._rescore_candidates(sess)
     question, answer = sess.evidence["species_demon"]
     assert answer == "no" and question.get("soft_chip") is True
+    demon = next(row for row in engine._answered_trait_pack(sess)["rows"] if row[0] == "species_demon")
+    assert demon[2] == engine._SOFT_NO_SCORE
     by = {c.id: c.logodds for c in sess.alive_candidates()}
     assert by["mio"] > by["imp"]
 
@@ -140,6 +144,51 @@ def test_negated_chips_are_not_yes_evidence(_harsh_laya):
     assert sess.evidence["job_royalty"][1] == "no"
     by = {c.id: c.logodds for c in sess.alive_candidates()}
     assert by["mio"] > by["aria"]
+
+
+def test_pink_hair_still_overlap_scores_the_dress(_harsh_laya):
+    """A visual clue must not swallow the leftover words.
+
+    "pink hair and a white dress" used to score only the hair. The dress
+    stayed off the posterior. It stays a mild overlap, not a hard yes.
+    """
+    dress = {
+        "id": "seam", "name": "Seam", "series": "Crown Tale", "medium": "anime",
+        "blurb": "She has long pink hair and wears a white dress to court.",
+        "tags": ["female", "pink"], "popularity": 10,
+    }
+    plain = {
+        "id": "clerk", "name": "Clerk", "series": "Crown Tale", "medium": "anime",
+        "blurb": "She has long pink hair and wears a heavy coat.",
+        "tags": ["female", "pink"], "popularity": 10,
+    }
+    state = engine.start("pink hair and a white dress")
+    sess = sess_mod.get_session(state["session_id"])
+    sess.add_candidates([dress, plain])
+    engine._rescore_candidates(sess)
+    clues = {q["id"]: q.get("clues") or "" for q, _a in sess.evidence.values() if q.get("clues")}
+    assert any("dress" in clue for clue in clues.values())
+    assert "clue_seed_rest" in clues
+    by = {c.id: c.logodds for c in sess.alive_candidates()}
+    assert by["seam"] > by["clerk"]
+    for question, answer in sess.evidence.values():
+        if question.get("clues"):
+            continue
+        assert question.get("soft_chip") is True
+        assert answer != "yes" or question["id"] != "hair_color"
+
+
+def test_free_text_never_promotes_a_yaml_job_to_a_hard_yes(_harsh_laya):
+    """"soldier" is a lexicon marker, not a chip. It must not answer job_soldier."""
+    state = engine.start("soldier with a white coat")
+    sess = sess_mod.get_session(state["session_id"])
+    assert "job_soldier" not in sess.evidence
+    for question, _answer in sess.evidence.values():
+        assert question.get("clues") or question.get("soft_chip") is True
+    rows = engine._answered_trait_pack(sess)["rows"]
+    assert rows == [] or all(row[2] not in {0.0, 1.0} for row in rows)
+    packed = engine._laya_state(sess, [])
+    assert "soldier with a white coat" not in json.dumps(packed["answered_traits"])
 
 
 def test_princess_chip_ranks_without_dropping_the_others(_harsh_laya):

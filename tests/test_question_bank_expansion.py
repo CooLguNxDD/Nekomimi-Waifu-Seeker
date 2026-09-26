@@ -62,6 +62,8 @@ def test_new_tags_are_mined_from_blurbs():
             assert tag in mined
     assert "elf" in web_search.mine_trait_slugs("She is an elf archer.")
     assert "animal-ears" in web_search.mine_trait_slugs("A girl with cat ears.")
+    assert "animal-ears" in web_search.mine_trait_slugs("She still has her wolf ears.")
+    assert "prosthetic" in web_search.mine_trait_slugs("His right arm is automail.")
     assert "twin" not in web_search.mine_trait_slugs("She wears twintails.")
     assert "tail" not in web_search.mine_trait_slugs("She wears a ponytail.")
     assert "isekai-travel" in web_search.mine_trait_slugs("An isekai hero.")
