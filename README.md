@@ -8,9 +8,11 @@ An **Nekomimi character guesser** for **anime, manga, comics, games, movies and 
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CooLguNxDD/Nekomimi-Waifu-Seeker/blob/main/notebooks/nekomimi_colab.ipynb)
 
-`notebooks/nekomimi_colab.ipynb` runs this repo on a Colab **L4**. It clones `main`, installs the Python dependencies, builds the SolidJS UI, optionally rewrites search queries with Ollama, and publishes the app with ngrok.
+`notebooks/nekomimi_colab.ipynb` runs this repo on a Colab **L4**. The setup cell checks out `BRANCH` (a branch name or a full commit SHA), then installs Ollama, Python, and the SolidJS UI at the same time. The query-rewriter GGUF (~17 GB) starts downloading as soon as Ollama is up, while pip and `npm` are still running. Laya's weights are prefetched into the Hugging Face cache in that same window. The server cell prints a public `/nekomimi` URL after Ollama has warmed up on the GPU.
 
-Use an L4 runtime, then run the cells from the top. The server cell prints a public `/nekomimi` URL. That tunnel has no login, so anyone with the link can play. If `GOOGLE_API_KEY` is set, those visits can run Gemini Search and bill that key.
+Use an L4 runtime, then run the cells from the top. That tunnel has no login, so anyone with the link can play. If `GOOGLE_API_KEY` is set, those visits can run Gemini Search and bill that key.
+
+Set `BRANCH` in the config cell before running. `main` tracks the default branch. A full 40-character commit SHA is fetched shallow and left detached, which is the bench pin. A rerun on the same runtime skips pip, `npm`, Chromium, and the GGUF pull when they are already present. Local setup, the same pin from a shell, and cold-start troubleshooting are in [Set up a new machine](#set-up-a-new-machine).
 
 Before the first cell, add secrets in the Colab sidebar (the key icon). The notebook loads them with `google.colab.userdata`. Tokens stay in Colab secrets.
 
@@ -91,30 +93,81 @@ Runs without weights too — every Laya decision has a tag/entropy fallback.
 
 Laya does **not** generate text. It only answers typed decision questions.
 
-## Install
+## Set up a new machine
+
+Python **3.10 or newer** (the Docker image uses 3.12). A GPU is optional on your own machine: Laya runs on CPU (~26 s to load, ~1.2 s per batch of 10). The Colab notebook asks for an **L4** because the optional query rewriter is a ~17 GB GGUF. Node.js **22** is required to build the web UI (Vite 7; the Docker UI stage uses `node:22`).
+
+No account is required to play locally. Optional keys stay out of the repo:
+
+| Key | Where it goes | What it does |
+|---|---|---|
+| Hugging Face token | `HF_TOKEN` in the environment, or a Colab secret | Authenticated download of the Laya weights. Anonymous download works. |
+| Google AI Studio key | `GEMINI_API_KEY` or `GOOGLE_API_KEY` in `.env` (git-ignored) or a Colab secret | Gemini search grounding. Off unless you turn it on. Each call is billed. |
+| ngrok authtoken | Colab secret `NGROK_TOKEN` | Public URL from the Colab notebook. Not used by the local server. |
+
+Copy `.env.example` to `.env` for anything you want saved locally. Real environment variables win over that file. `WAIFU_ENV_FILE=0` disables it.
+
+### Local
 
 ```bash
-cd waifu-determination-engine
+git clone https://github.com/CooLguNxDD/Nekomimi-Waifu-Seeker.git
+cd Nekomimi-Waifu-Seeker
 python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# macOS / Linux
-# source .venv/bin/activate
-
-pip install -r requirements.txt
-pip install -e .
-# optional: headless Chromium search (falls back to DuckDuckGo if missing)
-pip install -e ".[playwright]"
-playwright install chromium
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+python -m pip install -e ".[playwright]"
+python -m playwright install chromium
+cd webui && npm ci && npm run build && cd ..
+USE_TF=0 python -m waifu_engine.web
 ```
 
-First Laya load downloads ~800MB of weights from Hugging Face. For a quick demo without that:
+Open http://127.0.0.1:7860/nekomimi . The one-shot page is http://127.0.0.1:7860/ . The first start downloads Laya (~800 MB) and loads it before the port opens. Weights land in the Hugging Face cache (`~/.cache/huggingface`, or `%USERPROFILE%\.cache\huggingface` on Windows).
+
+`USE_TF=0` stops Transformers from hanging while it probes TensorFlow. `WAIFU_LAYA_PRELOAD=0` loads Laya on the first request instead of at startup. `python -m waifu_engine.nekomimi.laya_client` downloads and checks the weights without serving.
+
+Playwright is the headless Chromium search. If that install fails, Wikipedia, AniList, and DuckDuckGo still run. Skip the browser with `python -m pip install -e .` and leave `playwright install` out.
+
+A demo that never downloads weights:
 
 ```bash
 python -m waifu_engine "silver hair mage calm reflective" --fallback
 ```
+
+`WAIFU_FORCE_FALLBACK=1 python -m waifu_engine.web` is the same idea for the UI. Gemini search and the query rewriter are off until you opt in; see the sections below.
+
+### Pin a branch or commit
+
+Benches should name the revision the process is running.
+
+```bash
+git fetch origin
+git checkout <branch>
+# or a full commit SHA (detached)
+git fetch origin <40-character-sha>
+git checkout <40-character-sha>
+```
+
+Rebuild the UI when `webui/` changed (`cd webui && npm ci && npm run build`). On Colab, set `BRANCH` in the first code cell to that branch name or full SHA, then run every cell from the top. The notebook's checkout is shallow. A SHA is detached. Hex strings of 7 or more characters are treated as commits, so don't use an all-hex branch name.
+
+### Colab
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CooLguNxDD/Nekomimi-Waifu-Seeker/blob/main/notebooks/nekomimi_colab.ipynb)
+
+Runtime → Change runtime type → **L4**. Add `NGROK_TOKEN` (required for the public link), and optionally `HF_TOKEN` and `GOOGLE_API_KEY`, in the Colab secrets sidebar. Run all cells from the top. The server cell prints `https://….ngrok-free.app/nekomimi` (the host varies).
+
+The setup cell is `notebooks/colab_bootstrap.py`, embedded in the notebook so it can run before the clone exists. From a checkout, `python notebooks/colab_bootstrap.py` prints the plan for this machine and does not install or download. `--run` is the notebook path from a shell.
+
+Cold start is the GGUF download plus whatever of pip, Node, and the UI build did not fit beside it. Expect the public URL once that pull has finished, the model has warmed up on the GPU, and Laya has loaded from the cache (seconds on an L4, not another 800 MB download). A warm runtime — same VM, not a factory reset — should get through the setup cell in a few seconds.
+
+Troubleshooting:
+
+- **The setup cell is quiet for a long time.** The GGUF pull logs to `ollama-pull.log`. The model cell prints the last line every 15 seconds while it waits. Lane times are printed as each of Ollama, the UI, pip, and the Laya prefetch finishes.
+- **`ollama ps` shows CPU.** The runtime is not an L4, or something else filled the 24 GB. Change the runtime type to L4 and run from the top. Warmup stays before the server so the GGUF takes the GPU before Laya loads.
+- **The server cell times out.** `server.log` has the traceback. `/nekomimi` returns 503 until `waifu_engine/webui_dist/index.html` exists; re-run setup if the UI lane failed. A missing `HF_TOKEN` only slows the weight download; the prefetch retries inside the server when the cache is empty.
+- **The public URL cell stops on `NGROK_TOKEN`.** Add the secret and re-run the secrets cell, then the server cell. Inside the VM the app is still on port 7860.
+- **`BRANCH` does not check out.** It has to be a branch on `origin`, or a full commit SHA. Short hex names are commits, not branches.
+- **Ollama's installer fails on apt.** Re-run the setup cell. This notebook does not run its own `apt-get update`; the Ollama install script does, and a bad mirror is usually a retry.
 
 ## CLI
 
@@ -326,37 +379,12 @@ Stop:
 docker compose down
 ```
 
-## Native Laya (local pip / venv)
+## Port 7860 already taken
 
-Already set up under `.venv` on this machine.
+Stop the Docker stack before the local server, or the other way around:
 
-```bat
-cd E:\code_project\OSS\CatOSSWorks\waifu-determination-engine
-run-cli.bat "Mika Misono"
-run-web.bat
-```
-
-Or manually:
-
-```bat
-cd E:\code_project\OSS\CatOSSWorks\waifu-determination-engine
-set USE_TF=0
-set WAIFU_FORCE_FALLBACK=0
-.venv\Scripts\activate
-python -m waifu_engine "silver hair mage" 
-python -m waifu_engine.web
-```
-
-Open http://127.0.0.1:7860 — stop the Docker container first if that port is taken:
-
-```bat
+```bash
 docker compose down
 ```
 
-Weights cache at `%USERPROFILE%\.cache\huggingface\`.
-
-`python -m waifu_engine.web` loads Laya at startup, taking about 26 s on this
-box, before it prints "Application startup complete". Set
-`WAIFU_LAYA_PRELOAD=0` to load on the first request instead, or run
-`python -m waifu_engine.nekomimi.laya_client` to download and check the weights
-without starting the server.
+Then `python -m waifu_engine.web` again. The startup line "Application startup complete" is printed after Laya has loaded.
