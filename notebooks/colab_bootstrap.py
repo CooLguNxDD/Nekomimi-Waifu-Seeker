@@ -277,11 +277,26 @@ def ui_is_fresh(app_dir: Path, head: str) -> bool:
     return stamp.read_text().strip() == expected
 
 
+def chromium_install_needed(pip_specs: list[str], chromium_on_disk: bool) -> bool:
+    """True when ``playwright install chromium`` should run.
+
+    The browser build belongs to the Playwright package that is installed.
+    A warm runtime can already have Chromium for an older package while pip
+    still upgrades Playwright. Skipping the browser install then leaves the
+    new package pointed at the previous revision.
+    """
+    if any(dist_name(spec) == "playwright" for spec in pip_specs):
+        return True
+    return not chromium_on_disk
+
+
 def chromium_present() -> bool:
     """True when a Playwright Chromium binary is already on disk.
 
     ``playwright install chromium`` contacts the CDN even when the browser
-    is present. The executable is enough to skip that.
+    is present. ``chromium_install_needed`` still installs when the
+    Playwright package itself is changing; this binary belongs to the
+    package that downloaded it.
     """
     env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
     # Playwright uses only PLAYWRIGHT_BROWSERS_PATH when it is set. "0" means
@@ -408,7 +423,10 @@ def sync_repo(repo_url: str, dest: str, ref: str) -> str:
     Clones are shallow. ``git fetch --all`` on every rerun downloaded every
     branch and dominated the checkout cell. A hex ref is fetched by SHA and
     left detached so ``origin/<sha>`` does not have to exist. When HEAD is
-    already that commit, the fetch is skipped.
+    already that commit, the fetch is skipped and local edits stay, including
+    the notebook's ``query_llm.py`` patch. Moving to another revision forces
+    the checkout: that patch would otherwise make ``checkout`` abort when the
+    new tree also changes the file. The previous cell used ``reset --hard``.
     """
     path = Path(dest)
     if path.exists() and not (path / ".git").is_dir():
@@ -425,13 +443,15 @@ def sync_repo(repo_url: str, dest: str, ref: str) -> str:
             print(f"[colab] already at {head}")
             return head
         _run(["git", "fetch", "--depth", "1", "origin", ref.strip()], cwd=dest)
-        _run(["git", "checkout", "--detach", "FETCH_HEAD"], cwd=dest)
+        # --force drops the notebook patch so a file the new commit also
+        # edits can be checked out. Same-commit returns above keep the patch.
+        _run(["git", "checkout", "--force", "--detach", "FETCH_HEAD"], cwd=dest)
     else:
         if head and _remote_branch_sha(dest, ref) == head:
             print(f"[colab] already at origin/{ref} ({head[:12]})")
             return head
         _run(["git", "fetch", "--depth", "1", "origin", ref], cwd=dest)
-        _run(["git", "checkout", "-B", ref, "FETCH_HEAD"], cwd=dest)
+        _run(["git", "checkout", "-f", "-B", ref, "FETCH_HEAD"], cwd=dest)
     resolved = _head_or_none(dest)
     if not resolved:
         raise RuntimeError(f"checkout of {ref} did not produce a commit")
@@ -523,16 +543,64 @@ def model_ref(hf_repo: str, quant: str) -> str:
     return f"hf.co/{hf_repo}:{quant}"
 
 
-def model_present(hf_repo: str, quant: str, model_name: str) -> bool:
-    """True when the pulled tag or the wrapped model name is already listed.
+def ollama_listed_names(listed: str) -> set[str]:
+    """Return the NAME column from ``ollama list`` output.
 
-    A warm runtime should not download the GGUF again. Either name counts:
-    the pull tag before ``ollama create``, and ``MODEL_NAME`` after it.
+    A substring search treated the wrapper name as present inside the
+    ``hf.co`` tag. The first column is the tag Ollama will actually resolve.
     """
-    listed = _ollama_list()
-    if not listed:
+    names: set[str] = set()
+    for line in listed.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0].lower() == "name" and len(parts) > 1 and parts[1].lower() == "id":
+            continue
+        names.add(parts[0])
+    return names
+
+
+def _name_listed(names: set[str], tag: str) -> bool:
+    """True when ``tag`` or ``tag:latest`` is an exact listed name."""
+    if tag in names:
+        return True
+    return ":" not in tag and f"{tag}:latest" in names
+
+
+def model_present(
+    hf_repo: str,
+    quant: str,
+    model_name: str,
+    *,
+    listed: str | None = None,
+    state: dict[str, Any] | None = None,
+) -> bool:
+    """True when this exact GGUF source tag is already local.
+
+    The wrapper name alone is not enough. A warm runtime can change
+    ``HF_REPO`` or ``QUANT`` and leave ``MODEL_NAME`` as-is; ``ollama create``
+    then does ``FROM`` a tag that was never pulled. The other proof is the
+    state file written by ``create_fixed_context_model``: the wrapper was
+    built from this same source tag.
+    """
+    ref = model_ref(hf_repo, quant)
+    text = _ollama_list() if listed is None else listed
+    names = ollama_listed_names(text)
+    if _name_listed(names, ref):
+        return True
+    saved = _read_state() if state is None else state
+    if saved.get("wrapper_from") != ref or saved.get("wrapper_name") != model_name:
         return False
-    return model_ref(hf_repo, quant) in listed or model_name in listed
+    return _name_listed(names, model_name)
+
+
+def remember_wrapper(model_name: str, hf_repo: str, quant: str) -> None:
+    """Record that ``model_name`` was created FROM this source tag.
+
+    The next setup uses the record when ``ollama list`` shows the wrapper
+    but not the ``hf.co`` tag. A different quant does not match it.
+    """
+    _update_state(wrapper_name=model_name, wrapper_from=model_ref(hf_repo, quant))
 
 
 def _requirements_text(app_dir: str) -> str:
@@ -577,7 +645,7 @@ def take_snapshot(cfg: Config, head: str | None) -> Snapshot:
         ui_fresh=bool(head) and ui_is_fresh(app, head),
         pip_specs=pip_specs,
         laya_spec=laya_spec,
-        playwright=not chromium_present(),
+        playwright=chromium_install_needed(pip_specs, chromium_present()),
         defer_laya_until_pip=defer,
         cuda_torch=cuda,
     )
@@ -981,6 +1049,7 @@ def create_fixed_context_model(hf_repo: str, quant: str, ctx: int, model_name: s
     """
     Path("Modelfile").write_text(f"FROM hf.co/{hf_repo}:{quant}\nPARAMETER num_ctx {ctx}\n")
     _run(["ollama", "create", model_name, "-f", "Modelfile"])
+    remember_wrapper(model_name, hf_repo, quant)
     print(_run(["ollama", "list"], capture=True))
 
 

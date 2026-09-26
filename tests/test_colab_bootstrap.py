@@ -322,6 +322,58 @@ def test_sync_repo_branch_then_sha_then_skip(tmp_path: Path):
     assert skipped == first
 
 
+def test_sync_repo_drops_the_notebook_patch_only_when_head_moves(tmp_path: Path):
+    src = tmp_path / "src"
+    _init_repo(src)
+    (src / "waifu_engine").mkdir()
+    first = _commit_file(src, "waifu_engine/query_llm.py", "upstream-a\n")
+    second = _commit_file(src, "waifu_engine/query_llm.py", "upstream-b\n")
+    bare = tmp_path / "origin.git"
+    _bare_remote(src, bare)
+    dest = tmp_path / "checkout"
+    patched = dest / "waifu_engine" / "query_llm.py"
+
+    assert boot.sync_repo(str(bare), str(dest), first) == first
+    patched.write_text("notebook-patch\n")
+    # main also edits query_llm.py. checkout without --force stops here.
+    assert boot.sync_repo(str(bare), str(dest), "main") == second
+    assert patched.read_text() == "upstream-b\n"
+
+    patched.write_text("notebook-patch\n")
+    assert boot.sync_repo(str(bare), str(dest), "main") == second
+    assert patched.read_text() == "notebook-patch\n"
+
+    assert boot.sync_repo(str(bare), str(dest), first) == first
+    assert patched.read_text() == "upstream-a\n"
+
+
+def test_chromium_install_follows_a_playwright_upgrade():
+    assert boot.chromium_install_needed(["playwright>=1.49"], chromium_on_disk=True)
+    assert boot.chromium_install_needed(["Playwright>=1.55"], chromium_on_disk=True)
+    assert boot.chromium_install_needed(["pyngrok"], chromium_on_disk=False)
+    assert not boot.chromium_install_needed(["pyngrok"], chromium_on_disk=True)
+    assert not boot.chromium_install_needed([], chromium_on_disk=True)
+
+
+def test_model_present_requires_the_source_tag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(boot, "STATE_PATH", str(tmp_path / "state.json"))
+    wrapper = "Qwen3.6-35B-A3B-GGUF"
+    old = "NAME ID SIZE MODIFIED\n" + wrapper + ":latest abc 17GB\n"
+    assert not boot.model_present("org/model", "NEW", wrapper, listed=old, state={})
+    # The wrapper string sits inside the hf.co tag. That must not count as NEW.
+    sibling = old + "hf.co/org/model:OLD def 17GB\n"
+    assert not boot.model_present("org/model", "NEW", wrapper, listed=sibling, state={})
+    exact = sibling + "hf.co/org/model:NEW ghi 17GB\n"
+    assert boot.model_present("org/model", "NEW", wrapper, listed=exact, state={})
+    stale = {"wrapper_name": wrapper, "wrapper_from": "hf.co/org/model:OLD"}
+    assert not boot.model_present("org/model", "NEW", wrapper, listed=old, state=stale)
+    fresh = {"wrapper_name": wrapper, "wrapper_from": "hf.co/org/model:NEW"}
+    assert boot.model_present("org/model", "NEW", wrapper, listed=old, state=fresh)
+    boot.remember_wrapper(wrapper, "org/model", "NEW")
+    assert boot.model_present("org/model", "NEW", wrapper, listed=old) is True
+    assert boot.model_present("org/model", "OTHER", wrapper, listed=old) is False
+
+
 def test_sync_repo_rejects_a_non_git_directory(tmp_path: Path):
     dest = tmp_path / "occupied"
     dest.mkdir()
