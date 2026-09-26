@@ -58,6 +58,9 @@ markers:
   - { phrase: "spice & wolf", label: Spice and Wolf }
   - { phrase: spice and wolf, label: Spice and Wolf }
   - { phrase: spice wolf, label: Spice and Wolf }
+  - { phrase: holo the wise wolf, label: Spice and Wolf }
+  - { phrase: wolf harvest deity, label: Spice and Wolf }
+  - { phrase: wise wolf, label: Spice and Wolf }
   - { phrase: my hero academia, label: My Hero Academia }
   - { phrase: assassination classroom, label: Assassination Classroom }
   - { phrase: food wars, label: Food Wars }
@@ -81,7 +84,24 @@ typed_aliases:
   - { phrase: "spice & wolf", label: Spice and Wolf }
   - { phrase: spice and wolf, label: Spice and Wolf }
   - { phrase: spice wolf, label: Spice and Wolf }
+  - { phrase: holo the wise wolf, label: Spice and Wolf }
+  - { phrase: wolf harvest deity, label: Spice and Wolf }
+  - { phrase: wise wolf, label: Spice and Wolf }
   - { phrase: mario, label: Super Mario, exact: true }
+
+# Series-field spellings that are one work. same_series folds these keys.
+# "Spice & Wolf" and "Ookami to Koushinryou" share no prefix, so the merchant
+# and the wolf used to look like different works and near-twin defer never
+# asked about ears. Search markers stay in `markers`.
+series_folds:
+  - label: Spice and Wolf
+    phrases:
+      - spice and wolf
+      - spice & wolf
+      - spice wolf
+      - ookami to koushinryou
+      - ookami to koshinryo
+      - ookami to ningen
 
 # Exact normalized string match in web_search.series_is_crumb.
 crumbs:

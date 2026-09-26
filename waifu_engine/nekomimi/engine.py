@@ -48,6 +48,7 @@ from ..names import (
 )
 from . import laya_client
 from .lexicon import BROAD_CATEGORIES as _BROAD_CATEGORIES
+from .lexicon import CHARACTER_IDENTITIES as _CHARACTER_IDENTITIES
 from .lexicon import EXACT_ALIASES as _EXACT_ALIASES
 from .lexicon import HAIR_CATEGORIES as _HAIR_CATEGORIES
 from .lexicon import NAME_BLOCK as _NAME_BLOCK
@@ -124,6 +125,11 @@ _NAMESAKE_PENALTY = 2.2
 # royalty tag under the heuristic cap is about log(0.6/0.5) ≈ 0.18. 1.05
 # beats both together. A clear model miss (log(0.15/0.85) ≈ -1.7) still wins.
 _HEADLINER_BONUS = 1.05
+# Added to the cast member a look pin supports, per answered question.
+# The empty-seed Holo miss had Lawrence ahead by about 0.31 posterior
+# (~0.6 log-odds) with no series chip. 0.8 clears that gap. It stays under
+# a clear model miss (~1.7) so one confident noul still outweighs one pin.
+_PIN_SPLIT_STEP = 0.8
 # Two alias rows each at least this probable mean the identity is still split.
 # Guessing either fragment commits before the mass is one person.
 _ALIAS_SPLIT_MASS = 0.15
@@ -627,20 +633,136 @@ def _mask_split_titles(text: str, cand: Candidate) -> str:
     return masked
 
 
+def _appearance_pins() -> dict[str, dict[str, Any]]:
+    """Identity rows that name a look, keyed by lexicon id."""
+    return {
+        row["id"]: row
+        for row in _CHARACTER_IDENTITIES
+        if row.get("has") or row.get("lacks")
+    }
+
+
+_APPEARANCE_PINS = _appearance_pins()
+
+
+def _appearance_pin(cand: Candidate) -> dict[str, Any] | None:
+    """Lexicon look pin for ``cand``, or None when the work does not match.
+
+    An unknown series still matches. Search often files one of the pair as
+    "Unknown" while the other names the show. A known different work does
+    not: the pin is not a guess about every person who shares the spelling.
+    """
+    row = _APPEARANCE_PINS.get(identity_id(cand.name))
+    if row is None:
+        return None
+    franchise = row.get("franchise") or ""
+    if not franchise:
+        return row
+    if not series_key(cand.series) or is_publisher_series(cand.series):
+        return row
+    if same_series(cand.series, franchise):
+        return row
+    return None
+
+
+def _pin_trait_side(question: dict[str, Any], row: dict[str, Any]) -> str:
+    """``has``, ``lacks``, or ``""`` for this question's yes-tags against one pin."""
+    tags = set(question.get("tags_true") or [])
+    if not tags or question.get("clues"):
+        return ""
+    if tags & set(row.get("has") or ()):
+        return "has"
+    if tags & set(row.get("lacks") or ()):
+        return "lacks"
+    return ""
+
+
+def _apply_appearance_pins(sess: GuessSession, live: list[Candidate]) -> None:
+    """Lift the cast member whose lexicon look matches the answers given.
+
+    The step is inside one franchise. Holo gains on Kraft Lawrence when the
+    player said wolf, deity, ears or tail; she does not gain on a catgirl
+    who is already ahead of both. Nothing is written onto tags, so Laya's
+    profile stays the scraped blurb. No answered pin question means no
+    lift: the merchant may still lead, and near-twin defer asks the look.
+    """
+    if len(live) < 2:
+        return
+    groups: dict[str, list[tuple[Candidate, dict[str, Any]]]] = {}
+    for cand in live:
+        row = _appearance_pin(cand)
+        if row is None:
+            continue
+        groups.setdefault(row["franchise"], []).append((cand, row))
+    for group in groups.values():
+        if len({id(cand) for cand, _row in group}) < 2:
+            continue
+        net = {id(cand): 0 for cand, _row in group}
+        for question, answer in sess.evidence.values():
+            if answer not in ("yes", "no"):
+                continue
+            winners: list[Candidate] = []
+            losers: list[Candidate] = []
+            for cand, row in group:
+                side = _pin_trait_side(question, row)
+                if side == "has":
+                    (winners if answer == "yes" else losers).append(cand)
+                elif side == "lacks":
+                    (losers if answer == "yes" else winners).append(cand)
+            if not winners or not losers:
+                continue
+            for cand in winners:
+                net[id(cand)] += 1
+            for cand in losers:
+                net[id(cand)] -= 1
+        best = max(net.values())
+        if best <= 0:
+            continue
+        leaders = [cand for cand, _row in group if net[id(cand)] == best]
+        trail = [cand for cand, _row in group if net[id(cand)] < best]
+        if not trail:
+            continue
+        advantage = best - max(net[id(cand)] for cand in trail)
+        swing = _PIN_SPLIT_STEP * (advantage / 2.0)
+        if swing <= 0:
+            continue
+        pair_ids = {id(cand) for cand in leaders + trail}
+        pair_top = max(cand.logodds for cand in leaders + trail)
+        ahead = [
+            cand.logodds for cand in live
+            if id(cand) not in pair_ids and cand.logodds > pair_top
+        ]
+        ceiling = (min(ahead) - 0.02) if ahead else None
+        for cand in leaders:
+            target = cand.logodds + swing
+            if ceiling is not None:
+                target = min(target, max(cand.logodds, ceiling))
+            cand.logodds = target
+
+
 def _candidate_has_trait(question: dict[str, Any], cand: Candidate) -> bool:
     """Whether ``cand`` shows one of ``question``'s yes-tags.
 
-    Tags are checked first. A blurb that only says "automail" or "wolf ears"
-    still counts: those rows often never received the mined slug as a tag,
-    and a silent side is not a confirmed "no" until the question is asked.
-    Work titles are blanked before that mine. ``tail`` inside "Fairy Tail"
-    is the guild, not a body part. A ``tail`` tag is kept when the blurb
-    still says tail after the title is removed, or when the blurb never
-    used the word at all.
+    A lexicon look pin wins over tags and the blurb. Kraft Lawrence's page
+    mentions Holo's ears; that mine used to hide the split, so near-twin
+    defer never asked and the guess went out pin-thin. Tags are checked
+    next. A blurb that only says "automail" or "wolf ears" still counts:
+    those rows often never received the mined slug as a tag, and a silent
+    side is not a confirmed "no" until the question is asked. Work titles
+    are blanked before that mine. ``tail`` inside "Fairy Tail" is the guild,
+    not a body part. A ``tail`` tag is kept when the blurb still says tail
+    after the title is removed, or when the blurb never used the word at all.
     """
     true = set(question.get("tags_true") or [])
     if not true:
         return False
+    pin = _appearance_pin(cand)
+    if pin is not None:
+        side = _pin_trait_side(question, pin)
+        if side == "has":
+            return True
+        if side == "lacks":
+            return False
     blob = f"{cand.name} {cand.blurb}"
     masked = _mask_split_titles(blob, cand)
     mined = set(web_search.mine_trait_slugs(masked))
@@ -1348,7 +1470,8 @@ def _rescore_candidates(sess: GuessSession) -> None:
     word cannot floor the pool.
     A visual clue the profile clearly misses is a strong down-rank, not a
     removal, so a thin blurb can still recover on a later answer. Alias rows
-    are one identity before any of that is added up.
+    are one identity before any of that is added up. A lexicon look pin then
+    separates a same-work pair the blurb did not, without writing tags.
     """
     sess.collapse_identities()
     for question, answer in sess.evidence.values():
@@ -1417,6 +1540,7 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 p = min(0.6, max(0.4, _tag_match(question, c)))
             likelihood = p if answer == "yes" else 1.0 - p
             c.logodds += math.log(min(0.98, max(0.02, likelihood)))
+    _apply_appearance_pins(sess, live)
     _apply_identity_priors(sess, live)
 
 

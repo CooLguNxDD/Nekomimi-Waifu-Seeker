@@ -33,6 +33,7 @@ PUBLISHER_LABELS = _FRANCHISES["publisher_labels"]
 PUBLISHER_KEYS = _FRANCHISES["publisher_keys"]
 NAME_BLOCK = _FRANCHISES["name_block"]
 GENERIC_SERIES = _FRANCHISES["generic_series"]
+SERIES_FOLDS = _FRANCHISES["series_folds"]
 
 # traits.yml — web_search._marker_re. question_bank.json stays the question catalog.
 TRAIT_PATTERNS = _TRAITS["patterns"]
@@ -72,6 +73,7 @@ __all__ = [
     "SEARCH_SUFFIX",
     "SERIES_APPEARANCE",
     "SERIES_CRUMBS",
+    "SERIES_FOLDS",
     "SERIES_SPLIT",
     "SERIES_MARKERS",
     "TRAIT_PATTERNS",

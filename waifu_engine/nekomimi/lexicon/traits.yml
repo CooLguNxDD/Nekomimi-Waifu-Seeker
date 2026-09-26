@@ -104,6 +104,13 @@ traits:
       - goddess
       - god
       - deity
+  - id: beast
+    group: species
+    markers:
+      - kemonomimi
+      - beastkin
+      - wise wolf
+      - wolf deity
   - id: sword
     group: power
     markers:
@@ -279,6 +286,8 @@ traits:
       - fox ears
       - wolf ears
       - animal ears
+      - wise wolf
+      - wolf deity
   - id: tail
     group: look_tail
     markers:

@@ -43,6 +43,7 @@ from waifu_engine.nekomimi.lexicon.load import (
     build_traits,
     load_document,
     parse_document,
+    validate_character_pins,
 )
 from waifu_engine.sources import wikipedia
 
@@ -71,6 +72,9 @@ _TYPED = (
     ("spice & wolf", "Spice and Wolf"),
     ("spice and wolf", "Spice and Wolf"),
     ("spice wolf", "Spice and Wolf"),
+    ("holo the wise wolf", "Spice and Wolf"),
+    ("wolf harvest deity", "Spice and Wolf"),
+    ("wise wolf", "Spice and Wolf"),
     ("mario", "Super Mario"),
 )
 
@@ -112,7 +116,7 @@ def test_medium_other_is_present_and_does_not_filter():
 def test_marker_and_alias_sequences_match_the_old_tables():
     """First-match order and the Mario exact flag survive the move."""
     assert SERIES_MARKERS[:5] == _VOCALOID_FIRST
-    assert len(SERIES_MARKERS) == 62
+    assert len(SERIES_MARKERS) == 65
     assert SERIES_MARKERS[5] == ("blue archive", "Blue Archive")
     assert TYPED_ALIASES == _TYPED
     assert EXACT_ALIASES == frozenset({"mario"})
@@ -148,7 +152,7 @@ def test_set_maps_keep_the_old_membership():
 def test_trait_patterns_come_from_the_lexicon_in_order():
     """Mined slugs stay in the old order, and wings stay body-wing markers."""
     assert [slug for slug, _ in TRAIT_PATTERNS][:2] == ["female", "male"]
-    assert len(TRAIT_PATTERNS) == 64
+    assert len(TRAIT_PATTERNS) == 65
     wings = dict(TRAIT_PATTERNS)["wings"]
     assert wings == ("angel wings", "feathered wings")
     assert web_search.TRAIT_PATTERNS == TRAIT_PATTERNS
@@ -202,6 +206,17 @@ def test_missing_file_bad_type_and_duplicate_id_raise():
     dup_phrase["markers"].append(dict(dup_phrase["markers"][0]))
     with pytest.raises(LexiconError, match="duplicate phrase"):
         build_franchises(dup_phrase)
+
+
+def test_a_look_pin_must_name_a_real_trait():
+    """A pin slug that is not a mined trait fails the load instead of never matching."""
+    doc = load_document("characters.yml")
+    broken = json.loads(json.dumps(doc))
+    broken["identities"][-1]["has"] = ["not-a-real-trait"]
+    traits_doc = build_traits(load_document("traits.yml"))
+    characters = build_characters(broken)
+    with pytest.raises(LexiconError, match="not-a-real-trait"):
+        validate_character_pins(characters, traits_doc)
 
 
 def test_character_identities_reject_a_repeated_spelling():

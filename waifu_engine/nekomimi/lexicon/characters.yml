@@ -40,6 +40,29 @@ identities:
     names:
       - Trafalgar Law
       - Trafalgar D. Water Law
+  # Look pins are engine facts for one work. They are not copied onto tags
+  # and they are not sent to Laya. A merchant page that only mentions the
+  # wolf must not inherit her ears; a thin Holo blurb must still have them.
+  - id: holo
+    franchise: Spice and Wolf
+    has:
+      - animal-ears
+      - tail
+      - god
+      - beast
+    names:
+      - Holo
+      - Holo the Wise Wolf
+  - id: kraft-lawrence
+    franchise: Spice and Wolf
+    lacks:
+      - animal-ears
+      - tail
+      - god
+      - beast
+    names:
+      - Kraft Lawrence
+      - Craft Lawrence
 
 # phrases: player text that names the work (whole phrase, longest wins).
 # names: title characters. Supporting cast must not outrank these when the
@@ -90,6 +113,9 @@ headliners:
       - "spice & wolf"
       - spice and wolf
       - spice wolf
+      - holo the wise wolf
+      - wolf harvest deity
+      - wise wolf
     names:
       - Holo
   - franchise: One Piece
