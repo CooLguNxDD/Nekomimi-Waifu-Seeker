@@ -33,8 +33,10 @@ from typing import Any
 # empty set, which ``engine._eliminate_by_medium`` treats as "no hard filter".
 from .lexicon import MEDIUM_ACCEPTS, MEDIUM_VALUES
 
-# A "detail" answer adds free text to the session constraints instead of
-# scoring the current question, so it carries no evidence weight of its own.
+# A "detail" answer does not score the closed question. A non-zero weight
+# would take the ``else`` branch in rescoring and treat the text as a no.
+# The words move the posterior through soft chips, enrich.yml, and the
+# overlap clue (``CHIP_HIT`` / ``clue_overlap_likelihood``), not this table.
 ANSWER_WEIGHT: dict[str, float] = {"yes": 1.0, "no": -1.0, "detail": 0.0}
 ANSWERS = tuple(ANSWER_WEIGHT)
 
@@ -245,6 +247,17 @@ _CLUE_NEG = re.compile(
     r"(?:\W+\w+){0,3}\W*$",
     re.I,
 )
+# Clause boundaries. A negator on the far side of one belongs to another trait.
+_CLAUSE_BREAK = re.compile(r"[,.;:!?\n]|\s[-–—]\s|\bbut\b", re.I)
+# "from Halo", "in Halo 3", "Halo Infinite": the game series, not a halo.
+_HALO_TITLE_BEFORE = re.compile(
+    r"\b(?:from|in|of|plays?|played|playing)\s+(?:the\s+)?$", re.I,
+)
+_HALO_TITLE_AFTER = re.compile(
+    r"\s*(?::|\d|infinite\b|reach\b|ce\b|combat evolved\b|wars\b|series\b"
+    r"|games?\b|franchise\b|universe\b|odst\b)",
+    re.I,
+)
 _HALO_DECOR = re.compile(r"\b(?:halo|halos|winged halo|heart with wings)\b", re.I)
 _APPEARANCE = re.compile(
     r"\b(?:hair|haired|eyes|eyed|halo|halos|wings|horns|horned|blonde|redhead)\b",
@@ -319,9 +332,44 @@ def _trait_observed(slug: str, blurb: str, tags: set[str]) -> bool | None:
 
 
 def _negated_before(text: str, start: int) -> bool:
-    """Whether the words just before ``start`` negate the phrase that begins there."""
+    """Whether the words just before ``start``, in the same clause, negate it.
+
+    The window stops at a comma, period, semicolon, colon, dash or "but".
+    Without that stop "no wings, blonde hair" read as "not blonde", dropped
+    the hair colour, and enrich then kept the question from being asked.
+    """
     window = text[max(0, start - 48):start]
+    breaks = list(_CLAUSE_BREAK.finditer(window))
+    if breaks:
+        window = window[breaks[-1].end():]
     return bool(_CLUE_NEG.search(window))
+
+
+def halo_is_title(text: str, start: int, end: int) -> bool:
+    """Whether the ``halo`` at ``text[start:end]`` names the game series.
+
+    "a character from Halo" is a series, not a ring over the head. Reading it
+    as a halo recorded ``look_halo=yes`` and removed that question.
+    """
+    before = text[max(0, start - 24):start]
+    after = text[end:end + 24]
+    return bool(_HALO_TITLE_BEFORE.search(before) or _HALO_TITLE_AFTER.match(after))
+
+
+def _first_mention(pattern: re.Pattern[str], slug: str, raw: str) -> tuple[bool, bool]:
+    """``(found, negated)`` for ``pattern`` in ``raw``, preferring an affirmative hit.
+
+    Every occurrence is checked: "not blonde as a child, now blonde hair" is
+    still a yes, and the first, negated, occurrence must not hide it.
+    """
+    found = False
+    for match in pattern.finditer(raw):
+        if slug == "halo" and halo_is_title(raw, match.start(), match.end()):
+            continue
+        found = True
+        if not _negated_before(raw, match.start()):
+            return True, False
+    return found, found
 
 
 def _visual_mentions(text: str) -> list[tuple[str, str, bool]]:
@@ -333,9 +381,9 @@ def _visual_mentions(text: str) -> list[tuple[str, str, bool]]:
     raw = text or ""
     found = []
     for slug, pattern, search in _VISUAL_PHRASES:
-        match = pattern.search(raw)
-        if match:
-            found.append((slug, search, _negated_before(raw, match.start())))
+        hit, negated = _first_mention(pattern, slug, raw)
+        if hit:
+            found.append((slug, search, negated))
     return found
 
 
@@ -447,12 +495,23 @@ def clue_likelihood(clues: str, blurb: str, tags: list[str] | set[str] | None = 
 from .chips import chip_pattern, chip_residual, free_text_trait_hits, free_text_trait_ids
 
 
-def clue_overlap_likelihood(clues: str, blurb: str) -> float:
-    """P(yes) from shared words, kept inside the heuristic band.
+# Full overlap used to cap at 0.60 against a 0.45 miss (~0.3 nats). A
+# mid-game "white coat" then lost to a popularity gap of about 0.4 and the
+# leader did not move. 0.78 against 0.40 is about 0.67 nats: enough to change
+# top-1 among close candidates, still far from a 0.02 floor.
+OVERLAP_HIT = 0.78
+OVERLAP_MISS = 0.40
+# A chip hit of 0.82 was the same problem against fame. The miss stays at
+# one half so an unmatched word cannot floor the pool.
+CHIP_HIT = 0.90
 
-    A chip like "white dress" has no bank trait. Mentioning it should nudge a
-    blurb that says the same words. A miss stays near a half: the old path
-    applied a noul of 0 and floored the rest of the pool.
+
+def clue_overlap_likelihood(clues: str, blurb: str) -> float:
+    """P(yes) from shared words, kept inside the soft band.
+
+    A phrase like "white coat" has no bank trait. Mentioning it should move a
+    blurb that says the same words past a modest fame gap. A miss stays near
+    ``OVERLAP_MISS``: a noul of 0 used to floor the rest of the pool.
     """
     words = list(dict.fromkeys(re.findall(r"[a-z]{4,}", (clues or "").lower())))
     if not words:
@@ -460,8 +519,9 @@ def clue_overlap_likelihood(clues: str, blurb: str) -> float:
     blob = (blurb or "").lower()
     hits = sum(1 for word in words if re.search(rf"\b{re.escape(word)}\b", blob))
     if hits == 0:
-        return 0.45
-    return min(0.6, 0.45 + 0.15 * (hits / len(words)))
+        return OVERLAP_MISS
+    span = OVERLAP_HIT - OVERLAP_MISS
+    return min(OVERLAP_HIT, OVERLAP_MISS + span * (hits / len(words)))
 
 
 def chip_likelihood(qid: str, blurb: str, tags: list[str] | set[str] | None = None) -> float:
@@ -469,14 +529,15 @@ def chip_likelihood(qid: str, blurb: str, tags: list[str] | set[str] | None = No
 
     A free-text "yes" used to take Laya's noul even when that noul was ~0 for
     the whole pool ("angel", "white dress"). One unmatched word then floored
-    every candidate who still fit the earlier facts. Hits rise; misses do not.
+    every candidate who still fit the earlier facts. Hits rise to ``CHIP_HIT``
+    so a mid-game chip can pass a modest fame gap; misses do not fall.
     """
     question = QUESTIONS_BY_ID.get(qid) or {}
     if set(question.get("tags_true") or ()) & set(tags or ()):
-        return 0.82
+        return CHIP_HIT
     pattern = chip_pattern(qid)
     if pattern is not None and pattern.search(blurb or ""):
-        return 0.82
+        return CHIP_HIT
     return 0.5
 
 

@@ -15,6 +15,7 @@ _TRAITS = _LEXICON["traits"]
 _CATEGORIES = _LEXICON["categories"]
 _CHARACTERS = _LEXICON["characters"]
 _COVERAGE = _LEXICON["coverage"]
+_ENRICH = _LEXICON["enrich"]
 
 # medium.yml — engine._eliminate_by_medium / _known_choice. Empty other is no filter.
 MEDIUM_VALUES = _MEDIUM["media"]
@@ -56,12 +57,16 @@ NON_CHARACTERS = _CHARACTERS["non_characters"]
 # coverage.yml — web_search.coverage_queries. Name searches, not score pins.
 COVERAGE = _COVERAGE
 
+# enrich.yml — engine soft evidence from player text. Not a question writer.
+ENRICH_TEMPLATES = _ENRICH
+
 __all__ = [
     "AGGREGATE_EXACT",
     "BROAD_CATEGORIES",
     "CHARACTER_IDENTITIES",
     "COLOR_WORDS",
     "COVERAGE",
+    "ENRICH_TEMPLATES",
     "EXACT_ALIASES",
     "HEADLINERS",
     "NON_CHARACTERS",

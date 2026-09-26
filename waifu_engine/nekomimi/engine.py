@@ -47,12 +47,12 @@ from ..names import (
     series_key,
 )
 from . import laya_client
+from .enrich import enrich_hits, soft_enrich_likelihood
 from .lexicon import BROAD_CATEGORIES as _BROAD_CATEGORIES
 from .lexicon import CHARACTER_IDENTITIES as _CHARACTER_IDENTITIES
 from .lexicon import EXACT_ALIASES as _EXACT_ALIASES
 from .lexicon import HAIR_CATEGORIES as _HAIR_CATEGORIES
 from .lexicon import NAME_BLOCK as _NAME_BLOCK
-from .lexicon import SERIES_APPEARANCE as _SERIES_APPEARANCE
 from .lexicon import SERIES_MARKERS as _SERIES_MARKERS
 from .lexicon import SERIES_SPLIT as _SERIES_SPLIT
 from .lexicon import TYPED_ALIASES as _FRANCHISE_ALIASES
@@ -548,10 +548,8 @@ def _dynamic_questions(sess: GuessSession) -> list[dict[str, Any]]:
     return out
 
 
-# Appearance pin order: lexicon/categories.yml. hair_color plus the
-# series_appearance flags (the angel kit). ``_pinned_question_ids`` still
-# decides when. series_split categories become question ids below.
-_ANGEL_KIT = frozenset(qid for qid in _SERIES_APPEARANCE if qid != "hair_color")
+# series_split categories become question ids below. Hair and the angel kit
+# are not in that list: a series lock must not force them.
 # A same-work runner below this mass is an extra, not a near-twin. Deferring
 # a settled guess for that extra spent turns the leader had already earned.
 _NEAR_TWIN_MASS = 0.10
@@ -870,34 +868,33 @@ def _focus_split_ids(sess: GuessSession) -> list[str]:
 
 
 def _pinned_question_ids(sess: GuessSession) -> list[str]:
-    """Appearance questions the seed named, plus cast-splitting looks.
+    """Named looks not already enriched, plus cast-splitting questions.
 
-    Information gain never asked hair colour or halo: every Trinity student
-    shares school, uniform and teen, and halo was buried in one horns/wings
-    question. The traits the player already typed have to be offered early.
-    The angel kit is not forced again once the series is known unless that
-    text already named it. A prosthetic or animal ears that splits the cast
-    is pinned instead, or it loses to the kit and is never asked. The
-    leader's lexicon look pins are pinned even with no series chip, or the
-    wolf questions lose the race to the guess.
+    A colour or angel-kit trait the player already typed is evidence
+    (``enrich_hits``), not the next question. Series lock used to append
+    hair colour on every confirmation, and an earlier version appended halo,
+    wings and horns too, so information gain never reached a prosthetic or
+    animal ears. Unnamed kit questions stay in that ranking. A look that
+    splits the leader's cast is still pinned, with or without a series chip,
+    or the wolf questions lose the race to the guess.
     """
+    evidenced = _settled_ids(sess)
     ids: list[str] = []
+
+    def add(qid: str) -> None:
+        """Append ``qid`` once, skipping a trait the player already gave."""
+        if qid in evidenced or qid in ids:
+            return
+        ids.append(qid)
+
     for text in _free_text(sess):
         for qid in appearance_question_ids(text):
-            if qid not in ids:
-                ids.append(qid)
+            add(qid)
     for qid in _focus_split_ids(sess):
-        if qid not in ids:
-            ids.append(qid)
+        add(qid)
     if _confirmed_series(sess):
-        for qid in _SERIES_APPEARANCE:
-            if qid in _ANGEL_KIT:
-                continue
-            if qid not in ids:
-                ids.append(qid)
         for qid in _split_look_ids(sess):
-            if qid not in ids:
-                ids.append(qid)
+            add(qid)
     return ids
 
 
@@ -923,21 +920,23 @@ def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
 
     Medium ("Where is your character from?") and series ("Which series?")
     compete in that ranking like any other question. Forcing medium first
-    burned a turn when the pool already shared one medium. Traits the seed
-    already named are pulled in front of that ranking: otherwise hair colour,
-    halo and wings lose to questions the whole school answers the same way.
+    burned a turn when the pool already shared one medium. A trait the player
+    already typed is in ``evidence`` and is not offered again. Named looks
+    that enrich did not record (two colours in one sentence) are still pulled
+    forward. A series lock does not force the rest of the angel kit.
     """
     asked = sess.asked_ids()
     settled = sess.settled_categories()
+    evidenced = _settled_ids(sess)
     weighted = _weighted(sess)
     series = _series_question(sess)
     pool = [
         q
         for q in QUESTION_BANK + _dynamic_questions(sess) + ([series] if series else [])
-        if q["id"] not in asked and q["category"] not in settled
+        if q["id"] not in asked and q["id"] not in evidenced and q["category"] not in settled
     ]
     if not pool:
-        pool = [q for q in QUESTION_BANK if q["id"] not in asked]
+        pool = [q for q in QUESTION_BANK if q["id"] not in asked and q["id"] not in evidenced]
     pool.sort(key=lambda q: _split_quality(q, weighted), reverse=True)
     order = _pinned_question_ids(sess)
     pin_ids = set(order)
@@ -1025,13 +1024,17 @@ def _trait_score(question: dict[str, Any], answer: str) -> float | None:
 
     Free-text clues are prose. They stay on the overlap path and are not
     copied into the window, where Laya would treat the sentence as a fact.
+    A soft enrich row, including a choice key such as ``blonde``, stays at
+    0.6 or 0.4 so the window does not read player text as a hard yes.
     """
     if question.get("clues") or question.get("category") == "clue":
         return None
     if not question.get("id"):
         return None
-    if question.get("soft_chip"):
-        return _SOFT_YES_SCORE if answer == "yes" else _SOFT_NO_SCORE
+    if question.get("soft_chip") or question.get("soft_enrich"):
+        # A choice key ("blonde") is positive soft evidence. Only an explicit
+        # no sits on the low side of the band. 1.0 would read as a hard yes.
+        return _SOFT_NO_SCORE if answer == "no" else _SOFT_YES_SCORE
     if is_choice(question):
         return 1.0
     if answer == "yes":
@@ -1531,6 +1534,34 @@ def score_candidates(sess: GuessSession, question: dict[str, Any], answer: str) 
         _rescore_candidates(sess)
 
 
+def _apply_soft(cand: Candidate, p: float, deltas: list[float]) -> None:
+    """Add clamped log ``p`` to ``cand`` and record the step in ``deltas``.
+
+    The clamp matches hard evidence. A template that returned 0 or 1 would
+    otherwise become an infinite log-odds wipe.
+    """
+    p = min(0.98, max(0.02, p))
+    delta = math.log(p)
+    cand.logodds += delta
+    deltas.append(delta)
+
+
+def _soft_spread_note(qid: str, answer: str, deltas: list[float]) -> str:
+    """``qid=answer:gap`` for the log-odds spread a soft row opened, or ``""``.
+
+    The gap is what a mid-game detail moved between the best and worst live
+    candidate. One candidate has no ranking to change, so the note is empty.
+    The answer is in the key so a replaced soft_enrich row ("actually black
+    hair") shows which answer is being scored now.
+    """
+    if len(deltas) < 2:
+        return ""
+    spread = max(deltas) - min(deltas)
+    if spread <= 0.0:
+        return ""
+    return f"{qid}={answer}:{spread:.2f}"
+
+
 def _rescore_candidates(sess: GuessSession) -> None:
     """Replay evidence for new arrivals, reusing successful model judgments.
 
@@ -1553,8 +1584,23 @@ def _rescore_candidates(sess: GuessSession) -> None:
         return
     for c in live:
         c.logodds = popularity_prior(c.popularity)
+    soft_notes: list[str] = []
     for qid, (question, answer) in sess.evidence.items():
         prior = _prior_trait_pack(sess, qid)
+        # Before the choice branch. An enriched hair colour is a choice, and
+        # the choice path's log(0.02) miss would wipe whoever lacks the tag.
+        if question.get("soft_enrich"):
+            # The visual clue row already scored these words. The enrich row
+            # only keeps the question from being asked again.
+            if question.get("clue_covered"):
+                continue
+            deltas: list[float] = []
+            for c in live:
+                _apply_soft(c, soft_enrich_likelihood(question, answer, c), deltas)
+            note = _soft_spread_note(qid, answer, deltas)
+            if note:
+                soft_notes.append(note)
+            continue
         if is_choice(question):
             # Known medium/series is data, not a judgment: no model call.
             known = {c.id: d for c in live if (d := _known_choice(question, c))}
@@ -1573,25 +1619,33 @@ def _rescore_candidates(sess: GuessSession) -> None:
         # words ("angel", "white dress") came back near 0 for the whole pool
         # and floored everyone the earlier facts still fit.
         if question.get("soft_chip"):
+            deltas = []
             for c in live:
                 p = chip_likelihood(question["id"], c.blurb, c.tags)
                 # "not a demon" is stored as no. Invert so the named trait
                 # falls, and a profile that simply lacks it stays near a half.
                 if answer != "yes":
                     p = 1.0 - p
-                c.logodds += math.log(min(0.98, max(0.02, p)))
+                _apply_soft(c, p, deltas)
+            note = _soft_spread_note(qid, answer, deltas)
+            if note:
+                soft_notes.append(note)
             continue
         # Free-text clues are not a Laya vote. A noul of ~0 on "angel" or
         # "white dress" floored every candidate the earlier facts still fit.
         # Visual combinations still use the profile likelihood; anything else
-        # stays in the heuristic band.
+        # stays in the overlap band, which is wide enough to move a close lead.
         if question.get("clues"):
+            deltas = []
             for c in live:
                 visual = _profile_likelihood(question, c)
                 if visual is None:
                     visual = clue_overlap_likelihood(question["clues"], c.blurb)
                 likelihood = visual if answer == "yes" else 1.0 - visual
-                c.logodds += math.log(min(0.98, max(0.02, likelihood)))
+                _apply_soft(c, likelihood, deltas)
+            note = _soft_spread_note(qid, answer, deltas)
+            if note:
+                soft_notes.append(note)
             continue
         missing = [c for c in live if (c.id, qid) not in sess.match_cache]
         probs = _match_probabilities(missing, question, prior)
@@ -1612,6 +1666,9 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 p = min(0.6, max(0.4, _tag_match(question, c)))
             likelihood = p if answer == "yes" else 1.0 - p
             c.logodds += math.log(min(0.98, max(0.02, likelihood)))
+    if soft_notes:
+        # Spread from soft rows only, before look pins and fame bonuses.
+        timing.note(soft_delta="+".join(soft_notes[:12]))
     _apply_appearance_pins(sess, live)
     _apply_identity_priors(sess, live)
     # Fame is reapplied from scratch on every rescore. One look-pin step
@@ -2194,8 +2251,9 @@ def _recovery_question(sess: GuessSession) -> dict[str, Any] | None:
     if not _same_work(rejected, leader):
         return None
     asked = sess.asked_ids()
+    evidenced = _settled_ids(sess)
     for qid in _RECOVERY_QIDS:
-        if qid in asked or qid not in QUESTIONS_BY_ID:
+        if qid in asked or qid in evidenced or qid not in QUESTIONS_BY_ID:
             continue
         question = QUESTIONS_BY_ID[qid]
         left = _predicted_pole(question, rejected)
@@ -2258,8 +2316,9 @@ def _near_twin_question(sess: GuessSession) -> dict[str, Any] | None:
     if pair in sess.near_twin_pairs:
         return None
     asked = sess.asked_ids()
+    evidenced = _settled_ids(sess)
     for qid in _SERIES_SPLIT_QIDS:
-        if qid in asked:
+        if qid in asked or qid in evidenced:
             continue
         question = QUESTIONS_BY_ID.get(qid)
         if question is None:
@@ -2279,8 +2338,9 @@ def _unasked_leader_pin_look(sess: GuessSession) -> dict[str, Any] | None:
     still disagrees, and the guess must not commit before that evidence.
     """
     asked = sess.asked_ids()
+    evidenced = _settled_ids(sess)
     for qid in _focus_split_ids(sess):
-        if qid in asked:
+        if qid in asked or qid in evidenced:
             continue
         question = QUESTIONS_BY_ID.get(qid)
         if question is not None:
@@ -2354,16 +2414,105 @@ def _overlap_words(text: str) -> bool:
     return bool(re.search(r"[A-Za-z]{4,}", text or ""))
 
 
-def _score_free_text(sess: GuessSession, text: str, qid: str) -> None:
-    """Record a typed clue as a visual judgment, soft chips, and mild overlap.
+# Visual clue slugs and the bank row they already score. "pink" only covers
+# the pink option: "pink hair" enriched as blonde would be a different fact.
+_CLUE_COVERED = {
+    "pink": ("hair_color", "pink"),
+    "halo": ("look_halo", None),
+    "wings": ("look_wings", None),
+    "horns": ("look_horns", None),
+}
 
-    Visual phrases and chip words are stripped before the overlap clue, so
-    "pink hair and a white dress" still ranks the dress. Nothing here writes
-    a hard bank yes: chips stay ``soft_chip``, and other words stay a clue.
+
+def _settled_ids(sess: GuessSession) -> set[str]:
+    """Bank ids the picker must not offer: hard answers and soft_enrich rows.
+
+    A soft_chip row alone ("soldier" typed in a sentence) is a nudge, not an
+    answer. Treating it as settled removed a bank question the player never
+    answered, so only enrich templates and real answers skip the ask.
+    """
+    return {
+        qid for qid, (question, _answer) in sess.evidence.items()
+        if question.get("soft_enrich") or not question.get("soft_chip")
+    }
+
+
+def _clue_covered_ids(text: str) -> dict[str, str | None]:
+    """Bank ids whose trait the visual clue row already scores for ``text``.
+
+    The clue path already moves halo, wings, horns and pink hair. An enrich
+    row on top stacked a second soft nat for the same words, so a single
+    "halo" outweighed a real answer to another question.
+    """
+    return {
+        _CLUE_COVERED[slug][0]: _CLUE_COVERED[slug][1]
+        for slug, _wanted in _clue_requirements(text)
+        if slug in _CLUE_COVERED
+    }
+
+
+def _forget_row(sess: GuessSession, qid: str) -> None:
+    """Drop ``qid``'s evidence and every cached model vote for it.
+
+    A replaced soft_enrich row must not leave a Laya judgment behind: the
+    cache is keyed by candidate and question only, so the rematch would
+    reuse the vote cast for the old answer.
+    """
+    sess.evidence.pop(qid, None)
+    for key in [key for key in sess.match_cache if key[1] == qid]:
+        del sess.match_cache[key]
+    for key in [key for key in sess.choice_cache if key[1] == qid]:
+        del sess.choice_cache[key]
+    sess.soft_cast_delta.pop(qid, None)
+
+
+def _score_enrich(sess: GuessSession, text: str) -> None:
+    """Record enrich.yml hits as soft bank rows.
+
+    The row is why a later pick skips that question. Scoring stays on the
+    soft-enrich path: a choice miss must not take the hard option likelihood.
+    Later text may replace an earlier soft_enrich row ("actually black
+    hair"); a bank answer or soft chip is left as it is. A trait the visual
+    clue row scores is recorded with ``clue_covered`` so it adds no nats.
+    """
+    covered = _clue_covered_ids(text)
+    for qid, answer in enrich_hits(text):
+        if qid not in QUESTIONS_BY_ID:
+            continue
+        existing = sess.evidence.get(qid)
+        if existing is not None:
+            old_question, old_answer = existing
+            if not old_question.get("soft_enrich") or old_answer == answer:
+                continue
+        question = dict(QUESTIONS_BY_ID[qid])
+        if is_choice(question):
+            if answer not in (question.get("options") or {}):
+                continue
+        elif answer not in ("yes", "no"):
+            continue
+        if existing is not None:
+            _forget_row(sess, qid)
+        question["soft_enrich"] = True
+        # Same flag the free-text tests require on anything that is not a clue,
+        # and the trait pack uses it to stay off the hard 0/1 scores.
+        question["soft_chip"] = True
+        if qid in covered and covered[qid] in (None, answer):
+            question["clue_covered"] = True
+        score_candidates(sess, question, answer)
+
+
+def _score_free_text(sess: GuessSession, text: str, qid: str) -> None:
+    """Record a typed clue as enrich rows, a visual judgment, chips, and overlap.
+
+    Enrich runs on the original sentence so "blonde hair" is a hair-colour
+    row before the overlap clue sees the leftover words. Visual phrases and
+    chip words are stripped before that clue, so "pink hair and a white
+    dress" still ranks the dress. Nothing here writes a hard bank yes.
     """
     text = (text or "").strip()
     if not text:
         return
+    _score_enrich(sess, text)
     hits = free_text_trait_hits(text)
     visual = bool(_clue_requirements(text))
     if visual:
