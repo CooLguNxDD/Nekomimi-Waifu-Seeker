@@ -525,13 +525,12 @@ def test_series_lock_pins_a_splitting_look_instead_of_the_angel_kit():
     ])
     sess.asked.append(_series_detail("fullmetal alchemist"))
     pins = engine._pinned_question_ids(sess)
-    assert pins[0] == "hair_color"
-    assert "look_prosthetic" in pins
+    assert "hair_color" not in pins
+    assert pins[0] == "look_prosthetic"
     assert "look_animal_ears" not in pins
     assert "look_halo" not in pins and "look_wings" not in pins and "look_horns" not in pins
     ids = [q["id"] for q in engine.candidate_questions(sess)]
-    assert ids[0] == "hair_color"
-    assert ids[1] == "look_prosthetic"
+    assert ids[0] == "look_prosthetic"
 
     ears = sess_mod.new_session()
     ears.add_candidates([

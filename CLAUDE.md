@@ -43,6 +43,7 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/nekomimi/laya_client.py` | Process-wide `Agent` singleton. `ask(state, questions)` → answers or `None`. Never raises. `preload()` (load + warm-up, run by `web.py`'s lifespan before the port opens), `status()` (read-only, served at `/healthz`). `python -m` it to bake weights. |
 | `waifu_engine/nekomimi/question_bank.json` | Question template: yes/no rows, choice rows, and `trait_block` groups |
 | `waifu_engine/nekomimi/traits.py` | Expands the JSON template, plus `ANSWER_WEIGHT` and `make_dynamic()` for mined traits |
+| `waifu_engine/nekomimi/enrich.py` | Deterministic `lexicon/enrich.yml` templates: player text → bank trait ids as soft evidence. Not a question writer and not a model |
 | `waifu_engine/nekomimi/session.py` | `Candidate`, `GuessSession`, log-odds pool, in-process store + TTL |
 | `waifu_engine/nekomimi/engine.py` | The turn loop: `start`, `submit_answer`, `submit_guess_result`, `state_payload` |
 | `webui/` | SolidJS UI (Vite). File routes for `/` and `/nekomimi`. `npm run build` writes `waifu_engine/webui_dist`, which setuptools ships; FastAPI 503s until that bundle exists |
@@ -63,10 +64,13 @@ Consequences, in order of how often they get forgotten:
    within-candidate uncertainty); Laya only answers `ready_to_guess`. The
    `medium` choice ("Where is your character from?": anime/manga, game, comic,
    movie, TV, something else) and dynamic "Which series?" compete in that
-   ranking like any other question — neither is forced first. Traits the seed
-   already named (hair colour, halo, wings, horns) are pulled in front of that
-   ranking, and the same appearance questions lead once a series is confirmed,
-   because school/uniform/teen do not separate students from one school. A medium pick is
+   ranking like any other question — neither is forced first. Player text is
+   enriched from `lexicon/enrich.yml` into `answered_traits` before the pick
+   (`enrich.enrich_hits`); those question ids are not asked again. Unnamed
+   halo, wings and horns are not pinned when the series locks — information
+   gain ranks them with the rest of the bank. A look that splits the locked
+   cast (prosthetic, animal ears, tail, eyepatch) is still pulled forward.
+   A medium pick is
    a hard filter (`traits.MEDIUM_ACCEPTS`; movie and TV accept each other;
    "other" / "Something else" is an empty accept-set and is **not** a hard
    filter — it must not wipe known media; unknown media are never removed). Empty

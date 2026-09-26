@@ -1,8 +1,9 @@
 # Category policy sets. Skip-on-yes and pin order stay in engine.py.
 # series_appearance flags mark the angel kit (halo, wings, horns). hair_color
-# is prepended by the loader. The engine pins that kit after a series lock
-# only when the player already named it. series_split flags are rare looks
-# the engine pins when they divide the locked cast.
+# is prepended by the loader. A series lock does not pin that set. Hair and
+# the kit are pinned only when player text named them and enrich.yml has not
+# already recorded the answer. series_split flags are rare looks the engine
+# pins when they divide the locked cast.
 # popular titles feed sources.popular_characters. Runtime never reads catalog.json.
 categories:
   medium: { broad: true }

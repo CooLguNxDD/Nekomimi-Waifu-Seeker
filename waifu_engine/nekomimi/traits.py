@@ -33,8 +33,10 @@ from typing import Any
 # empty set, which ``engine._eliminate_by_medium`` treats as "no hard filter".
 from .lexicon import MEDIUM_ACCEPTS, MEDIUM_VALUES
 
-# A "detail" answer adds free text to the session constraints instead of
-# scoring the current question, so it carries no evidence weight of its own.
+# A "detail" answer does not score the closed question. A non-zero weight
+# would take the ``else`` branch in rescoring and treat the text as a no.
+# The words move the posterior through soft chips, enrich.yml, and the
+# overlap clue (``CHIP_HIT`` / ``clue_overlap_likelihood``), not this table.
 ANSWER_WEIGHT: dict[str, float] = {"yes": 1.0, "no": -1.0, "detail": 0.0}
 ANSWERS = tuple(ANSWER_WEIGHT)
 
@@ -447,12 +449,23 @@ def clue_likelihood(clues: str, blurb: str, tags: list[str] | set[str] | None = 
 from .chips import chip_pattern, chip_residual, free_text_trait_hits, free_text_trait_ids
 
 
-def clue_overlap_likelihood(clues: str, blurb: str) -> float:
-    """P(yes) from shared words, kept inside the heuristic band.
+# Full overlap used to cap at 0.60 against a 0.45 miss (~0.3 nats). A
+# mid-game "white coat" then lost to a popularity gap of about 0.4 and the
+# leader did not move. 0.78 against 0.40 is about 0.67 nats: enough to change
+# top-1 among close candidates, still far from a 0.02 floor.
+OVERLAP_HIT = 0.78
+OVERLAP_MISS = 0.40
+# A chip hit of 0.82 was the same problem against fame. The miss stays at
+# one half so an unmatched word cannot floor the pool.
+CHIP_HIT = 0.90
 
-    A chip like "white dress" has no bank trait. Mentioning it should nudge a
-    blurb that says the same words. A miss stays near a half: the old path
-    applied a noul of 0 and floored the rest of the pool.
+
+def clue_overlap_likelihood(clues: str, blurb: str) -> float:
+    """P(yes) from shared words, kept inside the soft band.
+
+    A phrase like "white coat" has no bank trait. Mentioning it should move a
+    blurb that says the same words past a modest fame gap. A miss stays near
+    ``OVERLAP_MISS``: a noul of 0 used to floor the rest of the pool.
     """
     words = list(dict.fromkeys(re.findall(r"[a-z]{4,}", (clues or "").lower())))
     if not words:
@@ -460,8 +473,9 @@ def clue_overlap_likelihood(clues: str, blurb: str) -> float:
     blob = (blurb or "").lower()
     hits = sum(1 for word in words if re.search(rf"\b{re.escape(word)}\b", blob))
     if hits == 0:
-        return 0.45
-    return min(0.6, 0.45 + 0.15 * (hits / len(words)))
+        return OVERLAP_MISS
+    span = OVERLAP_HIT - OVERLAP_MISS
+    return min(OVERLAP_HIT, OVERLAP_MISS + span * (hits / len(words)))
 
 
 def chip_likelihood(qid: str, blurb: str, tags: list[str] | set[str] | None = None) -> float:
@@ -469,14 +483,15 @@ def chip_likelihood(qid: str, blurb: str, tags: list[str] | set[str] | None = No
 
     A free-text "yes" used to take Laya's noul even when that noul was ~0 for
     the whole pool ("angel", "white dress"). One unmatched word then floored
-    every candidate who still fit the earlier facts. Hits rise; misses do not.
+    every candidate who still fit the earlier facts. Hits rise to ``CHIP_HIT``
+    so a mid-game chip can pass a modest fame gap; misses do not fall.
     """
     question = QUESTIONS_BY_ID.get(qid) or {}
     if set(question.get("tags_true") or ()) & set(tags or ()):
-        return 0.82
+        return CHIP_HIT
     pattern = chip_pattern(qid)
     if pattern is not None and pattern.search(blurb or ""):
-        return 0.82
+        return CHIP_HIT
     return 0.5
 
 
