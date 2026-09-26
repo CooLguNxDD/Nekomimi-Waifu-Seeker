@@ -9,8 +9,10 @@ plus a known target card. It does not start a server and it does not search.
 A game that ends wrong calls ``record_miss`` (or ``finish(..., correct=False)``)
 before the wrong guess is rejected. The export's ``miss`` object carries five
 fields read from the session posterior and from timing notes already on the
-turn payloads (``trait_window``, ``defer``). ``miss_pack`` lists one stable
-row per character.
+turn payloads (``trait_window``, ``defer``). Beside those, ``look_ask`` and
+``soft_cast_delta`` record when the wolf looks were asked and the fame gap
+after each answer. ``miss_pack`` lists one stable row per character and does
+not include the look-pin log.
 """
 
 from __future__ import annotations
@@ -261,6 +263,32 @@ def miss_diagnostic(
     }
 
 
+_WOLF_LOOKS = ("look_animal_ears", "look_tail")
+
+
+def look_pin_report(sess: GuessSession) -> dict[str, Any]:
+    """Ask step and Lawrence−Holo soft-cast gap for the wolf look pins.
+
+    ``never_asked`` means that series-split question was not emitted before
+    the miss, which is the pin-timing failure. A positive soft-cast delta is
+    fame still favoring Kraft Lawrence after that answer (the rebound). The
+    two stay separate so a high-margin miss does not have to widen defer.
+    """
+    ask: dict[str, Any] = {qid: "never_asked" for qid in _WOLF_LOOKS}
+    for step, row in enumerate(sess.asked, start=1):
+        qid = row.get("qid")
+        if qid in ask and ask[qid] == "never_asked":
+            ask[qid] = step
+    stored = getattr(sess, "soft_cast_delta", None) or {}
+    delta: dict[str, Any] = {}
+    for qid in _WOLF_LOOKS:
+        if ask[qid] == "never_asked":
+            delta[qid] = None
+        else:
+            delta[qid] = stored.get(qid)
+    return {"look_ask": ask, "soft_cast_delta": delta}
+
+
 def miss_pack(memories: Iterable[SessionMemory]) -> list[dict[str, Any]]:
     """Return one stable miss row per character, in the order given.
 
@@ -335,6 +363,9 @@ class SessionMemory:
     trait_window: str = "ok"
     defer: str | None = None
     miss: dict[str, Any] | None = None
+    # Wolf look ask-step and soft-cast gap. Kept off ``MISS_KEYS`` so the
+    # stable miss row does not change shape; ``export`` still dumps it.
+    look_pins: dict[str, Any] | None = None
 
     def answer_for(self, question: dict[str, Any]) -> str:
         """Return the honest answer for ``question``.
@@ -456,6 +487,7 @@ class SessionMemory:
         ``posterior``. The dict is what ``export`` and ``miss_pack`` keep.
         """
         self.absorb_timing(timing)
+        self.look_pins = look_pin_report(sess)
         self.miss = miss_diagnostic(
             sess,
             target=self.target,
@@ -494,8 +526,11 @@ class SessionMemory:
     def export(self) -> dict[str, Any]:
         """Return the session log a post-mortem can dump as JSON.
 
-        ``miss`` is present only after ``record_miss``. Its keys are the
-        five diagnostic fields, ``franchise_pair``, and ``miss_label``.
+        ``miss`` is present only after ``record_miss``. Its stable keys are
+        the five diagnostic fields, ``franchise_pair``, and ``miss_label``.
+        ``look_ask`` and ``soft_cast_delta`` sit beside those: ask step of
+        ``look_animal_ears`` and ``look_tail`` (or ``never_asked``), and the
+        Lawrence−Holo soft-cast gap after each of those answers.
         """
         out = {
             "session_id": self.session_id,
@@ -506,7 +541,11 @@ class SessionMemory:
             "turns": [turn.to_dict() for turn in self.turns],
         }
         if self.miss is not None:
-            out["miss"] = {key: self.miss[key] for key in MISS_KEYS}
+            miss = {key: self.miss[key] for key in MISS_KEYS}
+            if self.look_pins:
+                miss["look_ask"] = self.look_pins["look_ask"]
+                miss["soft_cast_delta"] = self.look_pins["soft_cast_delta"]
+            out["miss"] = miss
         return out
 
     def dumps(self) -> str:

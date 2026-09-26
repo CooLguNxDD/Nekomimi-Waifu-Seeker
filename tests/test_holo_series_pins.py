@@ -2,11 +2,15 @@
 
 Empty-seed benches guessed the merchant while Holo was still in the pool
 (pin-thin, defer null, margin about 0.31, entropy about 0.84). The lexicon
-pin makes that pair a series_split defer, and wolf-deity answers prefer
-Holo inside the cast. The question bank and the miss-log labels stay put.
+pin splits that cast. Ears and tail are asked from the series-split pin
+path before a guess commits; near-twin defer is not widened to that margin.
+A ``look_tail`` yes is not handed back by popularity. The question bank and
+the miss-log labels stay put.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -171,11 +175,12 @@ def test_mushy_laya_does_not_erase_the_pin(monkeypatch):
     assert names[0] == "Holo"
 
 
-def test_lawrence_lead_defers_on_ears_instead_of_a_pin_thin_guess():
-    """Same-work, Holo in the pool, margin wide enough to guess: ask ears once.
+def test_lawrence_lead_asks_ears_before_a_pin_thin_guess():
+    """Same-work, Holo in the pool, margin wide enough to guess: ask ears first.
 
-    The labelled miss was pin-thin because defer was null. The pin makes the
-    ear question the defer, which the miss log calls near-twin-fired.
+    The labelled miss was pin-thin because defer was null and the margin was
+    about 0.31. That margin is not a near-twin defer. The series-split pin
+    path asks ears before the guess, and does not record the pair as deferred.
     """
     assert MISS_KEYS == (
         "target_in_shortlist",
@@ -193,7 +198,7 @@ def test_lawrence_lead_defers_on_ears_instead_of_a_pin_thin_guess():
     assert holo is not None and lawrence is not None
     # Posterior about 0.65/0.35: margin above 0.15, pair mass under 0.75
     # (the labelled miss shape). The stable-leader gate needs two checks
-    # before it will guess, which is what makes the defer reachable.
+    # before it will guess, which is what makes the pin-path ask reachable.
     lawrence.logodds = 0.0
     holo.logodds = -0.62
     _arm_guess(sess, "lawrence")
@@ -208,6 +213,7 @@ def test_lawrence_lead_defers_on_ears_instead_of_a_pin_thin_guess():
     state = engine._advance(sess)
     assert state["stage"] == "asking"
     assert state["question"]["qid"] == "look_animal_ears"
+    assert sess.near_twin_pairs == set()
     after = SessionMemory(target="Holo", defer="look_animal_ears").record_miss(sess)
     assert after["miss_label"] == "near-twin-fired"
     assert after["defer"] == "look_animal_ears"
@@ -237,8 +243,12 @@ def test_romaji_series_still_defers_the_same_pair():
     assert state["question"]["qid"] == "look_animal_ears"
 
 
-def test_a_no_on_ears_guesses_the_merchant_without_a_second_defer():
-    """The pair is deferred once. Answering no then commits Lawrence."""
+def test_a_no_on_ears_and_tail_guesses_the_merchant_without_near_twin():
+    """Both wolf looks are asked before commit. Two nos then name Lawrence.
+
+    The second look is still the pin path. Near-twin defer stays unused, so
+    a high-margin merchant lead is not given a second deferral either.
+    """
     sess = sess_mod.new_session()
     sess.add_candidates(_pair())
     lawrence = sess.by_id("lawrence")
@@ -249,12 +259,113 @@ def test_a_no_on_ears_guesses_the_merchant_without_a_second_defer():
     _arm_guess(sess, "lawrence")
     first = engine._advance(sess)
     assert first["question"]["qid"] == "look_animal_ears"
+    assert sess.near_twin_pairs == set()
     sess.asked[-1]["answer"] = "no"
     engine.score_candidates(sess, traits.QUESTIONS_BY_ID["look_animal_ears"], "no")
     assert sess.posterior()[0][0].name == "Kraft Lawrence"
     second = engine._advance(sess)
-    assert second["stage"] == "guessing"
-    assert second["guess"]["name"] == "Kraft Lawrence"
+    assert second["stage"] == "asking"
+    assert second["question"]["qid"] == "look_tail"
+    assert sess.near_twin_pairs == set()
+    sess.asked[-1]["answer"] = "no"
+    engine.score_candidates(sess, traits.QUESTIONS_BY_ID["look_tail"], "no")
+    assert sess.posterior()[0][0].name == "Kraft Lawrence"
+    third = engine._advance(sess)
+    assert third["stage"] == "guessing"
+    assert third["guess"]["name"] == "Kraft Lawrence"
+
+
+def test_empty_seed_pins_wolf_looks_before_the_guess_gate():
+    """No series chip: ears and tail still lead while Lawrence is the leader.
+
+    Information gain used to offer series and medium first, and the guess
+    could commit before either look was asked. The pin path does not wait
+    for ``_confirmed_series``.
+    """
+    sess = sess_mod.new_session()
+    sess.add_candidates(_pair())
+    assert engine._confirmed_series(sess) == ""
+    assert engine._pinned_question_ids(sess)[:2] == ["look_animal_ears", "look_tail"]
+    assert engine.candidate_questions(sess)[0]["id"] == "look_animal_ears"
+    assert engine._should_guess(sess, None) is False
+
+
+def test_another_work_leading_does_not_pin_wolf_looks():
+    """Naruto in front keeps his own questions. Ears wait until a wolf leads."""
+    sess = sess_mod.new_session()
+    sess.add_candidates(_pair() + [
+        {"id": "naruto", "name": "Naruto Uzumaki", "series": "Naruto",
+         "medium": "anime", "popularity": 500000, "tags": ["male"],
+         "blurb": "A ninja."},
+    ])
+    assert sess.posterior()[0][0].name == "Naruto Uzumaki"
+    assert "look_animal_ears" not in engine._pinned_question_ids(sess)
+    lawrence = sess.by_id("lawrence")
+    assert lawrence is not None
+    lawrence.logodds = 5.0
+    assert sess.posterior()[0][0].name == "Kraft Lawrence"
+    assert engine._pinned_question_ids(sess)[0] == "look_animal_ears"
+
+
+def test_tail_yes_survives_a_popularity_rebound():
+    """Fame at the prior cap does not put Lawrence back over a tail yes.
+
+    One pin step is 0.8 log-odds. The popularity cap is 1.5, which used to
+    be enough to undo the brief Holo lead on the next rescore.
+    """
+    rows = _pair()
+    rows[1]["popularity"] = 10**9
+    names, sess = _rank(rows, [("look_tail", "yes")])
+    assert names[0] == "Holo"
+    holo = sess.by_id("holo")
+    lawrence = sess.by_id("lawrence")
+    assert holo is not None and lawrence is not None
+    assert holo.logodds > lawrence.logodds
+    assert sess.soft_cast_delta["look_tail"] > 0.8
+
+
+def test_miss_log_splits_ask_step_from_soft_cast_delta():
+    """Ears never asked vs a tail yes whose fame gap is still on Lawrence."""
+    silent = sess_mod.new_session()
+    silent.add_candidates(_pair())
+    empty = SessionMemory(target="Holo").record_miss(silent)
+    assert set(empty) == set(MISS_KEYS)
+    memory = SessionMemory(target="Holo")
+    memory.record_miss(silent)
+    report = json.loads(memory.dumps())["miss"]
+    assert report["look_ask"] == {
+        "look_animal_ears": "never_asked",
+        "look_tail": "never_asked",
+    }
+    assert report["soft_cast_delta"] == {
+        "look_animal_ears": None,
+        "look_tail": None,
+    }
+
+    sess = sess_mod.new_session()
+    sess.add_candidates(_pair())
+    ears = traits.QUESTIONS_BY_ID["look_animal_ears"]
+    tail = traits.QUESTIONS_BY_ID["look_tail"]
+    engine._emit_asking(sess, ears)
+    sess.asked[-1]["answer"] = "yes"
+    engine.score_candidates(sess, ears, "yes")
+    ears_gap = sess.soft_cast_delta["look_animal_ears"]
+    engine._emit_asking(sess, tail)
+    sess.asked[-1]["answer"] = "yes"
+    lawrence = sess.by_id("lawrence")
+    assert lawrence is not None
+    lawrence.popularity = 10**9
+    engine.score_candidates(sess, tail, "yes")
+    memory = SessionMemory(target="Holo")
+    memory.record_miss(sess)
+    report = json.loads(memory.dumps())["miss"]
+    assert report["miss_label"] == "pin-thin"
+    assert report["defer"] is None
+    assert report["look_ask"] == {"look_animal_ears": 1, "look_tail": 2}
+    assert report["soft_cast_delta"]["look_animal_ears"] == ears_gap
+    assert report["soft_cast_delta"]["look_tail"] > ears_gap
+    assert report["soft_cast_delta"]["look_tail"] > 0.8
+    assert set(memory.miss_row()) == {"target", *MISS_KEYS}
 
 
 def test_question_bank_did_not_grow_a_wolf_question():
