@@ -78,6 +78,21 @@ body {
   animation: host-think 1.1s ease-in-out infinite;
 }
 
+/* Slide the new prompt in. Opacity stays at 1: a fade that starts at 0
+   could be left there when the exit animation never finished. */
+@keyframes question-prompt-in {
+  from {
+    transform: translateY(8px);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.question-prompt {
+  animation: question-prompt-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -86,5 +101,9 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  .question-prompt {
+    animation: none;
   }
 }

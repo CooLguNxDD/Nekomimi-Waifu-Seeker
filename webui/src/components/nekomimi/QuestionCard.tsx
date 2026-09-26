@@ -1,12 +1,11 @@
 import { For, Show } from "solid-js";
-import { Motion, Presence } from "solid-motionone";
 import { AnswerHistory } from "@/components/nekomimi/AnswerHistory";
 import type { AnswerChipData } from "@/components/nekomimi/history";
+import { questionHeading } from "@/components/nekomimi/questionHeading";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/field";
 import { Avatar } from "@/components/ui/avatar";
 import { Progress } from "@/components/ui/progress";
-import { useReducedMotion } from "@/hooks/useReducedMotion";
 import type { CharacterCard, NekomimiQuestion } from "@/types/game";
 
 /** Yes/no or choice controls. A typed detail does not answer the current trait. */
@@ -23,7 +22,6 @@ export function QuestionCard(props: {
 }) {
   let detailInput: HTMLInputElement | undefined;
   let detail = "";
-  const reduced = useReducedMotion();
   const clearDetail = () => {
     detail = "";
     if (detailInput) detailInput.value = "";
@@ -35,7 +33,10 @@ export function QuestionCard(props: {
   const choice = () => props.question.kind === "choice" && props.question.options;
   const turn = () => props.question.turn ?? 0;
   const max = () => props.question.max_turns ?? 1;
-  const fade = () => (reduced() ? { opacity: 0 } : { opacity: 0, y: 8 });
+  const heading = () => questionHeading(props.question);
+  // Key the prompt by question id. Keying the whole object restarted the
+  // enter animation on every payload refresh and could leave the heading
+  // stuck on the previous sentence.
 
   return (
     <div class={props.busy ? "opacity-80" : ""}>
@@ -45,21 +46,15 @@ export function QuestionCard(props: {
         label={`Question ${turn()} of up to ${max()} · ${props.candidatesAlive || 0} candidates in play · ${props.laya ? "Laya" : "heuristics"}`}
       />
       <AnswerHistory chips={props.history} />
-      <Presence exitBeforeEnter>
-        <Show when={props.question} keyed>
-          {(question) => (
-            <Motion.h2
-              class="my-3 text-xl font-bold"
-              initial={fade()}
-              animate={{ opacity: 1, y: 0 }}
-              exit={fade()}
-              transition={{ duration: reduced() ? 0 : 0.22, easing: [0.16, 1, 0.3, 1] }}
-            >
-              {question.text}
-            </Motion.h2>
+      <div aria-live="polite">
+        <Show when={props.question.qid || heading()} keyed>
+          {(key) => (
+            <h2 class="question-prompt my-3 text-xl font-bold" data-qid={key}>
+              {heading()}
+            </h2>
           )}
         </Show>
-      </Presence>
+      </div>
       <Show when={!props.candidatesAlive}>
         <p id="emptyHint" class="mb-3 rounded-control bg-amber-soft px-3 py-2 text-sm text-amber-ink">
           No candidates yet — search needs something specific. Type a series, franchise or name-like
