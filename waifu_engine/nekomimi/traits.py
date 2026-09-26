@@ -247,6 +247,17 @@ _CLUE_NEG = re.compile(
     r"(?:\W+\w+){0,3}\W*$",
     re.I,
 )
+# Clause boundaries. A negator on the far side of one belongs to another trait.
+_CLAUSE_BREAK = re.compile(r"[,.;:!?\n]|\s[-–—]\s|\bbut\b", re.I)
+# "from Halo", "in Halo 3", "Halo Infinite": the game series, not a halo.
+_HALO_TITLE_BEFORE = re.compile(
+    r"\b(?:from|in|of|plays?|played|playing)\s+(?:the\s+)?$", re.I,
+)
+_HALO_TITLE_AFTER = re.compile(
+    r"\s*(?::|\d|infinite\b|reach\b|ce\b|combat evolved\b|wars\b|series\b"
+    r"|games?\b|franchise\b|universe\b|odst\b)",
+    re.I,
+)
 _HALO_DECOR = re.compile(r"\b(?:halo|halos|winged halo|heart with wings)\b", re.I)
 _APPEARANCE = re.compile(
     r"\b(?:hair|haired|eyes|eyed|halo|halos|wings|horns|horned|blonde|redhead)\b",
@@ -321,9 +332,44 @@ def _trait_observed(slug: str, blurb: str, tags: set[str]) -> bool | None:
 
 
 def _negated_before(text: str, start: int) -> bool:
-    """Whether the words just before ``start`` negate the phrase that begins there."""
+    """Whether the words just before ``start``, in the same clause, negate it.
+
+    The window stops at a comma, period, semicolon, colon, dash or "but".
+    Without that stop "no wings, blonde hair" read as "not blonde", dropped
+    the hair colour, and enrich then kept the question from being asked.
+    """
     window = text[max(0, start - 48):start]
+    breaks = list(_CLAUSE_BREAK.finditer(window))
+    if breaks:
+        window = window[breaks[-1].end():]
     return bool(_CLUE_NEG.search(window))
+
+
+def halo_is_title(text: str, start: int, end: int) -> bool:
+    """Whether the ``halo`` at ``text[start:end]`` names the game series.
+
+    "a character from Halo" is a series, not a ring over the head. Reading it
+    as a halo recorded ``look_halo=yes`` and removed that question.
+    """
+    before = text[max(0, start - 24):start]
+    after = text[end:end + 24]
+    return bool(_HALO_TITLE_BEFORE.search(before) or _HALO_TITLE_AFTER.match(after))
+
+
+def _first_mention(pattern: re.Pattern[str], slug: str, raw: str) -> tuple[bool, bool]:
+    """``(found, negated)`` for ``pattern`` in ``raw``, preferring an affirmative hit.
+
+    Every occurrence is checked: "not blonde as a child, now blonde hair" is
+    still a yes, and the first, negated, occurrence must not hide it.
+    """
+    found = False
+    for match in pattern.finditer(raw):
+        if slug == "halo" and halo_is_title(raw, match.start(), match.end()):
+            continue
+        found = True
+        if not _negated_before(raw, match.start()):
+            return True, False
+    return found, found
 
 
 def _visual_mentions(text: str) -> list[tuple[str, str, bool]]:
@@ -335,9 +381,9 @@ def _visual_mentions(text: str) -> list[tuple[str, str, bool]]:
     raw = text or ""
     found = []
     for slug, pattern, search in _VISUAL_PHRASES:
-        match = pattern.search(raw)
-        if match:
-            found.append((slug, search, _negated_before(raw, match.start())))
+        hit, negated = _first_mention(pattern, slug, raw)
+        if hit:
+            found.append((slug, search, negated))
     return found
 
 

@@ -66,7 +66,11 @@ Consequences, in order of how often they get forgotten:
    movie, TV, something else) and dynamic "Which series?" compete in that
    ranking like any other question — neither is forced first. Player text is
    enriched from `lexicon/enrich.yml` into `answered_traits` before the pick
-   (`enrich.enrich_hits`); those question ids are not asked again. Unnamed
+   (`enrich.enrich_hits`); those question ids are not asked again. A soft_chip
+   row alone does not settle a bank question. Later typed text may replace a
+   `soft_enrich` row (dropping its cached votes first), never a bank answer.
+   A trait the visual clue already scores is recorded `clue_covered`, no extra nats.
+   Negation stops at clause breaks (comma, period, semicolon, "but"). Unnamed
    halo, wings and horns are not pinned when the series locks — information
    gain ranks them with the rest of the bank. A look that splits the locked
    cast (prosthetic, animal ears, tail, eyepatch) is still pulled forward.

@@ -2,7 +2,9 @@
 # This file does not name a character, write a question, or call a model.
 # A hit is soft evidence (engine scores it inside the soft band) so the
 # question is not asked again. A negated choice marker is ignored: there is
-# no "not blonde" option. A negated yes/no marker is stored as no.
+# no "not blonde" option. A negated yes/no marker is stored as no. Negation
+# stops at a clause break (comma, period, semicolon, "but"). "Halo" naming the
+# game series ("from Halo", "Halo Infinite") is not a halo (traits.halo_is_title).
 templates:
   - id: hair_blonde
     qid: hair_color

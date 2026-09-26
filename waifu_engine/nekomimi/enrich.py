@@ -12,7 +12,7 @@ from typing import Any
 
 from .lexicon import ENRICH_TEMPLATES
 from .session import Candidate
-from .traits import QUESTIONS_BY_ID, _negated_before, yesno_visual_likelihood
+from .traits import QUESTIONS_BY_ID, _negated_before, halo_is_title, yesno_visual_likelihood
 
 # A clear hit or contradiction has to move rank, and it has to stay inside
 # the band that cannot floor a thin blurb. log(0.88/0.32) is about one nat:
@@ -56,6 +56,28 @@ def _option_shown(option: dict[str, Any], cand: Candidate) -> bool:
     return _boundary(fact).search(blob) is not None
 
 
+def _row_answer(row: dict[str, Any], raw: str) -> str:
+    """The answer one template gives ``raw``, or ``""`` when it has none.
+
+    Every occurrence of every marker is checked. A negated first mention
+    ("not blonde as a child, blonde hair now") used to end the scan and hide
+    the affirmative one. A choice needs an affirmative hit; a yes/no is yes
+    on any affirmative hit and no when every hit is negated. "Halo" as the
+    game title ("a character from Halo") is not a halo.
+    """
+    negated = False
+    for pattern in row["patterns"]:
+        for match in pattern.finditer(raw):
+            if row["qid"] == "look_halo" and halo_is_title(raw, match.start(), match.end()):
+                continue
+            if not _negated_before(raw, match.start()):
+                return "yes" if row["kind"] == "yesno" else row["answer"]
+            negated = True
+    if negated and row["kind"] == "yesno":
+        return "no"
+    return ""
+
+
 def enrich_hits(text: str) -> list[tuple[str, str]]:
     """``(question id, answer)`` for each template that matches ``text``.
 
@@ -74,20 +96,7 @@ def enrich_hits(text: str) -> list[tuple[str, str]]:
         qid = row["qid"]
         if qid in ambiguous or qid not in QUESTIONS_BY_ID:
             continue
-        answer = ""
-        for pattern in row["patterns"]:
-            match = pattern.search(raw)
-            if match is None:
-                continue
-            # A negated choice is not that option. Keep scanning this
-            # template: "not blonde hair, golden hair" is still blonde.
-            if row["kind"] == "choice" and _negated_before(raw, match.start()):
-                continue
-            if row["kind"] == "yesno":
-                answer = "no" if _negated_before(raw, match.start()) else "yes"
-            else:
-                answer = row["answer"]
-            break
+        answer = _row_answer(row, raw)
         if not answer:
             continue
         previous = found.get(qid)

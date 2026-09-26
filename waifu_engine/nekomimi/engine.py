@@ -878,7 +878,7 @@ def _pinned_question_ids(sess: GuessSession) -> list[str]:
     splits the leader's cast is still pinned, with or without a series chip,
     or the wolf questions lose the race to the guess.
     """
-    evidenced = set(sess.evidence)
+    evidenced = _settled_ids(sess)
     ids: list[str] = []
 
     def add(qid: str) -> None:
@@ -927,7 +927,7 @@ def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
     """
     asked = sess.asked_ids()
     settled = sess.settled_categories()
-    evidenced = set(sess.evidence)
+    evidenced = _settled_ids(sess)
     weighted = _weighted(sess)
     series = _series_question(sess)
     pool = [
@@ -1546,18 +1546,20 @@ def _apply_soft(cand: Candidate, p: float, deltas: list[float]) -> None:
     deltas.append(delta)
 
 
-def _soft_spread_note(qid: str, deltas: list[float]) -> str:
-    """``qid:gap`` for the log-odds spread a soft row opened, or ``""``.
+def _soft_spread_note(qid: str, answer: str, deltas: list[float]) -> str:
+    """``qid=answer:gap`` for the log-odds spread a soft row opened, or ``""``.
 
     The gap is what a mid-game detail moved between the best and worst live
     candidate. One candidate has no ranking to change, so the note is empty.
+    The answer is in the key so a replaced soft_enrich row ("actually black
+    hair") shows which answer is being scored now.
     """
     if len(deltas) < 2:
         return ""
     spread = max(deltas) - min(deltas)
     if spread <= 0.0:
         return ""
-    return f"{qid}:{spread:.2f}"
+    return f"{qid}={answer}:{spread:.2f}"
 
 
 def _rescore_candidates(sess: GuessSession) -> None:
@@ -1588,10 +1590,14 @@ def _rescore_candidates(sess: GuessSession) -> None:
         # Before the choice branch. An enriched hair colour is a choice, and
         # the choice path's log(0.02) miss would wipe whoever lacks the tag.
         if question.get("soft_enrich"):
+            # The visual clue row already scored these words. The enrich row
+            # only keeps the question from being asked again.
+            if question.get("clue_covered"):
+                continue
             deltas: list[float] = []
             for c in live:
                 _apply_soft(c, soft_enrich_likelihood(question, answer, c), deltas)
-            note = _soft_spread_note(qid, deltas)
+            note = _soft_spread_note(qid, answer, deltas)
             if note:
                 soft_notes.append(note)
             continue
@@ -1621,7 +1627,7 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 if answer != "yes":
                     p = 1.0 - p
                 _apply_soft(c, p, deltas)
-            note = _soft_spread_note(qid, deltas)
+            note = _soft_spread_note(qid, answer, deltas)
             if note:
                 soft_notes.append(note)
             continue
@@ -1637,7 +1643,7 @@ def _rescore_candidates(sess: GuessSession) -> None:
                     visual = clue_overlap_likelihood(question["clues"], c.blurb)
                 likelihood = visual if answer == "yes" else 1.0 - visual
                 _apply_soft(c, likelihood, deltas)
-            note = _soft_spread_note(qid, deltas)
+            note = _soft_spread_note(qid, answer, deltas)
             if note:
                 soft_notes.append(note)
             continue
@@ -2245,7 +2251,7 @@ def _recovery_question(sess: GuessSession) -> dict[str, Any] | None:
     if not _same_work(rejected, leader):
         return None
     asked = sess.asked_ids()
-    evidenced = set(sess.evidence)
+    evidenced = _settled_ids(sess)
     for qid in _RECOVERY_QIDS:
         if qid in asked or qid in evidenced or qid not in QUESTIONS_BY_ID:
             continue
@@ -2310,7 +2316,7 @@ def _near_twin_question(sess: GuessSession) -> dict[str, Any] | None:
     if pair in sess.near_twin_pairs:
         return None
     asked = sess.asked_ids()
-    evidenced = set(sess.evidence)
+    evidenced = _settled_ids(sess)
     for qid in _SERIES_SPLIT_QIDS:
         if qid in asked or qid in evidenced:
             continue
@@ -2332,7 +2338,7 @@ def _unasked_leader_pin_look(sess: GuessSession) -> dict[str, Any] | None:
     still disagrees, and the guess must not commit before that evidence.
     """
     asked = sess.asked_ids()
-    evidenced = set(sess.evidence)
+    evidenced = _settled_ids(sess)
     for qid in _focus_split_ids(sess):
         if qid in asked or qid in evidenced:
             continue
@@ -2408,26 +2414,90 @@ def _overlap_words(text: str) -> bool:
     return bool(re.search(r"[A-Za-z]{4,}", text or ""))
 
 
+# Visual clue slugs and the bank row they already score. "pink" only covers
+# the pink option: "pink hair" enriched as blonde would be a different fact.
+_CLUE_COVERED = {
+    "pink": ("hair_color", "pink"),
+    "halo": ("look_halo", None),
+    "wings": ("look_wings", None),
+    "horns": ("look_horns", None),
+}
+
+
+def _settled_ids(sess: GuessSession) -> set[str]:
+    """Bank ids the picker must not offer: hard answers and soft_enrich rows.
+
+    A soft_chip row alone ("soldier" typed in a sentence) is a nudge, not an
+    answer. Treating it as settled removed a bank question the player never
+    answered, so only enrich templates and real answers skip the ask.
+    """
+    return {
+        qid for qid, (question, _answer) in sess.evidence.items()
+        if question.get("soft_enrich") or not question.get("soft_chip")
+    }
+
+
+def _clue_covered_ids(text: str) -> dict[str, str | None]:
+    """Bank ids whose trait the visual clue row already scores for ``text``.
+
+    The clue path already moves halo, wings, horns and pink hair. An enrich
+    row on top stacked a second soft nat for the same words, so a single
+    "halo" outweighed a real answer to another question.
+    """
+    return {
+        _CLUE_COVERED[slug][0]: _CLUE_COVERED[slug][1]
+        for slug, _wanted in _clue_requirements(text)
+        if slug in _CLUE_COVERED
+    }
+
+
+def _forget_row(sess: GuessSession, qid: str) -> None:
+    """Drop ``qid``'s evidence and every cached model vote for it.
+
+    A replaced soft_enrich row must not leave a Laya judgment behind: the
+    cache is keyed by candidate and question only, so the rematch would
+    reuse the vote cast for the old answer.
+    """
+    sess.evidence.pop(qid, None)
+    for key in [key for key in sess.match_cache if key[1] == qid]:
+        del sess.match_cache[key]
+    for key in [key for key in sess.choice_cache if key[1] == qid]:
+        del sess.choice_cache[key]
+    sess.soft_cast_delta.pop(qid, None)
+
+
 def _score_enrich(sess: GuessSession, text: str) -> None:
     """Record enrich.yml hits as soft bank rows.
 
     The row is why a later pick skips that question. Scoring stays on the
     soft-enrich path: a choice miss must not take the hard option likelihood.
-    A question already in evidence is left as the player first stated it.
+    Later text may replace an earlier soft_enrich row ("actually black
+    hair"); a bank answer or soft chip is left as it is. A trait the visual
+    clue row scores is recorded with ``clue_covered`` so it adds no nats.
     """
+    covered = _clue_covered_ids(text)
     for qid, answer in enrich_hits(text):
-        if qid in sess.evidence or qid not in QUESTIONS_BY_ID:
+        if qid not in QUESTIONS_BY_ID:
             continue
+        existing = sess.evidence.get(qid)
+        if existing is not None:
+            old_question, old_answer = existing
+            if not old_question.get("soft_enrich") or old_answer == answer:
+                continue
         question = dict(QUESTIONS_BY_ID[qid])
         if is_choice(question):
             if answer not in (question.get("options") or {}):
                 continue
         elif answer not in ("yes", "no"):
             continue
+        if existing is not None:
+            _forget_row(sess, qid)
         question["soft_enrich"] = True
         # Same flag the free-text tests require on anything that is not a clue,
         # and the trait pack uses it to stay off the hard 0/1 scores.
         question["soft_chip"] = True
+        if qid in covered and covered[qid] in (None, answer):
+            question["clue_covered"] = True
         score_candidates(sess, question, answer)
 
 

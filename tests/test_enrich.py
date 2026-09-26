@@ -163,3 +163,100 @@ def test_midgame_detail_moves_the_leader_without_a_hard_wipe(_offline):
     spreads = [float(part.split(":")[1]) for part in note.split("+") if ":" in part]
     assert max(spreads) >= 0.5
     assert traits.ANSWER_WEIGHT["detail"] == 0.0
+
+
+def test_negation_stops_at_a_clause_break():
+    """A negator in an earlier clause does not reach the next trait."""
+    hits = dict(enrich_hits("no wings, blonde hair"))
+    assert hits == {"hair_color": "blonde", "look_wings": "no"}
+    hits = dict(enrich_hits("no hat, blonde hair and horns"))
+    assert hits["hair_color"] == "blonde"
+    assert hits["look_horns"] == "yes"
+    assert dict(enrich_hits("not blonde hair, golden hair")) == {"hair_color": "blonde"}
+    assert dict(enrich_hits("no wings but halo")) == {"look_wings": "no", "look_halo": "yes"}
+    assert traits._clue_requirements("no wings but halo") == [("halo", True), ("wings", False)]
+
+
+def test_later_affirmative_mention_is_not_hidden_by_a_negated_one():
+    """The first, negated, occurrence must not end the scan."""
+    hits = dict(enrich_hits("not blonde hair as a child; now she has blonde hair"))
+    assert hits == {"hair_color": "blonde"}
+
+
+def test_halo_the_game_is_not_a_halo():
+    """The series title does not record look_halo or a visual halo clue."""
+    for text in ("a character from Halo", "Halo Infinite spartan", "plays Halo 3"):
+        assert "look_halo" not in dict(enrich_hits(text))
+        assert traits._clue_requirements(text) == []
+    assert dict(enrich_hits("from Halo, she has a halo"))["look_halo"] == "yes"
+
+
+def test_clue_covered_enrich_row_adds_no_nats(_offline):
+    """Halo is scored once, by the visual clue, not again by the enrich row."""
+    sess = sess_mod.new_session("halo")
+    sess.add_candidates([
+        {"id": "a", "name": "Angel A", "series": "S", "medium": "game",
+         "blurb": "A girl with a halo.", "tags": ["halo"], "popularity": 10},
+        {"id": "b", "name": "Plain B", "series": "S", "medium": "game",
+         "blurb": "A girl.", "tags": [], "popularity": 10},
+    ])
+    engine._score_free_text(sess, "a halo", "clue_seed")
+    question, answer = sess.evidence["look_halo"]
+    assert question["soft_enrich"] and question["clue_covered"] and answer == "yes"
+    with_row = {c.id: c.logodds for c in sess.alive_candidates()}
+    sess.evidence.pop("look_halo")
+    engine._rescore_candidates(sess)
+    without_row = {c.id: c.logodds for c in sess.alive_candidates()}
+    assert with_row == pytest.approx(without_row)
+    sess.evidence["look_halo"] = (question, answer)
+    assert "look_halo" not in [q["id"] for q in engine.candidate_questions(sess)]
+
+
+def test_soft_chip_does_not_settle_a_bank_question(_offline):
+    """Only enrich rows and real answers skip the ask. A chip is a nudge."""
+    sess = sess_mod.new_session("")
+    qid = next(q["id"] for q in traits.QUESTION_BANK if not traits.is_choice(q))
+    chip = dict(traits.QUESTIONS_BY_ID[qid])
+    chip["soft_chip"] = True
+    sess.evidence[qid] = (chip, "yes")
+    assert qid not in engine._settled_ids(sess)
+    enriched = dict(chip, soft_enrich=True)
+    sess.evidence[qid] = (enriched, "yes")
+    assert qid in engine._settled_ids(sess)
+
+
+def test_later_text_replaces_soft_enrich_and_drops_stale_votes(_offline):
+    """Blonde, then "actually black hair": the old vote leaves with the row."""
+    state = engine.start("blonde hair")
+    sess = sess_mod.get_session(state["session_id"])
+    sess.add_candidates([
+        {"id": "gold", "name": "Gold Girl", "series": "S", "medium": "anime",
+         "blurb": "A girl with blonde hair.", "tags": ["blonde"], "popularity": 10},
+        {"id": "raven", "name": "Raven Girl", "series": "S", "medium": "anime",
+         "blurb": "A girl with black hair.", "tags": ["black"], "popularity": 10},
+    ])
+    assert sess.evidence["hair_color"][1] == "blonde"
+    # A cached Laya vote cast while the row said blonde.
+    sess.match_cache[("gold", "hair_color")] = 0.95
+    sess.choice_cache[("gold", "hair_color")] = {"blonde": 0.9, "black": 0.1}
+    out = engine.submit_answer(sess, "detail", "actually black hair")
+    assert "error" not in out
+    question, answer = sess.evidence["hair_color"]
+    assert question["soft_enrich"] and answer == "black"
+    assert not [key for key in sess.match_cache if key[1] == "hair_color"]
+    assert not [key for key in sess.choice_cache if key[1] == "hair_color"]
+    note = out["timing"]["soft_delta"]
+    assert "hair_color=black:" in note
+    assert "hair_color=blonde" not in note
+    assert sess.posterior()[0][0].id == "raven"
+    assert "hair_color" not in [q["id"] for q in engine.candidate_questions(sess)]
+
+
+def test_hard_answer_is_not_replaced_by_later_text(_offline):
+    """A bank answer the player clicked stays; only soft_enrich rows move."""
+    sess = sess_mod.new_session("")
+    question = dict(traits.QUESTIONS_BY_ID["hair_color"])
+    sess.evidence["hair_color"] = (question, "blonde")
+    engine._score_enrich(sess, "black hair")
+    assert sess.evidence["hair_color"][1] == "blonde"
+    assert not sess.evidence["hair_color"][0].get("soft_enrich")
