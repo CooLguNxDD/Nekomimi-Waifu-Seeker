@@ -1,0 +1,30 @@
+# Retrieval queries for facts that never name a work.
+# A match adds name searches so the title character can enter the pool.
+# These strings are not score pins and not questions. A group matches when
+# every marker is a whole phrase in the positive facts. Groups are OR.
+# The prosthetic+blonde groups are the empty-seed pair the bank can confirm.
+# A one-word alias group is a thin seed ("automail", the romaji title) whose
+# phrase a query rewrite would otherwise drop before AniList sees a name.
+clusters:
+  - id: edward-elric
+    groups:
+      - [prosthetic, blonde]
+      - [prosthetic, blond]
+      - [blonde, braid]
+      - [blond, braid]
+      - [blonde, braided]
+      - [blond, braided]
+      - [automail]
+      - [state alchemist]
+      - [fullmetal alchemist]
+      - [full metal alchemist]
+      - [hagane no renkinjutsushi]
+      - [edward elric]
+      - [ed elric]
+    queries:
+      - Edward Elric
+      - Ed Elric
+      - Fullmetal Alchemist
+      - Full Metal Alchemist
+      - Hagane no Renkinjutsushi
+      - automail

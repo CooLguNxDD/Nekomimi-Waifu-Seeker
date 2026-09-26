@@ -48,6 +48,7 @@ from ..names import (
 )
 from . import laya_client
 from .lexicon import BROAD_CATEGORIES as _BROAD_CATEGORIES
+from .lexicon import CHARACTER_IDENTITIES as _CHARACTER_IDENTITIES
 from .lexicon import EXACT_ALIASES as _EXACT_ALIASES
 from .lexicon import HAIR_CATEGORIES as _HAIR_CATEGORIES
 from .lexicon import NAME_BLOCK as _NAME_BLOCK
@@ -124,6 +125,11 @@ _NAMESAKE_PENALTY = 2.2
 # royalty tag under the heuristic cap is about log(0.6/0.5) ≈ 0.18. 1.05
 # beats both together. A clear model miss (log(0.15/0.85) ≈ -1.7) still wins.
 _HEADLINER_BONUS = 1.05
+# Added to the cast member a look pin supports, per answered question.
+# The empty-seed Holo miss had Lawrence ahead by about 0.31 posterior
+# (~0.6 log-odds) with no series chip. 0.8 clears that gap. It stays under
+# a clear model miss (~1.7) so one confident noul still outweighs one pin.
+_PIN_SPLIT_STEP = 0.8
 # Two alias rows each at least this probable mean the identity is still split.
 # Guessing either fragment commits before the mass is one person.
 _ALIAS_SPLIT_MASS = 0.15
@@ -368,6 +374,9 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
     real prose and a popularity number); DuckDuckGo fills remaining slots
     inside ``find_candidates``. Once a series is known, ``pin`` keeps that
     work in every template group, next to the rare visual traits from the seed.
+    Button-only facts stay off the name-search loops and top up from the
+    popular pool. ``find_candidates`` still name-searches a coverage cluster
+    on that path, so a prosthetic-and-blonde answer asks for Edward Elric.
     """
     if not ONLINE:
         return 0
@@ -416,8 +425,9 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
                 rewritten=rewritten or None,
                 background_key=sess.id,
                 ddg_gate=None if initial else stuck,
-                # Only typed text (or an LLM rewrite of it) can match names;
-                # broad button facts fall back to the popular pool.
+                # Only typed text (or an LLM rewrite of it) can match names.
+                # Broad button facts fall back to the popular pool. Coverage
+                # name searches still run inside find_candidates.
                 specific=bool(_free_text(sess) or rewritten or _confirmed_series(sess)),
                 pool_size=len(sess.alive_candidates()),
                 gemini_inline=_gemini_inline(sess),
@@ -627,20 +637,136 @@ def _mask_split_titles(text: str, cand: Candidate) -> str:
     return masked
 
 
+def _appearance_pins() -> dict[str, dict[str, Any]]:
+    """Identity rows that name a look, keyed by lexicon id."""
+    return {
+        row["id"]: row
+        for row in _CHARACTER_IDENTITIES
+        if row.get("has") or row.get("lacks")
+    }
+
+
+_APPEARANCE_PINS = _appearance_pins()
+
+
+def _appearance_pin(cand: Candidate) -> dict[str, Any] | None:
+    """Lexicon look pin for ``cand``, or None when the work does not match.
+
+    An unknown series still matches. Search often files one of the pair as
+    "Unknown" while the other names the show. A known different work does
+    not: the pin is not a guess about every person who shares the spelling.
+    """
+    row = _APPEARANCE_PINS.get(identity_id(cand.name))
+    if row is None:
+        return None
+    franchise = row.get("franchise") or ""
+    if not franchise:
+        return row
+    if not series_key(cand.series) or is_publisher_series(cand.series):
+        return row
+    if same_series(cand.series, franchise):
+        return row
+    return None
+
+
+def _pin_trait_side(question: dict[str, Any], row: dict[str, Any]) -> str:
+    """``has``, ``lacks``, or ``""`` for this question's yes-tags against one pin."""
+    tags = set(question.get("tags_true") or [])
+    if not tags or question.get("clues"):
+        return ""
+    if tags & set(row.get("has") or ()):
+        return "has"
+    if tags & set(row.get("lacks") or ()):
+        return "lacks"
+    return ""
+
+
+def _apply_appearance_pins(sess: GuessSession, live: list[Candidate]) -> None:
+    """Lift the cast member whose lexicon look matches the answers given.
+
+    The step is inside one franchise. Holo gains on Kraft Lawrence when the
+    player said wolf, deity, ears or tail; she does not gain on a catgirl
+    who is already ahead of both. Nothing is written onto tags, so Laya's
+    profile stays the scraped blurb. No answered pin question means no
+    lift: the merchant may still lead, and near-twin defer asks the look.
+    """
+    if len(live) < 2:
+        return
+    groups: dict[str, list[tuple[Candidate, dict[str, Any]]]] = {}
+    for cand in live:
+        row = _appearance_pin(cand)
+        if row is None:
+            continue
+        groups.setdefault(row["franchise"], []).append((cand, row))
+    for group in groups.values():
+        if len({id(cand) for cand, _row in group}) < 2:
+            continue
+        net = {id(cand): 0 for cand, _row in group}
+        for question, answer in sess.evidence.values():
+            if answer not in ("yes", "no"):
+                continue
+            winners: list[Candidate] = []
+            losers: list[Candidate] = []
+            for cand, row in group:
+                side = _pin_trait_side(question, row)
+                if side == "has":
+                    (winners if answer == "yes" else losers).append(cand)
+                elif side == "lacks":
+                    (losers if answer == "yes" else winners).append(cand)
+            if not winners or not losers:
+                continue
+            for cand in winners:
+                net[id(cand)] += 1
+            for cand in losers:
+                net[id(cand)] -= 1
+        best = max(net.values())
+        if best <= 0:
+            continue
+        leaders = [cand for cand, _row in group if net[id(cand)] == best]
+        trail = [cand for cand, _row in group if net[id(cand)] < best]
+        if not trail:
+            continue
+        advantage = best - max(net[id(cand)] for cand in trail)
+        swing = _PIN_SPLIT_STEP * (advantage / 2.0)
+        if swing <= 0:
+            continue
+        pair_ids = {id(cand) for cand in leaders + trail}
+        pair_top = max(cand.logodds for cand in leaders + trail)
+        ahead = [
+            cand.logodds for cand in live
+            if id(cand) not in pair_ids and cand.logodds > pair_top
+        ]
+        ceiling = (min(ahead) - 0.02) if ahead else None
+        for cand in leaders:
+            target = cand.logodds + swing
+            if ceiling is not None:
+                target = min(target, max(cand.logodds, ceiling))
+            cand.logodds = target
+
+
 def _candidate_has_trait(question: dict[str, Any], cand: Candidate) -> bool:
     """Whether ``cand`` shows one of ``question``'s yes-tags.
 
-    Tags are checked first. A blurb that only says "automail" or "wolf ears"
-    still counts: those rows often never received the mined slug as a tag,
-    and a silent side is not a confirmed "no" until the question is asked.
-    Work titles are blanked before that mine. ``tail`` inside "Fairy Tail"
-    is the guild, not a body part. A ``tail`` tag is kept when the blurb
-    still says tail after the title is removed, or when the blurb never
-    used the word at all.
+    A lexicon look pin wins over tags and the blurb. Kraft Lawrence's page
+    mentions Holo's ears; that mine used to hide the split, so near-twin
+    defer never asked and the guess went out pin-thin. Tags are checked
+    next. A blurb that only says "automail" or "wolf ears" still counts:
+    those rows often never received the mined slug as a tag, and a silent
+    side is not a confirmed "no" until the question is asked. Work titles
+    are blanked before that mine. ``tail`` inside "Fairy Tail" is the guild,
+    not a body part. A ``tail`` tag is kept when the blurb still says tail
+    after the title is removed, or when the blurb never used the word at all.
     """
     true = set(question.get("tags_true") or [])
     if not true:
         return False
+    pin = _appearance_pin(cand)
+    if pin is not None:
+        side = _pin_trait_side(question, pin)
+        if side == "has":
+            return True
+        if side == "lacks":
+            return False
     blob = f"{cand.name} {cand.blurb}"
     masked = _mask_split_titles(blob, cand)
     mined = set(web_search.mine_trait_slugs(masked))
@@ -682,21 +808,87 @@ def _split_look_ids(sess: GuessSession) -> list[str]:
     return out
 
 
+def _pin_cast(live: list[Candidate], franchise: str) -> list[Candidate]:
+    """Living members of one lexicon look-pin franchise.
+
+    Membership is the pin row, not the scraped series string. A thin Holo
+    page filed as Unknown still sits in the Spice and Wolf cast, which is
+    the row near-twin defer treated as a different work.
+    """
+    found: list[Candidate] = []
+    for cand in live:
+        row = _appearance_pin(cand)
+        if row is not None and row.get("franchise") == franchise:
+            found.append(cand)
+    return found
+
+
+def _splitting_look_ids(cast: list[Candidate]) -> list[str]:
+    """Series-split questions that divide ``cast``, in lexicon order.
+
+    A look nobody in the cast differs on is skipped. Lawrence's page can
+    wear Holo's ear tags; ``_candidate_has_trait`` trusts the pin, so the
+    split still exists.
+    """
+    if len(cast) < 2:
+        return []
+    out: list[str] = []
+    for qid in _SERIES_SPLIT_QIDS:
+        question = QUESTIONS_BY_ID.get(qid)
+        if question is None:
+            continue
+        present = sum(1 for cand in cast if _candidate_has_trait(question, cand))
+        if 0 < present < len(cast):
+            out.append(qid)
+    return out
+
+
+def _leader_pin_franchise(sess: GuessSession) -> str:
+    """Lexicon franchise of the current leader, or "" if they have no look pin.
+
+    Only the leader pulls series-split looks forward. A buried Spice and Wolf
+    row must not make a Naruto lead answer animal ears first.
+    """
+    ranked = sess.posterior()
+    if not ranked:
+        return ""
+    row = _appearance_pin(ranked[0][0])
+    return (row or {}).get("franchise") or ""
+
+
+def _focus_split_ids(sess: GuessSession) -> list[str]:
+    """Unconfirmed-series look pins that divide the leader's lexicon cast.
+
+    ``_split_look_ids`` waits for a hard series chip. Empty-seed Holo never
+    gets one (``miss_label=pin-thin``), so ears and tail stayed off this
+    path and the guess committed with ``defer=null``.
+    """
+    franchise = _leader_pin_franchise(sess)
+    if not franchise:
+        return []
+    return _splitting_look_ids(_pin_cast(sess.alive_candidates(), franchise))
+
+
 def _pinned_question_ids(sess: GuessSession) -> list[str]:
-    """Appearance questions the seed named, plus cast-splitting looks after a series lock.
+    """Appearance questions the seed named, plus cast-splitting looks.
 
     Information gain never asked hair colour or halo: every Trinity student
     shares school, uniform and teen, and halo was buried in one horns/wings
     question. The traits the player already typed have to be offered early.
     The angel kit is not forced again once the series is known unless that
     text already named it. A prosthetic or animal ears that splits the cast
-    is pinned instead, or it loses to the kit and is never asked.
+    is pinned instead, or it loses to the kit and is never asked. The
+    leader's lexicon look pins are pinned even with no series chip, or the
+    wolf questions lose the race to the guess.
     """
     ids: list[str] = []
     for text in _free_text(sess):
         for qid in appearance_question_ids(text):
             if qid not in ids:
                 ids.append(qid)
+    for qid in _focus_split_ids(sess):
+        if qid not in ids:
+            ids.append(qid)
     if _confirmed_series(sess):
         for qid in _SERIES_APPEARANCE:
             if qid in _ANGEL_KIT:
@@ -1348,7 +1540,10 @@ def _rescore_candidates(sess: GuessSession) -> None:
     word cannot floor the pool.
     A visual clue the profile clearly misses is a strong down-rank, not a
     removal, so a thin blurb can still recover on a later answer. Alias rows
-    are one identity before any of that is added up.
+    are one identity before any of that is added up. A lexicon look pin then
+    separates a same-work pair the blurb did not, without writing tags.
+    Soft cast (popularity, and a fame-only series lead) is then pulled back
+    inside a series-split pin cast so it cannot undo that step.
     """
     sess.collapse_identities()
     for question, answer in sess.evidence.values():
@@ -1417,7 +1612,13 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 p = min(0.6, max(0.4, _tag_match(question, c)))
             likelihood = p if answer == "yes" else 1.0 - p
             c.logodds += math.log(min(0.98, max(0.02, likelihood)))
+    _apply_appearance_pins(sess, live)
     _apply_identity_priors(sess, live)
+    # Fame is reapplied from scratch on every rescore. One look-pin step
+    # (0.8) loses to a popularity prior at the cap (~1.5) or to the fame
+    # series-lead bonus, which is how Lawrence climbed back after tail=yes.
+    _dampen_split_soft_cast(sess, live)
+    _note_wolf_soft_cast(sess, live)
 
 
 def _protagonist_answer(sess: GuessSession) -> str:
@@ -1640,6 +1841,148 @@ def _apply_identity_priors(sess: GuessSession, live: list[Candidate]) -> None:
                or same_series(short.series, cand.series) for short in shorts):
             continue
         cand.logodds -= _NAMESAKE_PENALTY
+
+
+def _soft_cast_logodds(
+    sess: GuessSession, cand: Candidate, live: list[Candidate], franchise: str,
+) -> float:
+    """Fame log-odds already folded into ``cand`` for this pin cast.
+
+    Popularity prior is always in the rescore base. The in-franchise bonus
+    and the popularity-only series lead are included when identity priors
+    actually added them. A protagonist or mascot tag is a hard cast signal
+    and is left out: that bonus is not what put the merchant back on top.
+    """
+    fame = popularity_prior(cand.popularity)
+    work = _confirmed_series(sess) or _typed_franchise(sess)
+    if not work or not franchise or not same_series(work, franchise):
+        return fame
+    if is_publisher_series(cand.series):
+        return fame
+    if _in_franchise(cand, work):
+        fame += _SERIES_LEAD_BONUS
+    elif series_key(cand.series):
+        fame -= _SIDE_CHARACTER_PENALTY
+    if _protagonist_answer(sess) == "no":
+        return fame
+    cast = [c for c in live if _in_franchise(c, work)]
+    if len(cast) < 2:
+        return fame
+    if any({"protagonist", "mascot"} & set(c.tags) for c in cast):
+        return fame
+    if any(c.id == cand.id for c in _is_series_lead(cast)):
+        fame += _SERIES_LEAD_BONUS
+    return fame
+
+
+def _series_split_pin_net(
+    sess: GuessSession, cast: list[tuple[Candidate, dict[str, Any]]],
+) -> dict[int, int]:
+    """Net series-split pin wins for one cast, keyed by candidate id.
+
+    God and beast move the same pair, but the labelled rebound was a
+    ``look_tail`` yes. Only series-split answers arm the fame dampener, so
+    a male answer with no wolf look still leaves the merchant ahead.
+    """
+    net = {id(cand): 0 for cand, _row in cast}
+    split_ids = set(_SERIES_SPLIT_QIDS)
+    saw = False
+    for question, answer in sess.evidence.values():
+        if question.get("id") not in split_ids or answer not in ("yes", "no"):
+            continue
+        winners: list[Candidate] = []
+        losers: list[Candidate] = []
+        for cand, row in cast:
+            side = _pin_trait_side(question, row)
+            if side == "has":
+                (winners if answer == "yes" else losers).append(cand)
+            elif side == "lacks":
+                (losers if answer == "yes" else winners).append(cand)
+        if not winners or not losers:
+            continue
+        saw = True
+        for cand in winners:
+            net[id(cand)] += 1
+        for cand in losers:
+            net[id(cand)] -= 1
+    return net if saw else {}
+
+
+def _dampen_split_soft_cast(sess: GuessSession, live: list[Candidate]) -> None:
+    """Stop fame putting the pin loser back over the series-split winner.
+
+    ``look_tail=yes`` put Holo first, then Kraft Lawrence's popularity (and,
+    once a work was named, the fame series-lead) was reapplied on the next
+    rescore and he led again at about 0.31 posterior. Trait evidence stays.
+    The soft-cast gap is what gets removed, and only inside that pin cast.
+    """
+    groups: dict[str, list[tuple[Candidate, dict[str, Any]]]] = {}
+    for cand in live:
+        row = _appearance_pin(cand)
+        if row is None:
+            continue
+        groups.setdefault(row.get("franchise") or "", []).append((cand, row))
+    for franchise, group in groups.items():
+        if len({id(cand) for cand, _row in group}) < 2:
+            continue
+        net = _series_split_pin_net(sess, group)
+        if not net:
+            continue
+        best = max(net.values())
+        if best <= 0:
+            continue
+        winners = [cand for cand, _row in group if net[id(cand)] == best]
+        trail = [cand for cand, _row in group if net[id(cand)] < best]
+        for loser in trail:
+            gap = max(
+                (
+                    _soft_cast_logodds(sess, loser, live, franchise)
+                    - _soft_cast_logodds(sess, winner, live, franchise)
+                )
+                for winner in winners
+            )
+            if gap > 0:
+                loser.logodds -= gap
+
+
+def _look_ask_label(sess: GuessSession, qid: str) -> str:
+    """1-based ask step for ``qid``, or ``never_asked`` if it was never emitted."""
+    for step, row in enumerate(sess.asked, start=1):
+        if row.get("qid") == qid:
+            return str(step)
+    return "never_asked"
+
+
+def _note_wolf_soft_cast(sess: GuessSession, live: list[Candidate]) -> None:
+    """Record Lawrence−Holo soft-cast after the newest wolf-look answer.
+
+    The gap is fame only, so a post-mortem can see boost-undo without
+    reading the posterior. Earlier looks keep the snapshot from when they
+    were the newest evidence; a later absorb refreshes only the latest one.
+    """
+    holo = next((c for c in live if identity_id(c.name) == "holo"), None)
+    law = next((c for c in live if identity_id(c.name) == "kraft-lawrence"), None)
+    if holo is None or law is None or not sess.evidence:
+        return
+    last_qid = next(reversed(sess.evidence))
+    if last_qid not in ("look_animal_ears", "look_tail"):
+        timing.note(
+            look_ask_ears=_look_ask_label(sess, "look_animal_ears"),
+            look_ask_tail=_look_ask_label(sess, "look_tail"),
+        )
+        return
+    row = _appearance_pin(holo) or {}
+    franchise = row.get("franchise") or ""
+    delta = _soft_cast_logodds(sess, law, live, franchise) - _soft_cast_logodds(
+        sess, holo, live, franchise,
+    )
+    sess.soft_cast_delta[last_qid] = round(delta, 4)
+    timing.note(
+        look_ask_ears=_look_ask_label(sess, "look_animal_ears"),
+        look_ask_tail=_look_ask_label(sess, "look_tail"),
+        soft_cast_d_ears=sess.soft_cast_delta.get("look_animal_ears", "na"),
+        soft_cast_d_tail=sess.soft_cast_delta.get("look_tail", "na"),
+    )
 
 
 # --- public API -------------------------------------------------------
@@ -1927,11 +2270,31 @@ def _near_twin_question(sess: GuessSession) -> dict[str, Any] | None:
     return None
 
 
+def _unasked_leader_pin_look(sess: GuessSession) -> dict[str, Any] | None:
+    """Next series-split look the leader's pin cast has not been asked.
+
+    This is the pin path, not near-twin defer. A margin near 0.31 is a
+    confident wrong leader; widening defer to that band would ask a rare
+    look for the wrong reason. The look is asked because the lexicon cast
+    still disagrees, and the guess must not commit before that evidence.
+    """
+    asked = sess.asked_ids()
+    for qid in _focus_split_ids(sess):
+        if qid in asked:
+            continue
+        question = QUESTIONS_BY_ID.get(qid)
+        if question is not None:
+            return question
+    return None
+
+
 def _advance(sess: GuessSession) -> dict[str, Any]:
     """Emit the next question, or a guess when the evidence is strong enough.
 
-    A same-work near-twin with an unasked rare look is asked that look
-    instead of committing. Alias-split still refuses the guess and keeps
+    A leader whose lexicon cast still disagrees on a series-split look is
+    asked that look before the guess commits. A same-work near-twin with an
+    unasked rare look is asked that look instead, once, and only when the
+    pin path had nothing left. Alias-split still refuses the guess and keeps
     the information-gain question: those two rows are one person.
     """
     if sess.turn < MAX_TURNS:
@@ -1948,6 +2311,10 @@ def _advance(sess: GuessSession) -> dict[str, Any]:
     should = _should_guess(sess, laya_answers)
     blocked = bool(question) and _alias_split_blocks_guess(sess) and sess.turn < MAX_TURNS
     if should and not blocked and sess.turn < MAX_TURNS:
+        pin_look = _unasked_leader_pin_look(sess)
+        if pin_look is not None:
+            timing.note(pin_look=pin_look["id"])
+            return _emit_asking(sess, pin_look)
         twin = _near_twin_question(sess)
         if twin is not None:
             timing.note(defer=twin["id"])

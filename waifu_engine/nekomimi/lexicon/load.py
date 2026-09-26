@@ -226,14 +226,15 @@ def _phrase_rows(rows: Any, where: str, *, allow_exact: bool) -> list[dict[str, 
 
 
 def build_franchises(doc: dict[str, Any]) -> dict[str, Any]:
-    """Return ordered markers, typed aliases, and the set-shaped franchise lists.
+    """Return ordered markers, typed aliases, series folds, and the set lists.
 
     Marker order is the match order (first hit wins). ``exact`` aliases stay
     on the typed list so a scraped marker cannot inherit Mario's whole-clue rule.
+    ``series_folds`` are series-field spellings of one work, not search phrases.
     """
     allowed = {
         "markers", "typed_aliases", "crumbs", "aggregate_exact",
-        "publishers", "name_block", "generic_series",
+        "publishers", "name_block", "generic_series", "series_folds",
     }
     _require_keys(doc, "franchises.yml", allowed, allowed)
     markers = _phrase_rows(doc["markers"], "franchises.yml markers", allow_exact=False)
@@ -275,7 +276,44 @@ def build_franchises(doc: dict[str, Any]) -> dict[str, Any]:
         "publisher_keys": frozenset(keys),
         "name_block": frozenset(name_block),
         "generic_series": frozenset(generic),
+        "series_folds": _series_folds(doc["series_folds"]),
     }
+
+
+def _series_folds(rows: Any) -> tuple[dict[str, Any], ...]:
+    """Return series-field spellings that are one work.
+
+    Two keys with no shared prefix still have to match, or near-twin defer
+    treats the cast as different shows and never asks the splitting look.
+    """
+    if not isinstance(rows, list) or not rows:
+        raise LexiconError("franchises.yml series_folds must be a non-empty list")
+    out: list[dict[str, Any]] = []
+    seen_labels: set[str] = set()
+    seen_phrases: set[str] = set()
+    for index, row in enumerate(rows):
+        where = f"franchises.yml series_folds[{index}]"
+        if not isinstance(row, dict):
+            raise LexiconError(f"{where} must be a mapping")
+        _require_keys(row, where, {"label", "phrases"}, {"label", "phrases"})
+        label = row["label"]
+        if not isinstance(label, str) or not label.strip():
+            raise LexiconError(f"{where}.label must be a string")
+        if label in seen_labels:
+            raise LexiconError(f"franchises.yml repeats series fold {label!r}")
+        seen_labels.add(label)
+        phrases = _str_list(row["phrases"], f"{where}.phrases", unique=True)
+        if len(phrases) < 2:
+            raise LexiconError(f"{where} needs at least two phrases")
+        folded: list[str] = []
+        for phrase in phrases:
+            key = " ".join(phrase.lower().split())
+            if key in seen_phrases:
+                raise LexiconError(f"franchises.yml repeats series fold phrase {phrase!r}")
+            seen_phrases.add(key)
+            folded.append(key)
+        out.append({"label": label.strip(), "phrases": tuple(folded)})
+    return tuple(out)
 
 
 def build_traits(doc: dict[str, Any]) -> dict[str, Any]:
@@ -381,9 +419,11 @@ def build_categories(doc: dict[str, Any]) -> dict[str, Any]:
 def build_characters(doc: dict[str, Any]) -> dict[str, Any]:
     """Return identity rows, headliner rows, and non-character titles.
 
-    Identity names are whole spellings of one person. Headliner phrases are
-    player-text markers; the engine applies the prior. A duplicate id, phrase,
-    or spelling raises so two people cannot silently share a key.
+    Identity names are whole spellings of one person. Optional ``has`` and
+    ``lacks`` are look pins for one franchise; the engine applies them and
+    does not copy them onto tags. Headliner phrases are player-text markers.
+    A duplicate id, phrase, or spelling raises so two people cannot silently
+    share a key.
     """
     _require_keys(
         doc, "characters.yml",
@@ -400,7 +440,11 @@ def build_characters(doc: dict[str, Any]) -> dict[str, Any]:
         where = f"characters.yml identities[{index}]"
         if not isinstance(row, dict):
             raise LexiconError(f"{where} must be a mapping")
-        _require_keys(row, where, {"id", "names"}, {"id", "names"})
+        _require_keys(
+            row, where,
+            {"id", "names", "franchise", "has", "lacks"},
+            {"id", "names"},
+        )
         slug = row["id"]
         if not isinstance(slug, str) or not slug.strip():
             raise LexiconError(f"{where}.id must be a string")
@@ -415,7 +459,24 @@ def build_characters(doc: dict[str, Any]) -> dict[str, Any]:
             if key in seen_names:
                 raise LexiconError(f"characters.yml repeats spelling {name!r}")
             seen_names.add(key)
-        identities.append({"id": slug, "canonical": names[0], "names": tuple(names)})
+        franchise = row.get("franchise", "")
+        if not isinstance(franchise, str):
+            raise LexiconError(f"{where}.franchise must be a string")
+        has = _str_list(row["has"], f"{where}.has", unique=True) if "has" in row else []
+        lacks = _str_list(row["lacks"], f"{where}.lacks", unique=True) if "lacks" in row else []
+        if (has or lacks) and not franchise.strip():
+            raise LexiconError(f"{where} pins a look but names no franchise")
+        overlap = set(has) & set(lacks)
+        if overlap:
+            raise LexiconError(f"{where} lists {sorted(overlap)} as both has and lacks")
+        identities.append({
+            "id": slug,
+            "canonical": names[0],
+            "names": tuple(names),
+            "franchise": franchise.strip(),
+            "has": tuple(has),
+            "lacks": tuple(lacks),
+        })
     head_raw = doc["headliners"]
     if not isinstance(head_raw, list) or not head_raw:
         raise LexiconError("characters.yml headliners must be a non-empty list")
@@ -455,13 +516,80 @@ def build_characters(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_character_pins(characters: dict[str, Any], traits: dict[str, Any]) -> None:
+    """Raise when a look pin names an unknown trait or a work with no headliner.
+
+    The pin is an engine fact read by question tags. A typo would match no
+    question, and the wolf-versus-merchant split would stay thin.
+    """
+    known = {slug for slug, _markers in traits["patterns"]}
+    works = {row["franchise"] for row in characters["headliners"]}
+    for row in characters["identities"]:
+        franchise = row.get("franchise") or ""
+        if franchise and franchise not in works:
+            raise LexiconError(
+                f"characters.yml identity {row['id']} franchise {franchise!r} is not a headliner"
+            )
+        for slug in (*row.get("has", ()), *row.get("lacks", ())):
+            if slug not in known:
+                raise LexiconError(
+                    f"characters.yml identity {row['id']} pins unknown trait {slug!r}"
+                )
+
+
+def build_coverage(doc: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Return search-coverage clusters: marker groups and the name queries they add.
+
+    A group is AND; clusters fire when any group matches. The queries are
+    retrieval strings only. The loader does not decide who to guess.
+    """
+    _require_keys(doc, "coverage.yml", {"clusters"}, {"clusters"})
+    rows = doc["clusters"]
+    if not isinstance(rows, list) or not rows:
+        raise LexiconError("coverage.yml clusters must be a non-empty list")
+    clusters: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, row in enumerate(rows):
+        where = f"coverage.yml clusters[{index}]"
+        if not isinstance(row, dict):
+            raise LexiconError(f"{where} must be a mapping")
+        _require_keys(row, where, {"id", "groups", "queries"}, {"id", "groups", "queries"})
+        slug = row["id"]
+        if not isinstance(slug, str) or not slug.strip():
+            raise LexiconError(f"{where}.id must be a string")
+        if slug in seen_ids:
+            raise LexiconError(f"coverage.yml has duplicate id {slug!r}")
+        seen_ids.add(slug)
+        raw_groups = row["groups"]
+        if not isinstance(raw_groups, list) or not raw_groups:
+            raise LexiconError(f"{where}.groups must be a non-empty list")
+        groups: list[tuple[str, ...]] = []
+        for gindex, group in enumerate(raw_groups):
+            markers = _str_list(group, f"{where}.groups[{gindex}]", unique=True)
+            if not markers:
+                raise LexiconError(f"{where}.groups[{gindex}] must not be empty")
+            folded = tuple(" ".join(marker.lower().split()) for marker in markers)
+            if len(folded) != len(set(folded)):
+                raise LexiconError(f"{where}.groups[{gindex}] repeats a marker")
+            groups.append(folded)
+        queries = _str_list(row["queries"], f"{where}.queries", unique=True)
+        if not queries:
+            raise LexiconError(f"{where}.queries must not be empty")
+        clusters.append({"id": slug, "groups": tuple(groups), "queries": tuple(queries)})
+    return tuple(clusters)
+
+
 def load_lexicon() -> dict[str, Any]:
     """Load and validate every lexicon file. Called once at import."""
+    traits = build_traits(load_document("traits.yml"))
+    characters = build_characters(load_document("characters.yml"))
+    validate_character_pins(characters, traits)
     return {
         "medium": build_medium(load_document("medium.yml")),
         "colors": build_colors(load_document("colors.yml")),
         "franchises": build_franchises(load_document("franchises.yml")),
-        "traits": build_traits(load_document("traits.yml")),
+        "traits": traits,
         "categories": build_categories(load_document("categories.yml")),
-        "characters": build_characters(load_document("characters.yml")),
+        "characters": characters,
+        "coverage": build_coverage(load_document("coverage.yml")),
     }

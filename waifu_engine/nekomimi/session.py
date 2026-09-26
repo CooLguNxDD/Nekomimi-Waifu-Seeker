@@ -175,6 +175,10 @@ class GuessSession:
     # series_split question for the same pair would burn the turns the first
     # answer was supposed to free. A different pair is not in this set.
     near_twin_pairs: set[tuple[str, str]] = field(default_factory=set)
+    # Kraft Lawrence minus Holo, in soft-cast log-odds, snapshotted when that
+    # look was the newest evidence. A later popularity absorb refreshes only
+    # the newest look, so pin-timing and the fame rebound stay separable.
+    soft_cast_delta: dict[str, float] = field(default_factory=dict)
 
     # -- candidate pool ------------------------------------------------
     def alive_candidates(self) -> list[Candidate]:

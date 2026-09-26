@@ -23,6 +23,7 @@ from typing import Iterable
 # Identity rows: lexicon/characters.yml. ``identity_id`` is the matcher.
 from .nekomimi.lexicon import CHARACTER_IDENTITIES as _CHARACTER_IDENTITIES
 from .nekomimi.lexicon import PUBLISHER_KEYS as _PUBLISHER_KEYS
+from .nekomimi.lexicon import SERIES_FOLDS as _SERIES_FOLDS
 from .nekomimi.lexicon.load import LexiconError
 
 # Word separators between name parts: whitespace, the Japanese middle dot and
@@ -224,20 +225,78 @@ def series_key(series: str) -> str:
     return "" if key in _NO_SERIES else key
 
 
+def _series_fold_map() -> dict[str, str]:
+    """Map series keys that are one work onto the label's key.
+
+    "Spice & Wolf" and "Ookami to Koushinryou" share no prefix, so the
+    merchant and the wolf looked like different shows and near-twin defer
+    never asked about ears.
+    """
+    out: dict[str, str] = {}
+    owners: dict[str, str] = {}
+    for row in _SERIES_FOLDS:
+        canon = series_key(row["label"])
+        if not canon:
+            raise LexiconError(f"series fold {row['label']!r} has no letters")
+        for phrase in (row["label"], *row["phrases"]):
+            key = series_key(phrase)
+            if not key:
+                continue
+            prev = owners.get(key)
+            if prev is not None and prev != row["label"]:
+                raise LexiconError(
+                    f"series key {key!r} is both {prev!r} and {row['label']!r}"
+                )
+            owners[key] = row["label"]
+            out[key] = canon
+    return out
+
+
+_SERIES_FOLD = _series_fold_map()
+# Longest first, so a longer fold spelling wins over one it starts with.
+_SERIES_FOLD_PREFIXES = tuple(
+    sorted((k for k in _SERIES_FOLD if len(k) >= 5), key=len, reverse=True)
+)
+
+
+def _fold_series_key(key: str) -> str:
+    """``key`` with a lexicon fold spelling at its start replaced by the label key.
+
+    AniList files seasons and remakes as "Ookami to Koushinryou II" or
+    "...: Merchant Meets the Wise Wolf". An exact-key fold missed those, so
+    that row was not "Spice and Wolf" and its look pin switched off. The rest
+    of the key is kept so the prefix rule still separates what it did before.
+    """
+    canon = _SERIES_FOLD.get(key)
+    if canon is not None:
+        return canon
+    for fold in _SERIES_FOLD_PREFIXES:
+        if key.startswith(fold):
+            return _SERIES_FOLD[fold] + key[len(fold):]
+    return key
+
+
 def same_series(a: str, b: str) -> bool:
     """Whether two series names are the same work.
 
     Equal keys match, and so does a key that starts the other when it is at
     least 5 letters long -- "Re:Zero" vs "Re:Zero - Starting Life in Another
-    World". Unknown series never match anything.
+    World". Lexicon series folds also match spellings that share no prefix.
+    Unknown series never match anything.
     """
     return same_series_key(series_key(a), series_key(b))
 
 
 def same_series_key(ka: str, kb: str) -> bool:
-    """``same_series`` on keys already made by ``series_key``."""
+    """``same_series`` on keys already made by ``series_key``.
+
+    Folded spellings (and seasons that start with one) are compared as the
+    label key before the prefix rule.
+    """
     if not ka or not kb:
         return False
+    ka = _fold_series_key(ka)
+    kb = _fold_series_key(kb)
     if ka == kb:
         return True
     short, long_ = sorted((ka, kb), key=len)

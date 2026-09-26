@@ -14,6 +14,7 @@ _FRANCHISES = _LEXICON["franchises"]
 _TRAITS = _LEXICON["traits"]
 _CATEGORIES = _LEXICON["categories"]
 _CHARACTERS = _LEXICON["characters"]
+_COVERAGE = _LEXICON["coverage"]
 
 # medium.yml — engine._eliminate_by_medium / _known_choice. Empty other is no filter.
 MEDIUM_VALUES = _MEDIUM["media"]
@@ -33,6 +34,7 @@ PUBLISHER_LABELS = _FRANCHISES["publisher_labels"]
 PUBLISHER_KEYS = _FRANCHISES["publisher_keys"]
 NAME_BLOCK = _FRANCHISES["name_block"]
 GENERIC_SERIES = _FRANCHISES["generic_series"]
+SERIES_FOLDS = _FRANCHISES["series_folds"]
 
 # traits.yml — web_search._marker_re. question_bank.json stays the question catalog.
 TRAIT_PATTERNS = _TRAITS["patterns"]
@@ -51,11 +53,15 @@ CHARACTER_IDENTITIES = _CHARACTERS["identities"]
 HEADLINERS = _CHARACTERS["headliners"]
 NON_CHARACTERS = _CHARACTERS["non_characters"]
 
+# coverage.yml — web_search.coverage_queries. Name searches, not score pins.
+COVERAGE = _COVERAGE
+
 __all__ = [
     "AGGREGATE_EXACT",
     "BROAD_CATEGORIES",
     "CHARACTER_IDENTITIES",
     "COLOR_WORDS",
+    "COVERAGE",
     "EXACT_ALIASES",
     "HEADLINERS",
     "NON_CHARACTERS",
@@ -72,6 +78,7 @@ __all__ = [
     "SEARCH_SUFFIX",
     "SERIES_APPEARANCE",
     "SERIES_CRUMBS",
+    "SERIES_FOLDS",
     "SERIES_SPLIT",
     "SERIES_MARKERS",
     "TRAIT_PATTERNS",
