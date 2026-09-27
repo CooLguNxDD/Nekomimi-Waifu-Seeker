@@ -411,4 +411,3 @@ docker compose down
 ```
 
 Then `python -m waifu_engine.web` again. The startup line "Application startup complete" is printed after Laya has loaded.
-
