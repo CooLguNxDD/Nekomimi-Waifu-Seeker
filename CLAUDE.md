@@ -40,6 +40,7 @@ Consequences, in order of how often they get forgotten:
 
 | Path | Role |
 |---|---|
+| `hf-static/index.html` | Static Hugging Face showcase. README metadata uses `sdk: static` and this `app_file`; the page links to Colab/local play and does not run the backend. |
 | `waifu_engine/nekomimi/laya_client.py` | Process-wide `Agent` singleton. `ask(state, questions)` → answers or `None`. Never raises. `preload()` (load + warm-up, run by `web.py`'s lifespan before the port opens), `status()` (read-only, served at `/healthz`). `python -m` it to bake weights. |
 | `waifu_engine/nekomimi/question_bank.json` | Question template: yes/no rows, choice rows, and `trait_block` groups |
 | `waifu_engine/nekomimi/traits.py` | Expands the JSON template, plus `ANSWER_WEIGHT` and `make_dynamic()` for mined traits |
@@ -58,6 +59,8 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/timing.py` | Per-request spans. `@traced` on `start`/`submit_answer`/`submit_guess_result`/`determine` logs one `[waifu]` line (slowest first) and sets `payload["timing"]`. `span()` is a no-op outside a trace |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
 | `waifu_engine/search.py`, `catalog.py` | Online shortlist ranking; catalog helpers remain for tooling but runtime never loads the catalog |
+| `.github/workflows/` | Local Pullfrog CI workflows (`pullfrog.yml`, `pullfrog-review.yml`, `pullfrog-triggers.yml`, `pullfrog-issues.yml`, `pullfrog-address-reviews.yml`, `pullfrog-ci-fix.yml`) |
+| `.github/pullfrog/` | Local Pullfrog agent config (`config.yml`), instruction manuals (`instructions/`), and setup guides (`ENV_SETUP.md`, `README.md`) |
 
 ## The turn contract
 
@@ -256,6 +259,15 @@ Tests stub `laya_client.ask`, `web_search.search_by_constraints` and the
 query LLM's `urlopen`. Keep them
 offline — do not add a test that downloads weights, launches Chromium, or hits
 DuckDuckGo.
+
+## Pullfrog Agent CI
+
+Local Pullfrog integration (no pullfrog.com dashboard):
+- Entrypoint: Reusable `pullfrog.yml` runner via `ghcr.io/coolgunxdd/pullfrog-agent`.
+- Workflows: `pullfrog-review.yml` (automated PR review), `pullfrog-triggers.yml` (`@pullfrog` mentions), `pullfrog-issues.yml` (issue triage/planning), `pullfrog-address-reviews.yml` (bot review fixes), `pullfrog-ci-fix.yml` (CI failures on bot PRs).
+- Configuration & instructions: `.github/pullfrog/config.yml`, `.github/pullfrog/instructions/` (`build.md`, `plan.md`, `review.md`).
+- Environment & secrets setup: [`.github/pullfrog/ENV_SETUP.md`](./.github/pullfrog/ENV_SETUP.md). Grok/Antigravity setup: [`.github/grok_antigravity_setup.md`](./.github/grok_antigravity_setup.md).
+- Safety: Never push directly to `main`; all agent changes land via PR.
 
 ## Rules
 
