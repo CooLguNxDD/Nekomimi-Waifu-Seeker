@@ -1,0 +1,91 @@
+# Issue enrichment. Privileged (secrets + write) — trusted authors only.
+# Default mode: Plan + auto-label. mode: build opens a PR and needs write.
+name: Pullfrog issues
+
+on:
+  issues:
+    types: [opened]
+
+concurrency:
+  group: pullfrog-issues-${{ github.repository }}-${{ github.event.issue.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  config:
+    # Untrusted issue authors must not reach pullfrog.yml with secrets/write.
+    # Trusted @pullfrog mentions on new issues are handled by pullfrog-triggers.yml.
+    if: |
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
+      && !contains(github.event.issue.body, '@pullfrog')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.read.outputs.mode }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - id: read
+        run: |
+          set -euo pipefail
+          node -e '
+          const fs = require("fs");
+          const text = fs.readFileSync(".github/pullfrog/config.yml", "utf8");
+          const match = text.match(/^\s*mode:\s*(\S+)/m);
+          const raw = (match ? match[1] : "plan").split("#", 1)[0].trim()
+            .replace(/^["\x27]|["\x27]$/g, "").toLowerCase();
+          const mode = raw === "build" ? "build" : "plan";
+          console.log(`mode=${mode}`);
+          ' >> "$GITHUB_OUTPUT"
+
+  plan:
+    needs: config
+    if: needs.config.result == 'success' && needs.config.outputs.mode != 'build'
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      actions: read
+    uses: ./.github/workflows/pullfrog.yml
+    with:
+      name: "Issue #${{ github.event.issue.number }} enrich"
+      feature: issues
+      prompt: |
+        You are Pullfrog running fully locally on repo (no hosted dashboard).
+        Read `.github/pullfrog/instructions/plan.md` and `build.md` if present.
+
+        Mode hint: Plan — analyze this new issue and post an implementation plan
+        as an issue comment. Also apply up to 3 existing repo labels that fit
+        (do not invent labels). Do not open a PR.
+
+        Trigger event details are available in the file `.github/pullfrog/event.json`.
+        Read that file to understand the event context.
+    secrets: inherit
+
+  build:
+    needs: config
+    if: needs.config.result == 'success' && needs.config.outputs.mode == 'build'
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+      issues: write
+      checks: write
+      actions: read
+      statuses: write
+    uses: ./.github/workflows/pullfrog.yml
+    with:
+      name: "Issue #${{ github.event.issue.number }} build"
+      feature: issues
+      prompt: |
+        You are Pullfrog running fully locally on repo (no hosted dashboard).
+        Read `.github/pullfrog/instructions/plan.md` and `build.md` if present.
+
+        Mode hint: Build — implement this new issue and open a PR.
+        Apply up to 3 existing repo labels that fit (do not invent labels).
+
+        Trigger event details are available in the file `.github/pullfrog/event.json`.
+        Read that file to understand the event context.
+    secrets: inherit

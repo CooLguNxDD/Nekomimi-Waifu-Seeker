@@ -1,0 +1,465 @@
+# Local Pullfrog entrypoint (replaces SaaS dashboard dispatch + old pullfrog/pullfrog@v0).
+# Clones the pinned lemon-custom-build runner, mints a GitHub App installation token
+# when App creds exist, and runs the agent image from GHCR.
+name: Pullfrog
+run-name: ${{ inputs.name || github.workflow }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        type: string
+        description: Agent prompt
+        required: true
+      name:
+        type: string
+        description: Run name
+        required: false
+      agent:
+        type: string
+        description: "Agent harness override (opencode, claude, codex, cursor, antigravity, grok); empty uses repo var PULLFROG_AGENT, then config.yml agent"
+        required: false
+        default: ""
+      model:
+        type: string
+        description: "Model slug override; empty uses repo var PULLFROG_MODEL, then config.yml model"
+        required: false
+        default: ""
+      effort:
+        type: string
+        description: "Reasoning effort: minimal|low|medium|high|xhigh|max; empty uses repo var PULLFROG_EFFORT, then medium"
+        required: false
+        default: ""
+      timeout:
+        type: string
+        description: Max run duration (e.g. 20m, 1h)
+        required: false
+        default: 1h
+  workflow_call:
+    inputs:
+      prompt:
+        type: string
+        required: true
+      name:
+        type: string
+        required: false
+      agent:
+        type: string
+        description: "Optional agent override; empty uses vars.PULLFROG_AGENT or config.yml default"
+        required: false
+        default: ""
+      model:
+        type: string
+        description: "Optional model override; empty uses vars.PULLFROG_MODEL or config.yml default"
+        required: false
+        default: ""
+      effort:
+        type: string
+        description: "Optional effort override; empty uses vars.PULLFROG_EFFORT or default"
+        required: false
+        default: ""
+      timeout:
+        type: string
+        required: false
+        default: 1h
+      feature:
+        type: string
+        required: false
+        default: ""
+
+# Do not declare workflow- or job-level permissions here.
+# GitHub reusable workflows cannot *request* more than the caller grants
+# (parse-time error: "nested job is requesting X, but is only allowed Y").
+# Callers set the GITHUB_TOKEN envelope:
+#   review / issues-plan → contents: read
+#   mention / address-reviews / ci-fix / issues-build / dispatch → contents: write
+# Git push uses the App token or PULLFROG_GITHUB_TOKEN, not GITHUB_TOKEN.
+
+env:
+  # Fallback only; config.yml image.digest is the source of truth and must be sha256.
+  PULLFROG_AGENT_IMAGE: ghcr.io/coolgunxdd/pullfrog-agent:latest
+
+jobs:
+  pullfrog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Event payload for the agent prompt. Keep path stable for instructions,
+      # but never let pipeline temps dirt the git tree (checkout_pr refuses dirty trees).
+      - name: Save event payload
+        run: |
+          set -euo pipefail
+          mkdir -p .github/pullfrog
+          cat "$GITHUB_EVENT_PATH" > .github/pullfrog/event.json
+          # Ignore the whole runtime dir (not just event.json). A file-only
+          # exclude can still leave `?? .github/pullfrog/` dirt that blocks
+          # checkout_pr / push_branch when other temps land under the dir.
+          if ! git check-ignore -q .github/pullfrog 2>/dev/null; then
+            echo ".github/pullfrog/" >> .git/info/exclude
+          fi
+
+      - name: Read features config
+        id: config
+        env:
+          VAR_REVIEW_BUDGET: ${{ vars.PULLFROG_REVIEW_BUDGET }}
+        run: |
+          set -euo pipefail
+          node -e '
+          const fs = require("fs");
+          function parseYaml(yamlString) {
+            const lines = yamlString.split(/\r?\n/);
+            const result = {};
+            const stack = [result];
+            const indents = [-1];
+            for (let line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith("#")) continue;
+              const match = line.match(/^(\s*)([^:]+):\s*(.*)$/);
+              if (!match) continue;
+              const indent = match[1].length;
+              const key = match[2].trim();
+              let value = match[3].trim();
+              if (value === "true") value = true;
+              else if (value === "false") value = false;
+              else if (value.startsWith("[") && value.endsWith("]")) {
+                value = value.slice(1, -1).split(",").map(s => s.trim().replace(/^["\x27]|["\x27]$/g, ""));
+              } else if (value === "") {
+                value = {};
+              }
+              while (indents[indents.length - 1] >= indent) {
+                stack.pop();
+                indents.pop();
+              }
+              const parent = stack[stack.length - 1];
+              parent[key] = value;
+              if (typeof value === "object" && !Array.isArray(value)) {
+                stack.push(value);
+                indents.push(indent);
+              }
+            }
+            return result;
+          }
+          const config = parseYaml(fs.readFileSync(".github/pullfrog/config.yml", "utf8"));
+          // Repository variable -> config.features.pr_review.budget -> max.
+          // The minimal YAML reader preserves scalar quotes and inline comments.
+          function scalar(value, fallback) {
+            return String(value ?? fallback ?? "")
+              .split("#", 1)[0].trim().replace(/^["\x27]|["\x27]$/g, "");
+          }
+          const configBudget = scalar(config.features?.pr_review?.budget, "max");
+          const reviewBudget = (process.env.VAR_REVIEW_BUDGET || configBudget).trim().toLowerCase();
+          const issuesModeRaw = scalar(config.features?.issues?.mode, "plan").toLowerCase();
+          const issuesMode = issuesModeRaw === "build" ? "build" : "plan";
+          const imageRepo = scalar(config.image?.repository, "ghcr.io/coolgunxdd/pullfrog-agent");
+          const imageDigest = scalar(config.image?.digest, "");
+          if (!/^sha256:[0-9a-f]{64}$/.test(imageDigest)) {
+            console.error("config.yml image.digest must be sha256:<64 hex>");
+            process.exit(1);
+          }
+          console.log(`review_budget=${["low", "high", "max"].includes(reviewBudget) ? reviewBudget : "max"}`);
+          console.log(`dispatch=${config.features?.dispatch ?? true}`);
+          console.log(`mention_triggers=${config.features?.mention_triggers ?? true}`);
+          console.log(`pr_review_enabled=${config.features?.pr_review?.enabled ?? true}`);
+          console.log(`pr_review_include_drafts=${config.features?.pr_review?.include_drafts ?? false}`);
+          console.log(`pr_review_on_synchronize=${config.features?.pr_review?.on_synchronize ?? false}`);
+          console.log(`issues_enabled=${config.features?.issues?.enabled ?? true}`);
+          console.log(`issues_mode=${issuesMode}`);
+          console.log(`address_reviews_enabled=${config.features?.address_reviews?.enabled ?? true}`);
+          console.log(`address_reviews_only_bot_prs=${config.features?.address_reviews?.only_bot_prs ?? true}`);
+          console.log(`ci_fix_enabled=${config.features?.ci_fix?.enabled ?? true}`);
+          console.log(`ci_fix_only_bot_prs=${config.features?.ci_fix?.only_bot_prs ?? true}`);
+          console.log(`status_checks=${config.status_checks ?? false}`);
+          console.log(`default_agent=${scalar(config.agent, "opencode")}`);
+          console.log(`default_model=${scalar(config.model, "opencode/muse-spark-1.3-contributor-free")}`);
+          console.log(`agent_image=${imageRepo}@${imageDigest}`);
+          // Runner revision: config.action.uses "owner/repo@<40-hex sha>" (validated at clone).
+          console.log(`runner_ref=${String(config.action?.uses ?? "").split("@")[1] ?? ""}`);
+          ' > "$RUNNER_TEMP/pullfrog-config.env"
+
+          while IFS= read -r line || [ -n "$line" ]; do
+            echo "$line" >> "$GITHUB_OUTPUT"
+          done < "$RUNNER_TEMP/pullfrog-config.env"
+
+      - name: Check if feature is enabled
+        id: check-feature
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          FEATURE="${{ inputs.feature }}"
+          if [ -z "$FEATURE" ]; then
+            # Empty feature = manual workflow_dispatch (all callers pass a feature).
+            ENABLED="${{ steps.config.outputs.dispatch }}"
+            echo "Manual dispatch enabled status: $ENABLED"
+            echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Strict bot gate — NO substring matching on repo/pullfrog/etc.
+          # Trusted automation accounts only:
+          #   1) GitHub API user.type == "Bot"
+          #   2) login ends with "[bot]" (GitHub App bots, e.g. my-app[bot])
+          # Fail closed when login/type missing.
+          is_github_bot() {
+            local login="${1:-}"
+            local utype="${2:-}"
+            if [ "$utype" = "Bot" ]; then
+              return 0
+            fi
+            if [ -n "$login" ] && [[ "$login" == *\[bot\] ]]; then
+              return 0
+            fi
+            return 1
+          }
+
+          ENABLED="true"
+          case "$FEATURE" in
+            mention_triggers)
+              ENABLED="${{ steps.config.outputs.mention_triggers }}"
+              ;;
+            pr_review)
+              ENABLED="${{ steps.config.outputs.pr_review_enabled }}"
+              if [ "$ENABLED" = "true" ] && [ "${{ github.event.pull_request.draft }}" = "true" ] && [ "${{ steps.config.outputs.pr_review_include_drafts }}" = "false" ]; then
+                echo "Draft PRs are disabled in config.yml."
+                ENABLED="false"
+              fi
+              if [ "$ENABLED" = "true" ] && [ "${{ github.event.action }}" = "synchronize" ] && [ "${{ steps.config.outputs.pr_review_on_synchronize }}" != "true" ]; then
+                echo "on_synchronize is disabled in config.yml."
+                ENABLED="false"
+              fi
+              ;;
+            issues)
+              ENABLED="${{ steps.config.outputs.issues_enabled }}"
+              ;;
+            address_reviews)
+              ENABLED="${{ steps.config.outputs.address_reviews_enabled }}"
+              if [ "$ENABLED" = "true" ] && [ "${{ steps.config.outputs.address_reviews_only_bot_prs }}" = "true" ]; then
+                PR_CREATOR="${{ github.event.pull_request.user.login }}"
+                PR_CREATOR_TYPE="${{ github.event.pull_request.user.type }}"
+                if ! is_github_bot "$PR_CREATOR" "$PR_CREATOR_TYPE"; then
+                  echo "only_bot_prs: deny address_reviews for non-bot PR author login='${PR_CREATOR:-}' type='${PR_CREATOR_TYPE:-}'"
+                  ENABLED="false"
+                fi
+              fi
+              ;;
+            ci_fix)
+              ENABLED="${{ steps.config.outputs.ci_fix_enabled }}"
+              if [ "$ENABLED" = "true" ] && [ "${{ steps.config.outputs.ci_fix_only_bot_prs }}" = "true" ]; then
+                PR_CREATOR=""
+                PR_CREATOR_TYPE=""
+                PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
+                if [ -n "${PR_NUMBER:-}" ]; then
+                  if PR_DATA=$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" 2>/dev/null); then
+                    PR_CREATOR=$(echo "$PR_DATA" | jq -r '.user.login // empty')
+                    PR_CREATOR_TYPE=$(echo "$PR_DATA" | jq -r '.user.type // empty')
+                  fi
+                fi
+                # Fail closed: no linked PR author → do not auto-push
+                if [ -z "${PR_CREATOR:-}" ] && [ -z "${PR_CREATOR_TYPE:-}" ]; then
+                  echo "only_bot_prs: deny ci_fix — no PR author on check_suite (fail closed)"
+                  ENABLED="false"
+                elif ! is_github_bot "$PR_CREATOR" "$PR_CREATOR_TYPE"; then
+                  echo "only_bot_prs: deny ci_fix for non-bot PR author login='${PR_CREATOR:-}' type='${PR_CREATOR_TYPE:-}'"
+                  ENABLED="false"
+                fi
+              fi
+              ;;
+          esac
+
+          echo "Feature $FEATURE enabled status: $ENABLED"
+          echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
+
+      - name: Check GitHub App credentials existence
+        id: check-creds
+        if: steps.check-feature.outputs.enabled == 'true'
+        env:
+          APP_ID: ${{ secrets.PULLFROG_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.PULLFROG_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$APP_PRIVATE_KEY" ]; then
+            echo "has_app_creds=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_app_creds=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Mint installation token with the SAME GitHub App as the runner fleet.
+      - name: Mint GitHub App installation token
+        id: app-token
+        if: steps.check-feature.outputs.enabled == 'true' && steps.check-creds.outputs.has_app_creds == 'true'
+        uses: actions/create-github-app-token@7bfa3a4717ef143a604ee0a99d859b8886a96d00 # v1.9.3
+        with:
+          app-id: ${{ secrets.PULLFROG_APP_ID }}
+          private-key: ${{ secrets.PULLFROG_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: "pullfrog-lemon-custom-build,${{ github.event.repository.name }}"
+
+      - name: Resolve agent GH_TOKEN
+        id: token
+        if: steps.check-feature.outputs.enabled == 'true'
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          PAT: ${{ secrets.PULLFROG_GITHUB_TOKEN }}
+          JOB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APP_TOKEN:-}" ]; then
+            echo "source=github-app"
+            echo "token=$APP_TOKEN" >> "$GITHUB_OUTPUT"
+          elif [ -n "${PAT:-}" ]; then
+            echo "source=PULLFROG_GITHUB_TOKEN"
+            echo "token=$PAT" >> "$GITHUB_OUTPUT"
+          else
+            echo "source=github.token"
+            echo "token=$JOB_TOKEN" >> "$GITHUB_OUTPUT"
+          fi
+
+      # checkout_pr / git MCP refuse any dirty tree (including untracked).
+      # Strip residual pipeline temps so agent tools never see them.
+      - name: Sanitize workspace for agent git tools
+        if: steps.check-feature.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          rm -f config.env mint_error.log
+          if [ -d .github/pullfrog ]; then
+            if ! git check-ignore -q .github/pullfrog 2>/dev/null; then
+              echo ".github/pullfrog/" >> .git/info/exclude
+            fi
+          fi
+          dirty="$(git status --porcelain || true)"
+          if [ -n "$dirty" ]; then
+            echo "::warning::Working tree not clean before agent (checkout_pr will fail):"
+            printf '%s\n' "$dirty"
+          else
+            echo "Working tree clean for agent git tools"
+          fi
+
+      # Precedence: workflow input → repo Actions variable → config.yml → default
+      #   agent:  inputs.agent  | vars.PULLFROG_AGENT  | config.agent | opencode
+      #   model:  inputs.model  | vars.PULLFROG_MODEL  | config.model | opencode/muse-spark-1.3-contributor-free
+      #   effort: inputs.effort | vars.PULLFROG_EFFORT | medium
+      - name: Resolve agent, model and effort
+        id: agent-opts
+        if: steps.check-feature.outputs.enabled == 'true'
+        env:
+          INPUT_AGENT: ${{ inputs.agent }}
+          INPUT_MODEL: ${{ inputs.model }}
+          INPUT_EFFORT: ${{ inputs.effort }}
+          VAR_AGENT: ${{ vars.PULLFROG_AGENT }}
+          VAR_MODEL: ${{ vars.PULLFROG_MODEL }}
+          VAR_EFFORT: ${{ vars.PULLFROG_EFFORT }}
+          CONFIG_AGENT: ${{ steps.config.outputs.default_agent }}
+          CONFIG_MODEL: ${{ steps.config.outputs.default_model }}
+        run: |
+          set -euo pipefail
+          AGENT="${INPUT_AGENT:-}"
+          if [ -z "$AGENT" ]; then AGENT="${VAR_AGENT:-}"; fi
+          if [ -z "$AGENT" ]; then AGENT="${CONFIG_AGENT:-}"; fi
+          if [ -z "$AGENT" ]; then AGENT="opencode"; fi
+
+          MODEL="${INPUT_MODEL:-}"
+          if [ -z "$MODEL" ]; then MODEL="${VAR_MODEL:-}"; fi
+          if [ -z "$MODEL" ]; then MODEL="${CONFIG_MODEL:-}"; fi
+          if [ -z "$MODEL" ]; then MODEL="opencode/muse-spark-1.3-contributor-free"; fi
+
+          EFFORT="${INPUT_EFFORT:-}"
+          if [ -z "$EFFORT" ]; then EFFORT="${VAR_EFFORT:-}"; fi
+          if [ -z "$EFFORT" ]; then EFFORT="medium"; fi
+          EFFORT="$(printf '%s' "$EFFORT" | tr '[:upper:]' '[:lower:]')"
+          case "$EFFORT" in
+            minimal|low|medium|high|xhigh|max) ;;
+            *)
+              echo "::warning::Invalid PULLFROG_EFFORT='$EFFORT' — using medium"
+              EFFORT="medium"
+              ;;
+          esac
+
+          echo "agent=$AGENT" >> "$GITHUB_OUTPUT"
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "effort=$EFFORT" >> "$GITHUB_OUTPUT"
+          echo "Pullfrog agent opts: agent=$AGENT model=$MODEL effort=$EFFORT"
+
+      - name: Clone Pullfrog Action
+        id: clone-pullfrog
+        if: steps.check-feature.outputs.enabled == 'true'
+        env:
+          ACTION_TOKEN: ${{ steps.token.outputs.token }}
+          PAT: ${{ secrets.PULLFROG_GITHUB_TOKEN }}
+          RUNNER_REF: ${{ steps.config.outputs.runner_ref }}
+        run: |
+          set -euo pipefail
+          # Pinned to the immutable SHA in config.yml action.uses; bump deliberately.
+          if ! [[ "$RUNNER_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::config.yml action.uses must pin a full 40-char commit SHA (got '${RUNNER_REF}')"
+            exit 1
+          fi
+          # Prefer the short-lived App installation token; PAT is fallback only.
+          CLONE_TOKEN="${ACTION_TOKEN:-$PAT}"
+          RUNNER_DIR="$RUNNER_TEMP/pullfrog-runner"
+          rm -rf "$RUNNER_DIR"
+          git init -q "$RUNNER_DIR"
+          git -C "$RUNNER_DIR" fetch -q --depth 1 "https://x-access-token:${CLONE_TOKEN}@github.com/CooLguNxDD/pullfrog-lemon-custom-build.git" "$RUNNER_REF"
+          git -C "$RUNNER_DIR" checkout -q --detach FETCH_HEAD
+          if [ "$(git -C "$RUNNER_DIR" rev-parse HEAD)" != "$RUNNER_REF" ]; then
+            echo "::error::Pullfrog runner checkout does not match pinned SHA $RUNNER_REF"
+            exit 1
+          fi
+
+      - name: Run Pullfrog agent
+        if: steps.check-feature.outputs.enabled == 'true'
+        run: |
+          node "$RUNNER_TEMP/pullfrog-runner/dist/cli.mjs" gha
+        env:
+          # Applies to automatic, mention-triggered, and manually dispatched reviews.
+          # Resolved from repo variable -> config.yml -> max; only known modes.
+          INPUT_PROMPT: |
+            For code review tasks, use this configured investigation budget:
+            review_budget: ${{ steps.config.outputs.review_budget }}
+            Follow `.github/pullfrog/instructions/review.md` for review tasks.
+
+            Issue processing mode from config.yml: ${{ steps.config.outputs.issues_mode }}
+            If feature is issues and mode is plan: post a plan comment and labels only; do not open a PR.
+            If feature is issues and mode is build: implement and open a PR.
+
+            ${{ inputs.prompt }}
+          INPUT_MODEL: ${{ steps.agent-opts.outputs.model }}
+          INPUT_EFFORT: ${{ steps.agent-opts.outputs.effort }}
+          INPUT_TIMEOUT: ${{ inputs.timeout || '1h' }}
+          INPUT_TOKEN: ${{ steps.token.outputs.token }}
+          # Prefer GitHub App installation token (same App as runners)
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PULLFROG_AGENT: ${{ steps.agent-opts.outputs.agent }}
+          PULLFROG_MODEL: ${{ steps.agent-opts.outputs.model }}
+          PULLFROG_AGENT_IMAGE: ${{ steps.config.outputs.agent_image }}
+          PULLFROG_EFFORT: ${{ steps.agent-opts.outputs.effort }}
+          # Lemon :p
+          PULLFROG_LOCAL: "1"
+          PULLFROG_BRAND: "Lemon Cat"
+          PULLFROG_HOME_URL: "https://github.com/CooLguNxDD"
+          PULLFROG_TRIGGER_WORKFLOW: "pullfrog.yml"
+          META_MODEL_API_KEY: ${{ secrets.META_MODEL_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+          ANTIGRAVITY_TOKEN: ${{ secrets.ANTIGRAVITY_TOKEN }}
+          GROK_AUTH_JSON: ${{ secrets.GROK_AUTH_JSON }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+
+      - name: Pullfrog agent post-step
+        if: always() && steps.check-feature.outputs.enabled == 'true'
+        run: |
+          if [ -d "$RUNNER_TEMP/pullfrog-runner" ] && [ -f "$RUNNER_TEMP/pullfrog-runner/dist/cli.mjs" ]; then
+            node "$RUNNER_TEMP/pullfrog-runner/dist/cli.mjs" gha --post || true
+          fi

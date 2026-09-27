@@ -1,0 +1,65 @@
+# Explicit @pullfrog mentions only (comments). Not review-submitted —
+# that was too noisy and shared concurrency cancelled in-flight PR reviews.
+name: Pullfrog triggers
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, edited]
+  # Intentionally NOT pull_request_review:submitted.
+  # Bot review follow-up is pullfrog-address-reviews.yml.
+  # Humans who want agent work after a review should comment `@pullfrog …`.
+
+# Fork the group by bot vs human actor. The agent's own follow-up comments
+# (resolving threads, replies) re-fire this workflow; without the split those
+# no-op bot runs land in the same group as a real in-progress human mention
+# and cancel it before it finishes (see PR #114 run history).
+concurrency:
+  group: >-
+    pullfrog-mention-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number || github.sha }}-${{
+      (github.event.comment.user.type == 'Bot' || endsWith(github.event.comment.user.login, '[bot]') ||
+       github.event.issue.user.type == 'Bot' || endsWith(github.event.issue.user.login, '[bot]'))
+      && 'bot' || 'human'
+    }}
+  cancel-in-progress: false
+
+jobs:
+  mention:
+    # Trusted actors only: any external user could otherwise mention @pullfrog
+    # and trigger a privileged run (write permissions + secrets).
+    if: |
+      (
+        (github.event.comment && contains(github.event.comment.body, '@pullfrog')) ||
+        (github.event.issue && !github.event.comment && contains(github.event.issue.body, '@pullfrog'))
+      ) && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association || github.event.issue.author_association)
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+      issues: write
+      checks: write
+      actions: read
+      statuses: write
+    uses: ./.github/workflows/pullfrog.yml
+    with:
+      name: "@pullfrog"
+      feature: mention_triggers
+      prompt: |
+        You are Pullfrog running fully locally on repo (no hosted dashboard).
+
+        Before acting, read and follow any matching file under:
+        `.github/pullfrog/instructions/` (review.md, build.md, plan.md).
+
+        Use select_mode appropriately (Build, Plan, Review, IncrementalReview,
+        Fix, AddressReviews, Task, ResolveConflicts).
+
+        Special command conventions (approximate SaaS UI):
+        - "@pullfrog fix all" → address every open review thread on the PR
+        - "@pullfrog fix thumbs" → address only threads with a 👍 reaction
+
+        Trigger event details are available in the file `.github/pullfrog/event.json`.
+        Read that file to understand the event context.
+    secrets: inherit

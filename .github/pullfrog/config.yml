@@ -1,0 +1,41 @@
+# Local Pullfrog (no pullfrog.com dashboard)
+# Orchestration is entirely GitHub Actions + this config.
+
+mention: "@pullfrog"
+agent: opencode
+model: opencode/muse-spark-1.3-contributor-free
+
+# Official Pullfrog Agent Image (digest-pinned; bump deliberately)
+image:
+  repository: ghcr.io/coolgunxdd/pullfrog-agent
+  digest: sha256:b5f10247aa03136da0f184b555e974687bb57846fe1bcf42b43a8df09a9735f3
+
+# Runner code cloned by pullfrog.yml. Must be a full commit SHA (no branches/tags).
+action:
+  uses: CooLguNxDD/pullfrog-lemon-custom-build@e35271f181100813aeb4541780a991256c7058d8
+
+features:
+  dispatch: true
+  # Explicit @pullfrog in issue/PR comments only.
+  mention_triggers: true
+  pr_review:
+    enabled: true
+    # Review setup: low (40 calls), high (100), max (200; default).
+    # PULLFROG_REVIEW_BUDGET overrides this for all code review entrypoints.
+    # Unset variable uses this value; invalid selected values fall back to max.
+    budget: max
+    include_drafts: false
+    on_synchronize: false
+  issues:
+    enabled: true
+    mode: plan # plan | build
+
+  # Auto-address / CI-fix can push commits. Gate with only_bot_prs.
+  address_reviews:
+    enabled: true
+    only_bot_prs: true
+  ci_fix:
+    enabled: true
+    only_bot_prs: true
+
+status_checks: false
