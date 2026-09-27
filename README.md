@@ -1,3 +1,13 @@
+---
+title: Nekomimi Waifu Seeker
+emoji: 👁
+colorFrom: gray
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Nekomimi-Waifu-Seeker
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CooLguNxDD/Nekomimi-Waifu-Seeker/blob/main/notebooks/nekomimi_colab.ipynb)
@@ -379,6 +389,19 @@ Stop:
 docker compose down
 ```
 
+## Sync to a Hugging Face Space
+
+The `Sync Hugging Face Space` GitHub Actions workflow mirrors each push to
+`main` to `cclemonExp/Nekomimi-Waifu-Seeker`. Configure this under **Settings →
+Secrets and variables → Actions**:
+
+- Repository secret `HF_TOKEN`: a Hugging Face access token with write access
+  to that Space.
+
+You can also start a sync from the Actions tab with **Run workflow**. The sync
+force-updates the Space branch to match GitHub, so keep GitHub as the source of
+truth for files in the Space repository.
+
 ## Port 7860 already taken
 
 Stop the Docker stack before the local server, or the other way around:
@@ -388,3 +411,4 @@ docker compose down
 ```
 
 Then `python -m waifu_engine.web` again. The startup line "Application startup complete" is printed after Laya has loaded.
+
