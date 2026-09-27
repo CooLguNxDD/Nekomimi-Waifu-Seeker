@@ -46,6 +46,7 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/nekomimi/enrich.py` | Deterministic `lexicon/enrich.yml` templates: player text → bank trait ids as soft evidence. Not a question writer and not a model |
 | `waifu_engine/nekomimi/session.py` | `Candidate`, `GuessSession`, log-odds pool, in-process store + TTL |
 | `waifu_engine/nekomimi/engine.py` | The turn loop: `start`, `submit_answer`, `submit_guess_result`, `state_payload` |
+| `hf-static/index.html` | Static Hugging Face showcase. README metadata uses `sdk: static` and this `app_file`; the page links to Colab/local play and does not run the backend. |
 | `webui/` | SolidJS UI (Vite). File routes for `/` and `/nekomimi`. `npm run build` writes `waifu_engine/webui_dist`, which setuptools ships; FastAPI 503s until that bundle exists |
 | `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
