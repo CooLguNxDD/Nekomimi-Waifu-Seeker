@@ -3,8 +3,8 @@ title: Nekomimi Waifu Seeker
 emoji: 👁
 colorFrom: gray
 colorTo: purple
-sdk: docker
-app_port: 7860
+sdk: static
+app_file: hf-static/index.html
 pinned: false
 ---
 
@@ -390,6 +390,11 @@ docker compose down
 ```
 
 ## Sync to a Hugging Face Space
+
+The Space serves `hf-static/index.html`, a static project showcase with links to
+launch the full game on Colab or run it locally. The static page does not run
+the FastAPI backend, online search, or Laya inference. The Dockerfiles remain
+available for running the full app outside this static Space.
 
 The `Sync Hugging Face Space` GitHub Actions workflow mirrors each push to
 `main` to `cclemonExp/Nekomimi-Waifu-Seeker`. Configure this under **Settings →
