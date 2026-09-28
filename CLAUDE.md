@@ -52,7 +52,8 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/google_config.py` | Google GenAI settings + the one shared `genai.Client`: key, per-feature switches (`search_enabled`, `llm_enabled`), models (`WAIFU_GEMINI_MODEL`, per-feature overrides), minimal `thinking_config` |
 | `waifu_engine/sources/gemini.py` | Optional Gemini + Google Search grounding source. `search_characters(facts, medium)` → candidates. Never raises. Off unless `WAIFU_GEMINI_SEARCH=1` and `GEMINI_API_KEY`/`GOOGLE_API_KEY` |
 | `waifu_engine/envfile.py` | Dependency-free `.env` loader, run from `waifu_engine/__init__.py`; fills only unset variables. `.env.example` lists the settings. Tests set `WAIFU_ENV_FILE=0` (`tests/conftest.py`) |
-| `waifu_engine/query_llm.py` | Optional query rewriter: Gemini (`WAIFU_GEMINI_LLM=1`) or any OpenAI-compatible server (default local `Qwen/Qwen3.6-35B-A3B`). `prefetch` (one background worker) / `peek` (non-blocking) / `rewrite` (blocking, tooling only). Never raises. Off unless `WAIFU_QUERY_LLM=1` |
+| `waifu_engine/query_llm.py` | Optional query rewriter and name proposer: Gemini (`WAIFU_GEMINI_LLM=1`) or any OpenAI-compatible server (default local Ollama `hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q3_K_M`; Qwen via env). `prefetch` (one background worker) / `peek` (non-blocking) / `rewrite` (blocking, tooling only); `propose_characters` (blocking, called from a source worker). Thinking off by default (`reasoning_effort=none` on Ollama, chat-template switch on Qwen). Never raises. Off unless `WAIFU_QUERY_LLM=1` |
+| `waifu_engine/sources/llm_names.py` | LLM hypotheses: `propose_characters` names, each resolved on AniList/Wikipedia; unresolved names are dropped. Runs on `sources._LLM_BG`; hits join the next search. Never raises |
 | `waifu_engine/timing.py` | Per-request spans. `@traced` on `start`/`submit_answer`/`submit_guess_result`/`determine` logs one `[waifu]` line (slowest first) and sets `payload["timing"]`. `span()` is a no-op outside a trace |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
 | `waifu_engine/search.py`, `catalog.py` | Online shortlist ranking; catalog helpers remain for tooling but runtime never loads the catalog |
@@ -60,7 +61,14 @@ Consequences, in order of how often they get forgotten:
 ## The turn contract
 
 1. `_pick_question` chooses by mutual information (answer entropy minus
-   within-candidate uncertainty); Laya only answers `ready_to_guess`. The
+   within-candidate uncertainty). Unpinned questions are re-ranked by
+   `_lookahead_eig`: one Laya call per top candidate
+   (`WAIFU_NEKOMINI_EIG_CANDIDATES`) carrying every shortlisted yes/no as a
+   `noul`, so the gain uses Laya's likelihoods, not tag heuristics (BED-LLM's
+   prior x likelihood). Those judgments sit in `sess.lookahead` with the trait
+   rows they were made under and join `match_cache` only if the rows still
+   match at answer time (`_promote_lookahead`). Without Laya the heuristic
+   order stands. Laya never picks a question id; it also answers `ready_to_guess`. The
    `medium` choice ("Where is your character from?": anime/manga, game, comic,
    movie, TV, something else) and dynamic "Which series?" compete in that
    ranking like any other question — neither is forced first. Traits the seed
@@ -101,7 +109,10 @@ Early-guess support for choice evidence is `p_pick / (p_pick + best_other)`.
 "Which series?" (`engine._series_question`, wording in `traits.series_question`)
 is a dynamic choice over the leading candidates' series (`names.series_key`,
 up to 6 plus "Another series"), ranked by information gain like any question,
-asked at most twice (the second time only after "Another series"). Known
+asked at most twice (the second time only after "Another series"). From
+turn `SERIES_PIN_TURN` (6) it is pinned first once the heaviest unoffered
+series holds ≥ 0.35 posterior (`_series_pin_id`): Tifa's round surfaced a
+Final Fantasy cluster that information gain never asked about. Known
 medium/series are scored from data (`_known_choice`), no model call; only
 candidates without them go to Laya. A picked series is a search fact that sets
 `specific=True`. Option labels are scraped text: `_series_label` sanitises
@@ -153,11 +164,25 @@ Guess when any of: top posterior ≥ 0.80 after ≥ 5 questions; the same candid
 has led for ≥ 2 checks (`WAIFU_NEKOMINI_LEADER_STREAK`) at posterior ≥ 0.50
 (`WAIFU_NEKOMINI_LEADER_POSTERIOR`) and ≥ 0.15 ahead of the runner-up
 (`WAIFU_NEKOMINI_LEADER_MARGIN`); `ready_to_guess.noul`
-≥ 0.75 with `act_probability` ≥ 0.6 and posterior ≥ 0.45; or turn ≥ `MAX_TURNS`.
+≥ 0.75 with `act_probability` ≥ 0.6 and posterior ≥ 0.45; the best lookahead
+gain is under `EIG_EXHAUSTED` (0.05 bits) over ≥ 80% of the mass with the
+leader at posterior ≥ 0.3 (nothing left separates the top); or turn ≥
+`sess.turn_cap()`.
 Early guesses also require at least two model judgments with mean answer
 likelihood ≥ 0.6. A lone search hit is not sufficient evidence. Up to 3 guesses.
 The 0.80 bar stays the single-check gate; the stable-leader path is what commits
 a crowded empty-seed pool that otherwise sits at ~0.50–0.70 until the turn cap.
+
+`turn_cap()` is `MAX_TURNS + RECOVERY_TURNS × wrong guesses`. With a fixed cap,
+every guess after the first fired back to back on the same evidence (the live
+Megumin run guessed Arue, Yunyun, Funifura at turn 20). Now a wrong guess
+buys `RECOVERY_TURNS` (2) questions, and recovery and near-twin defer work
+inside them. When a guess would commit, near-twin defer asks one rare look
+that splits the leader from a same-work runner (≥ 0.10). With no rare look
+it asks the unasked yes/no (bank or a slug mined from only some blurbs) that
+best splits the leader's same-work cluster of ≤ 4, if that split is worth
+≥ 0.6 bits (`_cluster_split_question`). Once per leader/runner pair. Recovery
+after a same-work miss falls back to the same cluster split.
 
 **Every Laya path has a heuristic fallback** (`_tag_match`, `_split_quality`), so
 the loop plays with no weights installed — less sharply. Never let a Laya failure
@@ -203,13 +228,19 @@ text nodes (`{name}`), never `innerHTML`.
 | `WAIFU_NEKOMINI_LEADER_POSTERIOR` | `0.50` | Posterior a stable leader may guess at, below the single-check bar |
 | `WAIFU_NEKOMINI_LEADER_MARGIN` | `0.15` | How far that leader must lead the runner-up |
 | `WAIFU_NEKOMINI_LEADER_STREAK` | `2` | Consecutive guess-checks the same candidate must have led |
+| `WAIFU_NEKOMINI_RECOVERY_TURNS` | `2` | Questions added to the turn cap per wrong guess |
+| `WAIFU_NEKOMINI_EIG_CANDIDATES` | `8` | Top candidates Laya judges ahead of each question pick (one forward pass each; `0` = heuristic gain only) |
 | `WAIFU_HTTP_429_RETRIES` | `2` | Extra attempts after HTTP 429 before the host cools down |
 | `WAIFU_HTTP_429_BACKOFF` | `0.8` | Base wait (seconds) when Retry-After is absent; doubles each try |
 | `WAIFU_HTTP_429_CAP` | `8` | Max seconds to honour from one Retry-After or backoff |
 | `WAIFU_LAYA_HEAD_MAX_LEN` | `480` | Option-token budget |
 | `WAIFU_QUERY_LLM` | `0` | Let an LLM rewrite search queries (search strings only) |
-| `WAIFU_QUERY_LLM_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible endpoint (`https://api.openai.com/v1` for OpenAI) |
-| `WAIFU_QUERY_LLM_MODEL` | `Qwen/Qwen3.6-35B-A3B` | Model name sent to that endpoint |
+| `WAIFU_QUERY_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint (Ollama; `http://localhost:8000/v1` for vLLM, `https://api.openai.com/v1` for OpenAI) |
+| `WAIFU_QUERY_LLM_MODEL` | `hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q3_K_M` | Model name sent to that endpoint (`Qwen/Qwen3.6-35B-A3B` still works) |
+| `WAIFU_QUERY_LLM_THINKING` | `0` | `1` leaves the model's reasoning on (raise `WAIFU_QUERY_LLM_MAX_TOKENS` with it) |
+| `WAIFU_QUERY_LLM_MAX_TOKENS` | `96` | Rewrite reply cap; name proposals use at least 384 |
+| `WAIFU_LLM_NAMES` | follows `WAIFU_QUERY_LLM` | `0` stops the LLM proposing candidate names |
+| `WAIFU_LLM_NAMES_BG_MAX_PENDING` | `2` | Name-proposal jobs queued or running at once |
 | `WAIFU_QUERY_LLM_API_KEY` | — | Bearer key for the query endpoint; blank for local. Falls back to `OPENAI_API_KEY` only for `https://api.openai.com` |
 | `WAIFU_QUERY_LLM_TIMEOUT` | `20` | Seconds per rewrite call |
 | `WAIFU_QUERY_LLM_WAIT` | `0` | Seconds a turn may wait for the LLM (`0` = never block) |
@@ -261,11 +292,16 @@ DuckDuckGo.
    fire on `"the"` and tagged every character male.
 5. Laya calls go through `laya_client.ask`. Do not construct `Router` or call
    `laya.load` anywhere else.
-6. The query LLM (`query_llm.py`, either backend: Gemini or OpenAI-compatible) writes **search strings only** — never
-   question text, never decisions. Its input is player facts only; never send
-   it scraped names or blurbs. Tests stub its HTTP; never call a real endpoint.
+6. The query LLM (`query_llm.py`, either backend: Gemini or OpenAI-compatible) writes **search strings** and
+   proposes **candidate names** (`propose_characters`), never question text and never decisions. Proposed
+   names are leads: `sources.llm_names` keeps one only if a real AniList/Wikipedia page matches it, and
+   the profile comes from that page. Its input is player facts only; never send it scraped names or
+   blurbs (a rejected guess's name is left out for that reason). Tests stub its HTTP; never call a real endpoint.
 7. The query LLM must never block a turn by default, and must not be called
-   per answer: only for new typed text, and only when Laya says search is stuck.
+   per answer. Rewrites run only for new typed text, and only when Laya says
+   search is stuck. Name proposals run on a background source worker, at
+   most once per distinct set of facts per session, and only while the pool
+   is empty or flat (leader < 0.25 from turn 3) or search is stuck.
 8. Gemini (`sources/gemini.py`) is a **candidate source only**: it lists
    characters, never writes question text, never makes decisions. Its reply is
    untrusted web content (parse defensively, render with `textContent`). Its

@@ -266,10 +266,12 @@ def test_answer_without_pending_question_errors():
 
 
 def test_question_choice_is_ours_not_layas(monkeypatch):
-    """Information gain picks the question; Laya only reports readiness.
+    """Information gain picks the question; Laya judges candidates and readiness.
 
     Laya used to choose from a list of question ids and came back near-uniform
-    (confidence 0.0003), so the choice call was dropped.
+    (confidence 0.0003), so the choice call was dropped. The lookahead asks
+    per-candidate ``noul`` judgments only; with none returned, the heuristic
+    order stands.
     """
     s = _fresh_session()
     options = engine.candidate_questions(s)
@@ -283,7 +285,8 @@ def test_question_choice_is_ours_not_layas(monkeypatch):
     chosen, answers = engine._pick_question(s)
 
     assert chosen["id"] == options[0]["id"]
-    assert asked == [{"ready_to_guess"}]
+    assert asked[-1] == {"ready_to_guess"}
+    assert all(key.startswith("eig") for keys in asked[:-1] for key in keys)
     assert answers is not None
     assert s.laya_used
 

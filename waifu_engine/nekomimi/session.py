@@ -28,6 +28,10 @@ from ..names import (
 SESSION_TTL_SECONDS = int(os.getenv("WAIFU_NEKOMINI_TTL", "1800"))
 MAX_TURNS = int(os.getenv("WAIFU_NEKOMINI_MAX_TURNS", "20"))
 MAX_GUESSES = int(os.getenv("WAIFU_NEKOMINI_MAX_GUESSES", "3"))
+# Extra questions granted after each wrong guess. Without them every guess
+# after the first fired back to back at the cap, on the same evidence: the
+# Arue -> Yunyun -> Funifura run named posterior ranks 1-3 and never asked.
+RECOVERY_TURNS = int(os.getenv("WAIFU_NEKOMINI_RECOVERY_TURNS", "2"))
 
 # A candidate this far below the leader in log-odds is out of the running.
 ELIMINATION_MARGIN = 4.0
@@ -179,6 +183,22 @@ class GuessSession:
     # look was the newest evidence. A later popularity absorb refreshes only
     # the newest look, so pin-timing and the fame rebound stay separable.
     soft_cast_delta: dict[str, float] = field(default_factory=dict)
+    # Guesses the player rejected. Each one extends ``turn_cap`` so the next
+    # guess can follow new evidence instead of the runner-up of the old.
+    wrong_guesses: int = 0
+    # Best Laya lookahead information gain from the latest question pick, in
+    # bits, or None when Laya did not score the shortlist.
+    last_eig: float | None = None
+    # Laya ``match`` judgments made ahead of asking, keyed by (candidate,
+    # question), with the answered-trait rows they were judged under. They
+    # join ``match_cache`` only if that prefix is still current at answer
+    # time, so a lookahead never stands in for a judgment on other evidence.
+    lookahead: dict[tuple[str, str], tuple[tuple[tuple[Any, ...], ...], float]] = field(
+        default_factory=dict)
+
+    def turn_cap(self) -> int:
+        """Question limit for this round: ``MAX_TURNS`` plus recovery turns per miss."""
+        return MAX_TURNS + RECOVERY_TURNS * self.wrong_guesses
 
     # -- candidate pool ------------------------------------------------
     def alive_candidates(self) -> list[Candidate]:

@@ -18,7 +18,7 @@ from typing import Any, Callable
 from .. import timing
 from ..names import name_keys, plain_duplicate
 from ..nekomimi.lexicon import POPULAR_CATEGORIES, SEARCH_SUFFIX as _MEDIUM_SUFFIX
-from . import _http, anilist, gemini, wikipedia
+from . import _http, anilist, gemini, llm_names, wikipedia
 
 __all__ = ["anilist", "gemini", "wikipedia", "find_candidates", "normalize_name"]
 
@@ -195,6 +195,11 @@ _COVERAGE_MAX = 3
 # Gemini calls are billed.
 _DDG_BG = _Background("ddg", "WAIFU_DDG_BG_MAX_PENDING", 4)
 _GEMINI_BG = _Background("gemini", "WAIFU_GEMINI_BG_MAX_PENDING", 2)
+# LLM hypotheses: one model call plus up to ``llm_names.RESOLVE_MAX`` lookups.
+_LLM_BG = _Background("llm_names", "WAIFU_LLM_NAMES_BG_MAX_PENDING", 2)
+# Facts each session last sent for hypotheses. The same facts would propose
+# the same names again, and each resolution costs a round of lookups.
+_LLM_DONE: dict[str, tuple[str, ...]] = {}
 # Names kept for the DuckDuckGo fill (tests and callers use them).
 _BG_LOCK = _DDG_BG.lock
 _BG_PENDING = _DDG_BG.pending
@@ -234,6 +239,34 @@ def _gemini_run(key: str, facts: list[str], medium_hint: str | None, limit: int)
     errors: list[str] = []
     hits = gemini.search_characters(facts, medium_hint, limit, errors=errors)
     _GEMINI_BG.finish(key, hits, t0, errors)
+
+
+def _llm_names_run(key: str, facts: list[str], medium_hint: str | None) -> None:
+    """Background LLM-hypotheses job: propose names, resolve them, park the hits."""
+    t0 = time.perf_counter()
+    errors: list[str] = []
+    try:
+        hits = llm_names.search(facts, medium_hint, errors=errors)
+    except Exception as exc:  # noqa: BLE001 - search should not raise; be sure
+        hits, errors = [], [str(exc)]
+    _LLM_BG.finish(key, hits, t0, errors)
+
+
+def _llm_names_start(key: str, facts: list[str], medium_hint: str | None) -> bool:
+    """Queue hypotheses for ``facts`` unless this session already ran those facts."""
+    clean = tuple(f for f in facts if f and f.strip())
+    if not clean or not llm_names.query_llm.names_enabled():
+        return False
+    with _LLM_BG.lock:
+        if _LLM_DONE.get(key) == clean:
+            return False
+    if not _LLM_BG.start(key, _llm_names_run, list(clean), medium_hint):
+        return False
+    with _LLM_BG.lock:
+        if len(_LLM_DONE) >= _BG_MAX_KEYS and key not in _LLM_DONE:
+            _LLM_DONE.pop(next(iter(_LLM_DONE)))
+        _LLM_DONE[key] = clean
+    return True
 
 
 def take_background(key: str) -> list[dict[str, Any]]:
@@ -385,6 +418,7 @@ def find_candidates(
     pool_size: int | None = None,
     gemini_inline: bool | None = None,
     pin: str | None = None,
+    hypothesis_facts: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Merge candidates from every source, best source first, deduped by name.
 
@@ -423,6 +457,11 @@ def find_candidates(
     A host that still answers 429 after retries is not queried again in this
     search. Further sequential calls would come back empty and only make the
     limit last longer.
+
+    ``hypothesis_facts`` (player facts only) asks the local LLM for character
+    names that fit them, on a background worker (``llm_names``). Resolved
+    hits join the next search for ``background_key``; the engine decides
+    when that is worth it, so ``None`` never calls the model.
     """
     from .. import web_search
 
@@ -566,6 +605,10 @@ def find_candidates(
     if background_key:
         take(take_background(background_key), "ddg_bg")
         take(_GEMINI_BG.take(background_key), "gemini_bg")
+        take(_LLM_BG.take(background_key), "llm_bg")
+        if hypothesis_facts:
+            with timing.span("fetch.llm_names_background"):
+                _llm_names_start(background_key, hypothesis_facts, medium_hint)
 
     in_play = n_seen if pool_size is None else pool_size
     room = popular_limit() - in_play

@@ -13,7 +13,8 @@ from waifu_engine import query_llm, sources
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     for var in ("WAIFU_QUERY_LLM", "WAIFU_QUERY_LLM_BASE_URL", "WAIFU_QUERY_LLM_MODEL",
-                "WAIFU_QUERY_LLM_API_KEY", "OPENAI_API_KEY", "WAIFU_ONLINE_SEARCH"):
+                "WAIFU_QUERY_LLM_API_KEY", "OPENAI_API_KEY", "WAIFU_ONLINE_SEARCH",
+                "WAIFU_QUERY_LLM_THINKING", "WAIFU_QUERY_LLM_MAX_TOKENS", "WAIFU_LLM_NAMES"):
         monkeypatch.delenv(var, raising=False)
     query_llm.clear()
     yield
@@ -37,9 +38,9 @@ def test_off_by_default_and_never_calls_out(monkeypatch):
     assert query_llm.rewrite(["silver hair", "mage"]) is None
 
 
-def test_defaults_to_local_qwen():
-    assert query_llm.model() == "Qwen/Qwen3.6-35B-A3B"
-    assert query_llm.base_url() == "http://localhost:8000/v1"
+def test_defaults_to_local_gemma_on_ollama():
+    assert query_llm.model() == "hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q3_K_M"
+    assert query_llm.base_url() == "http://localhost:11434/v1"
 
 
 def test_parses_capped_queries_and_strips_thinking(monkeypatch):
@@ -51,14 +52,35 @@ def test_parses_capped_queries_and_strips_thinking(monkeypatch):
     got = query_llm.rewrite(["silver hair", "mage"], "game")
     assert got == ["silver hair mage", "x" * query_llm.MAX_QUERY_CHARS, "fourth"]
     req, body = sent[0]
-    assert req.full_url == "http://localhost:8000/v1/chat/completions"
-    assert body["model"] == "Qwen/Qwen3.6-35B-A3B"
-    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert req.full_url == "http://localhost:11434/v1/chat/completions"
+    assert body["model"] == query_llm.DEFAULT_MODEL
+    # Ollama ignores chat_template_kwargs; reasoning_effort is its off switch.
+    assert body["reasoning_effort"] == "none"
+    assert "chat_template_kwargs" not in body
     assert "silver hair" in body["messages"][1]["content"]
     assert body["max_tokens"] <= 96
     # Cached: the same facts do not hit the endpoint twice.
     query_llm.rewrite(["silver hair", "mage"], "game")
     assert len(sent) == 1
+
+
+def test_qwen_gets_the_template_switch_and_thinking_can_stay_on(monkeypatch):
+    monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
+    monkeypatch.setenv("WAIFU_QUERY_LLM_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("WAIFU_QUERY_LLM_MODEL", "Qwen/Qwen3.6-35B-A3B")
+    sent = []
+    _serve(monkeypatch, '["q"]', sent)
+    query_llm.rewrite(["tsundere"])
+    body = sent[0][1]
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in body
+
+    monkeypatch.setenv("WAIFU_QUERY_LLM_THINKING", "1")
+    monkeypatch.setenv("WAIFU_QUERY_LLM_MAX_TOKENS", "2048")
+    query_llm.rewrite(["kuudere"])
+    body = sent[1][1]
+    assert "chat_template_kwargs" not in body and "reasoning_effort" not in body
+    assert body["max_tokens"] == 2048
 
 
 def test_openai_gets_no_template_kwargs_and_a_bearer_key(monkeypatch):
