@@ -1863,7 +1863,20 @@ def _rescore_candidates(sess: GuessSession) -> None:
 
     def add(c: Candidate, qid: str, likelihood: float) -> None:
         """Add one clamped answer log-likelihood and keep it for the miss report."""
-        term = math.log(min(0.98, max(0.02, likelihood)))
+        is_detail = qid.startswith("clue_")
+        is_soft_no = (answer == "no" and not qid.startswith("guess_")) # and not identity
+
+        lower_bound = 0.18 if is_soft_no else 0.02
+        upper_bound = 0.98
+        clamped_p = min(upper_bound, max(lower_bound, likelihood))
+        
+        if is_detail and answer == "yes" and clamped_p > 0.5:
+            # Promote player detail clues to an evidence multiplier >= 1.8x
+            term = math.log(clamped_p)
+            term = max(term, 1.8)
+        else:
+            term = math.log(clamped_p)
+            
         c.logodds += term
         sess.contrib[(c.id, qid)] = sess.contrib.get((c.id, qid), 0.0) + term
 
@@ -2730,6 +2743,7 @@ def _unasked_leader_pin_look(sess: GuessSession) -> dict[str, Any] | None:
     return None
 
 
+from .session import save_session
 def _advance(sess: GuessSession) -> dict[str, Any]:
     """Emit the next question, or a guess when the evidence is strong enough.
 
@@ -2836,6 +2850,7 @@ def start(seed: str = "") -> dict[str, Any]:
     refresh_candidates(sess, limit=16, initial=True)
     payload = _advance(sess)
     payload["seed"] = sess.seed
+    save_session(sess)
     return payload
 
 
@@ -2883,7 +2898,18 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
 
     score_candidates(sess, question, answer)
     if current["detail"]:
+        sess.memory.player_details.append(current["detail"])
         _score_free_text(sess, current["detail"], f"clue_{sess.turn}")
+        
+        # immediately trigger synchronous candidate deduction
+        from ..query_llm import deduce_candidates
+        from ..sources.llm_names import resolve
+        deduction = deduce_candidates(sess.memory, _medium_hint(sess))
+        if deduction.get("candidates"):
+            resolved = resolve(deduction["candidates"], _medium_hint(sess))
+            if resolved:
+                sess.add_candidates(resolved)
+                _rescore_candidates(sess)
 
     # Every answer opens a new search branch. Discover and replay evidence
     # before choosing the next question or declaring a winner.

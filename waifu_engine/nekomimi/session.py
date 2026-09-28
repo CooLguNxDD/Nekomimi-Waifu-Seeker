@@ -14,6 +14,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+import json
+import dataclasses
+from .memory import SessionMemory
 
 from ..names import (
     already_seen,
@@ -161,6 +164,7 @@ class GuessSession:
     winner: str | None = None
     notes: list[str] = field(default_factory=list)
     laya_used: bool = False
+    memory: SessionMemory = field(default_factory=SessionMemory)
     evidence: dict[str, tuple[dict[str, Any], str]] = field(default_factory=dict)
     match_cache: dict[tuple[str, str], float] = field(default_factory=dict)
     # Per-candidate option probabilities for multiple-choice questions.
@@ -420,20 +424,100 @@ class GuessSession:
 # --- store -----------------------------------------------------------
 _STORE: dict[str, GuessSession] = {}
 _STORE_LOCK = threading.Lock()
+SESSION_DIR = os.path.join("data", "sessions")
 
+def _to_json_dict(sess: GuessSession) -> dict:
+    d = dataclasses.asdict(sess)
+    d["rejected"] = list(d["rejected"])
+    d["near_twin_pairs"] = list(d["near_twin_pairs"])
+    
+    # caches with tuple keys
+    def _str_keys(obj):
+        if not isinstance(obj, dict):
+            return obj
+        return {str(k): v for k, v in obj.items()}
+        
+    d["match_cache"] = _str_keys(d["match_cache"])
+    d["choice_cache"] = _str_keys(d["choice_cache"])
+    d["lookahead"] = _str_keys(d["lookahead"])
+    d["contrib"] = _str_keys(d["contrib"])
+    
+    # rank_log might contain tuples
+    return d
+
+def _from_json_dict(d: dict) -> GuessSession:
+    # Need to restore candidates
+    if "candidates" in d:
+        cands = []
+        for c in d["candidates"]:
+            cands.append(Candidate(**c))
+        d["candidates"] = cands
+        
+    if "memory" in d:
+        d["memory"] = SessionMemory.from_dict(d["memory"])
+        
+    d["rejected"] = set(d["rejected"])
+    d["near_twin_pairs"] = set(tuple(x) for x in d["near_twin_pairs"])
+    
+    # For tuple-keyed dicts, we would need to parse them back. 
+    # But for a simple resume, we can just clear caches or leave them empty.
+    d["match_cache"] = {}
+    d["choice_cache"] = {}
+    d["lookahead"] = {}
+    d["contrib"] = {}
+    d["rank_log"] = [] # Can clear logs on resume to avoid complex parse
+    d["guess_log"] = []
+    
+    # Drop unknown fields to avoid TypeError
+    import inspect
+    sig = inspect.signature(GuessSession)
+    valid_keys = set(sig.parameters.keys())
+    d = {k: v for k, v in d.items() if k in valid_keys}
+    
+    return GuessSession(**d)
+
+def save_session(sess: GuessSession) -> None:
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    with _STORE_LOCK:
+        _STORE[sess.id] = sess
+    path = os.path.join(SESSION_DIR, f"{sess.id}.json")
+    
+    try:
+        d = _to_json_dict(sess)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2)
+    except Exception as e:
+        print(f"Error saving session: {e}")
+
+def load_session(session_id: str) -> GuessSession | None:
+    with _STORE_LOCK:
+        if session_id in _STORE:
+            return _STORE[session_id]
+            
+    path = os.path.join(SESSION_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        return None
+        
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        sess = _from_json_dict(d)
+        with _STORE_LOCK:
+            _STORE[sess.id] = sess
+        return sess
+    except Exception as e:
+        print(f"Error loading session: {e}")
+        return None
 
 def new_session(seed: str = "") -> GuessSession:
     now = time.time()
     sess = GuessSession(id=uuid.uuid4().hex[:16], created=now, updated=now, seed=seed.strip())
-    with _STORE_LOCK:
-        _STORE[sess.id] = sess
+    save_session(sess)
     purge_expired()
     return sess
 
-
 def get_session(session_id: str) -> GuessSession | None:
-    with _STORE_LOCK:
-        sess = _STORE.get(session_id)
+    sess = load_session(session_id)
     if sess is None:
         return None
     if time.time() - sess.updated > SESSION_TTL_SECONDS:
@@ -441,20 +525,35 @@ def get_session(session_id: str) -> GuessSession | None:
         return None
     return sess
 
-
 def drop_session(session_id: str) -> None:
     with _STORE_LOCK:
         _STORE.pop(session_id, None)
-
+    path = os.path.join(SESSION_DIR, f"{session_id}.json")
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 def purge_expired(now: float | None = None) -> int:
     now = time.time() if now is None else now
+    stale = 0
     with _STORE_LOCK:
-        stale = [sid for sid, s in _STORE.items() if now - s.updated > SESSION_TTL_SECONDS]
-        for sid in stale:
+        to_drop = [sid for sid, s in _STORE.items() if now - s.updated > SESSION_TTL_SECONDS]
+        for sid in to_drop:
             _STORE.pop(sid, None)
-    return len(stale)
-
+            
+    if os.path.exists(SESSION_DIR):
+        for f in os.listdir(SESSION_DIR):
+            if f.endswith(".json"):
+                p = os.path.join(SESSION_DIR, f)
+                try:
+                    if now - os.path.getmtime(p) > SESSION_TTL_SECONDS:
+                        os.remove(p)
+                        stale += 1
+                except OSError:
+                    pass
+    return stale + len(to_drop)
 
 def active_count() -> int:
     with _STORE_LOCK:

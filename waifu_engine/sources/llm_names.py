@@ -23,6 +23,8 @@ from typing import Any
 from .. import query_llm
 from ..names import same_character, same_series, series_key
 from . import anilist, wikipedia
+from .cache import get_entity, save_entity
+
 
 # Names the model may propose per call, and how many of them are looked up.
 # Each lookup is one AniList request (plus Wikipedia on a miss), all on a
@@ -46,17 +48,19 @@ def _matches(hit: dict[str, Any], name: str, series: str) -> bool:
 
 
 def _lookup(name: str, series: str, medium_hint: str | None) -> dict[str, Any] | None:
-    """The first real page matching one proposal, or None.
-
-    AniList covers anime, manga and games; film, TV and Western comics are
-    tried on Wikipedia first, where AniList has nothing.
-    """
+    """The first real page matching one proposal, or None."""
+    
+    cached = get_entity(name)
+    if cached and _matches(cached, name, series):
+        return cached
+        
     order = ((wikipedia, anilist) if medium_hint in _MEDIA_WIKI_FIRST
              else (anilist, wikipedia))
     for source in order:
         query = name if source is anilist else f"{name} {series}".strip()
         for hit in source.search_characters(query, limit=3):
             if _matches(hit, name, series):
+                save_entity(hit)
                 return hit
     return None
 

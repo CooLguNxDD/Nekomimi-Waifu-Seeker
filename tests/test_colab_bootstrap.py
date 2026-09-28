@@ -288,11 +288,10 @@ def test_chromium_present_uses_browser_path(tmp_path: Path, monkeypatch: pytest.
 def test_node_install_script_is_valid_bash():
     proc = subprocess.run(
         ["bash", "-n"],
-        input=boot._NODE_INSTALL,
-        text=True,
+        input=boot._NODE_INSTALL.replace("\r\n", "\n").encode("utf-8"),
         capture_output=True,
     )
-    assert proc.returncode == 0, proc.stderr
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
 
 
 def test_sync_repo_branch_then_sha_then_skip(tmp_path: Path):
@@ -479,10 +478,10 @@ def test_dry_run_does_not_clone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_notebook_embeds_helper_and_keeps_url_order():
-    nb = json.loads((ROOT / "notebooks" / "nekomimi_colab.ipynb").read_text())
+    nb = json.loads((ROOT / "notebooks" / "nekomimi_colab.ipynb").read_text(encoding="utf-8"))
     assert nb["metadata"]["colab"]["gpuType"] == "L4"
     assert nb["metadata"]["accelerator"] == "GPU"
-    helper = (ROOT / "notebooks" / "colab_bootstrap.py").read_text()
+    helper = (ROOT / "notebooks" / "colab_bootstrap.py").read_text(encoding="utf-8")
     cells = nb["cells"]
     code = ["".join(cell["source"]) for cell in cells if cell["cell_type"] == "code"]
     blob = "\n".join(code)

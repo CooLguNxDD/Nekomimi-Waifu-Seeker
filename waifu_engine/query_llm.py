@@ -36,6 +36,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from . import google_config, timing
+from .nekomimi.memory import SessionMemory
+
 
 _YES = {"1", "true", "yes"}
 # Gemma 4 26B-A4B (MoE, ~4B active) decodes ~54 tok/s on a Colab L4 and fits
@@ -516,3 +518,67 @@ def clear() -> None:
         _RESULTS.clear()
         _FUTURES.clear()
         _STATS.update(calls=0, last_ms=None)
+
+def deduce_candidates(memory: SessionMemory, medium_hint: str | None = None) -> dict[str, Any]:
+    """Synchronous deductive reasoning over the player's facts.
+    Returns {"candidates": [...], "search_queries": [...]}
+    """
+    if not enabled():
+        return {"candidates": [], "search_queries": []}
+    
+    prompt = """You are an expert anime, manga, and gaming character deduction engine.
+Analyze the player's confirmed clues and dispreferred traits:
+{summary}
+
+Return a JSON object with:
+1. "candidates": list of 5-8 character names and series that best fit. Each element must be a dict with "name" and "series" keys.
+2. "search_queries": list of 2-3 precise search phrases for web grounding.""".format(
+        summary=memory.summary_prompt()
+    )
+    
+    body = {
+        "model": model(),
+        "temperature": 0,
+        "max_tokens": 512,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+    
+    # Simple hack to remove response_format if it causes issues on Ollama
+    if _is_openai(base_url()):
+        body["response_format"] = {"type": "json_object"}
+        
+    _thinking_off(body)
+    
+    try:
+        reply = _complete(body, base_url(), model())
+        text = _THINK.sub("", reply or "")
+        
+        # Simple extraction of JSON
+        start = text.find('{')
+        end = text.rfind('}')
+        if start >= 0 and end > start:
+            parsed = json.loads(text[start:end+1])
+            
+            cands = parsed.get("candidates", [])
+            # Some models return dicts, some return strings for candidates
+            formatted_cands = []
+            for c in cands:
+                if isinstance(c, dict):
+                    formatted_cands.append(c)
+                elif isinstance(c, str):
+                    formatted_cands.append({"name": c, "series": ""})
+            
+            queries = parsed.get("search_queries", [])
+            
+            return {
+                "candidates": formatted_cands,
+                "search_queries": queries
+            }
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"deduce_candidates failed: {e}")
+        pass
+        
+    return {"candidates": [], "search_queries": []}

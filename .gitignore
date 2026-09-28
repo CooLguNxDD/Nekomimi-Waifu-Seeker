@@ -14,3 +14,6 @@ waifu_engine/webui_dist/
 .hf_cache/
 *.onnx
 data/*.meta.json
+data/sessions/
+data/cache/
+bench-out/
