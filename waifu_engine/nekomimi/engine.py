@@ -1254,14 +1254,15 @@ def _lookahead_likelihood(
     """P(yes) for a question not yet asked, with the same precedence as rescoring.
 
     Profile text first (a stated visual), then a lookahead judgment made
-    under ``rows``, then the heuristic capped to [0.4, 0.6].
+    under ``rows`` (calibrated as rescoring will), then the heuristic capped
+    to [0.4, 0.6].
     """
     visual = _profile_likelihood(question, cand)
     if visual is not None:
         return visual
     judged = sess.lookahead.get((cand.id, question["id"]))
     if judged is not None and judged[0] == rows:
-        return judged[1]
+        return _calibrated_noul(question, cand, judged[1])
     return min(0.6, max(0.4, _tag_match(question, cand)))
 
 
@@ -1377,9 +1378,72 @@ def _tag_match(question: dict[str, Any], cand: Candidate) -> float:
     return 0.5
 
 
+# How much of Laya's yes/no drift from the base rate to keep when the profile
+# never mentions the trait. Measured on real rows: "has a halo" scored
+# 0.63-0.73 on Makima/2B/Tifa (prior 0.05), so every "no" cost the target
+# about a nat while described rivals paid nothing.
+SILENT_WEIGHT = float(os.getenv("WAIFU_NEKOMINI_SILENT_WEIGHT", "0.3"))
+# A Laya choice distribution whose top option is below this is a silent
+# profile: measured <= 0.40 with no appearance text, 0.97 when it is stated.
+CHOICE_SILENT_MAX = float(os.getenv("WAIFU_NEKOMINI_CHOICE_SILENT_MAX", "0.5"))
+
+
+def _grounded(question: dict[str, Any], cand: Candidate) -> bool:
+    """Whether the profile mentions this trait at all (a tag or a whole word).
+
+    Tags are mined with the shared ``TRAIT_PATTERNS`` vocabulary, so a tag
+    covers synonyms ("android" tags ``robot``). Noisy tags are fine here:
+    they only decide whether Laya's judgment is trusted, not the answer.
+    """
+    slugs = set(question.get("tags_true") or ()) | set(question.get("tags_false") or ())
+    if slugs & set(cand.tags):
+        return True
+    blurb = (cand.blurb or "").lower()
+    return any(re.search(r"\b" + re.escape(t.replace("-", " ")) + r"\b", blurb)
+               for t in question.get("tags_true") or ())
+
+
+def _calibrated_noul(question: dict[str, Any], cand: Candidate, p: float) -> float:
+    """Laya's P(yes), pulled toward the question's base rate on a silent profile.
+
+    A profile that never mentions the trait says nothing either way, but the
+    raw noul drifted far from the prior (``hair_long`` 0.18-0.27 against 0.40)
+    and the four missed targets lost 0.4-0.6 per "no" answer to described
+    rivals. ``WAIFU_NEKOMINI_SILENT_WEIGHT=1`` restores the raw noul.
+    """
+    if _grounded(question, cand):
+        return p
+    prior = float(question.get("prior", 0.5))
+    return prior + SILENT_WEIGHT * (p - prior)
+
+
+def _silent_choice(question: dict[str, Any], cand: Candidate) -> dict[str, float]:
+    """Option distribution for a profile that does not state the trait.
+
+    Base rates from the bank's option priors (uniform when an option has
+    none), with the ``_tag_choice`` nudge for a tag or blurb hit. Laya's flat
+    answer on such a profile was biased, not uniform: Tifa's black hair got
+    0.06 with "pink" on top.
+    """
+    options = question["options"]
+    priors = [float(o.get("prior") or 0.0) for o in options.values()]
+    base = priors if all(p > 0.0 for p in priors) else [1.0] * len(priors)
+    nudge = _tag_choice(question, cand)
+    flat = 1.0 / len(options)
+    weights = {k: b * (nudge[k] / flat) for k, b in zip(options, base)}
+    total = sum(weights.values())
+    return {k: w / total for k, w in weights.items()}
+
+
 def _is_series_question(question: dict[str, Any]) -> bool:
     """Whether ``question`` is a "Which series?" question (its options carry keys)."""
     return any("series_key" in o for o in (question.get("options") or {}).values())
+
+
+# Source placeholders for "series unknown" (``Candidate.public`` hides them).
+_UNKNOWN_SERIES = {"", "Unknown", "Web result"}
+# "Another series" for a row with no series that names no listed work.
+_UNKNOWN_SERIES_OTHER = 0.6
 
 
 def _known_choice(question: dict[str, Any], cand: Candidate) -> dict[str, float] | None:
@@ -1387,8 +1451,10 @@ def _known_choice(question: dict[str, Any], cand: Candidate) -> dict[str, float]
 
     Medium question: a known medium puts most of the mass on its own option,
     a little on crossover options (movie/TV). Series question: a known series puts 0.9 on its option, or on
-    "Another series" when it is not listed. Either way no model call is
-    needed; candidates without the data go to Laya instead.
+    "Another series" when it is not listed. An unknown series goes to a
+    listed work the name or blurb names, else 0.6 on "Another series"; the
+    series question never reaches Laya. Candidates without a known medium
+    go to Laya instead.
     """
     options = list(question.get("options") or {})
     if not options:
@@ -1407,16 +1473,25 @@ def _known_choice(question: dict[str, Any], cand: Candidate) -> dict[str, float]
         dist.update({k: 0.16 / len(cross) for k in cross})
         dist.update({k: 0.04 / len(rest) for k in rest})
         return dist
+    on, off = 0.9, 0.1
     if _is_series_question(question):
-        key = series_key(cand.series)
-        if not key:
-            return None
-        hits = [k for k, o in question["options"].items()
-                if same_series_key(key, o.get("series_key", ""))][:1] or ["other"]
+        key = "" if cand.series in _UNKNOWN_SERIES else series_key(cand.series)
+        if key:
+            hits = [k for k, o in question["options"].items()
+                    if same_series_key(key, o.get("series_key", ""))][:1] or ["other"]
+        else:
+            # No series on record (a DuckDuckGo row, say). Laya guessed one
+            # from the snippet and gave Megumin 0.035 on "Another series".
+            # A listed work the page names still wins; otherwise the options
+            # are other candidates' series, so "other" is only likely.
+            text = f"{cand.name} {cand.blurb}"
+            hits = [k for k, o in question["options"].items()
+                    if o.get("fact") and web_search.franchise_mentioned(o["fact"], text)][:1]
+            if not hits:
+                hits, on, off = ["other"], _UNKNOWN_SERIES_OTHER, 1.0 - _UNKNOWN_SERIES_OTHER
     else:
         return None
     rest = [k for k in options if k not in hits]
-    on, off = 0.9, 0.1
     if not rest:
         return {k: 1.0 / len(hits) for k in hits}
     dist = {k: on / len(hits) for k in hits}
@@ -1774,7 +1849,9 @@ def _rescore_candidates(sess: GuessSession) -> None:
     Soft cast (popularity, and a fame-only series lead) is then pulled back
     inside a series-split pin cast so it cannot undo that step.
     Every term lands in ``sess.contrib`` too, so ``evidence_breakdown`` can
-    name the answer that sank a candidate.
+    name the answer that sank a candidate. A profile silent on a trait is
+    scored near its base rate (``_calibrated_noul``, ``_silent_choice``), not
+    by Laya's drift on text that never mentions it.
     """
     sess.collapse_identities()
     for question, answer in sess.evidence.values():
@@ -1805,8 +1882,14 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 sess.laya_used = True
                 sess.choice_cache.update({(cid, qid): d for cid, d in dists.items()})
             for c in live:
-                dist = (known.get(c.id) or sess.choice_cache.get((c.id, qid))
-                        or _tag_choice(question, c))
+                dist = known.get(c.id)
+                if dist is None:
+                    dist = sess.choice_cache.get((c.id, qid))
+                    # A flat Laya answer means the profile never states the
+                    # trait; its bias is not evidence. The cache keeps it raw.
+                    if dist is not None and max(dist.values(), default=0.0) < CHOICE_SILENT_MAX:
+                        dist = _silent_choice(question, c)
+                dist = dist or _tag_choice(question, c)
                 add(c, qid, dist.get(answer, 0.0))
             continue
         # A typed chip is a nudge, not a model vote. Laya's noul on the raw
@@ -1845,7 +1928,9 @@ def _rescore_candidates(sess: GuessSession) -> None:
             p = sess.match_cache.get((c.id, qid))
             if visual is not None:
                 p = visual
-            elif p is None:
+            elif p is not None:
+                p = _calibrated_noul(question, c, p)
+            else:
                 # A failed model call must not make noisy tags stronger evidence
                 # than the model's typically modest confidence.
                 p = min(0.6, max(0.4, _tag_match(question, c)))
@@ -1996,9 +2081,11 @@ def _yesno_likelihood(sess: GuessSession, question: dict[str, Any], cand: Candid
     p = sess.match_cache.get((cand.id, question["id"]))
     if visual is not None:
         p = visual
-    elif p is None:
+    elif p is not None:
+        p = _calibrated_noul(question, cand, p)
+    else:
         p = min(0.6, max(0.4, _tag_match(question, cand)))
-    return p if p is not None else 0.5
+    return p
 
 
 def _lift_title_royalty(

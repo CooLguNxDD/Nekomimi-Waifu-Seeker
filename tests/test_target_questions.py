@@ -200,10 +200,11 @@ def test_series_pick_promotes_that_series_without_model_calls(_offline):
     ranked = [c.id for c, _ in s.posterior()]
     assert set(ranked[:2]) == {"koharu", "hifumi"}
     assert s.by_id("klee").alive  # soft: never eliminates
-    # Only the candidate with no series needs Laya for the series question.
+    # No candidate needs Laya: a row with no series is scored from data too
+    # (a listed work its page names, else "Another series" is likely).
     series_calls = [x for x in _offline
                     if "match" in x and "Which series" in x["match"]["instructions"]]
-    assert len(series_calls) == 1
+    assert series_calls == []
 
 
 def test_confirmed_series_becomes_a_specific_search_term(monkeypatch):

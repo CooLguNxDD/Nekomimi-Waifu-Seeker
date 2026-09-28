@@ -372,7 +372,9 @@ def test_refresh_replays_history_and_filters_medium_before_model(monkeypatch):
     assert len(calls) == 2
     monkeypatch.setattr(engine, "ONLINE", True)
     monkeypatch.setattr(engine.sources, "find_candidates", lambda *a, **k: [
-        {"id": "new_game", "name": "New Game", "medium": "game"},
+        # Tagged like Miku, so both take the same replayed noul; an untagged
+        # arrival would be a silent profile and sit nearer the base rate.
+        {"id": "new_game", "name": "New Game", "medium": "game", "tags": ["female"]},
         {"id": "new_anime", "name": "New Anime", "medium": "anime"},
     ])
     engine.refresh_candidates(s)

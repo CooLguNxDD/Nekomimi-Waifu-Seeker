@@ -146,6 +146,9 @@ def _eig_session():
 
 
 def test_laya_lookahead_picks_the_question_laya_can_split(monkeypatch):
+    # Raw nouls: this is about the lookahead, not silent-profile calibration
+    # (Bea's empty profile would otherwise pull her 0.05 toward the prior).
+    monkeypatch.setattr(engine, "SILENT_WEIGHT", 1.0)
     sess = _eig_session()
     heuristic = engine.candidate_questions(sess)
     ids = [q["id"] for q in heuristic]

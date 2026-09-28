@@ -100,6 +100,22 @@ candidate tags or feed noisy mined tags to Laya as confirmed identity facts.
 `posterior()` softmaxes these scores. Cost scales with eligible candidates per
 new trait; there is no longer a ten-forward-pass evidence budget.
 
+**Silent profiles score near the base rate.** Laya's judgment of a trait the
+profile never mentions is drift, not evidence: on real AniList/Wikipedia pages
+"has a halo" scored 0.63-0.73 (prior 0.05) and Tifa's black hair 0.06, and the
+2B/Makima/Megumin/Tifa misses lost ~0.5 per "no" to described rivals. A yes/no
+noul on a profile with no tag and no whole-word mention of the trait
+(`_grounded`) is pulled toward the question's `prior` (`_calibrated_noul`,
+`WAIFU_NEKOMINI_SILENT_WEIGHT`, 0.3 kept; 1 = raw). A Laya choice distribution
+whose top option is under `WAIFU_NEKOMINI_CHOICE_SILENT_MAX` (0.5; silent pages
+measured <= 0.40, stated 0.97) is replaced by the options' base rates
+(`_silent_choice`). Caches stay raw; lookahead gain uses the same calibration.
+The cost: a thin profile pays the base rate on a rare "yes" it never states.
+A row with no series (`""`, `Unknown`, `Web result`) never asks Laya "Which
+series?": a listed work its page names gets 0.9, else "Another series" 0.6.
+`scripts/replay_trace.py` replays a bench trace over real profiles under the
+raw and the calibrated setting.
+
 Multiple-choice questions (`kind: "choice"`, built with `traits._choice`, ≤8
 options including `other`) are answered with an option key. Each candidate gets
 its own Laya `choice` call; `probabilities[picked]` is the likelihood (cached in
@@ -230,6 +246,8 @@ text nodes (`{name}`), never `innerHTML`.
 | `WAIFU_NEKOMINI_LEADER_STREAK` | `2` | Consecutive guess-checks the same candidate must have led |
 | `WAIFU_NEKOMINI_RECOVERY_TURNS` | `2` | Questions added to the turn cap per wrong guess |
 | `WAIFU_NEKOMINI_EIG_CANDIDATES` | `8` | Top candidates Laya judges ahead of each question pick (one forward pass each; `0` = heuristic gain only) |
+| `WAIFU_NEKOMINI_SILENT_WEIGHT` | `0.3` | Share of Laya's yes/no drift from the base rate kept when the profile never mentions the trait (`1` = raw noul) |
+| `WAIFU_NEKOMINI_CHOICE_SILENT_MAX` | `0.5` | A Laya choice answer whose top option is below this is treated as silent and replaced by option base rates (`0` = off) |
 | `WAIFU_HTTP_429_RETRIES` | `2` | Extra attempts after HTTP 429 before the host cools down |
 | `WAIFU_HTTP_429_BACKOFF` | `0.8` | Base wait (seconds) when Retry-After is absent; doubles each try |
 | `WAIFU_HTTP_429_CAP` | `8` | Max seconds to honour from one Retry-After or backoff |
