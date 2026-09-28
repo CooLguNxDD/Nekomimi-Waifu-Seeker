@@ -366,6 +366,13 @@ class SessionMemory:
     # Wolf look ask-step and soft-cast gap. Kept off ``MISS_KEYS`` so the
     # stable miss row does not change shape; ``export`` still dumps it.
     look_pins: dict[str, Any] | None = None
+    # ``engine.trace_payload`` at the miss: target rank per answer and the
+    # per-answer gap to each wrong guess. Also off ``MISS_KEYS``.
+    trace: dict[str, Any] | None = None
+    # Turns noted past ``sess.turn_cap()``. A report once counted 25 turns
+    # where the cap allows 24; this says whether the engine or the count
+    # was wrong.
+    cap_violations: list[int] = field(default_factory=list)
 
     def answer_for(self, question: dict[str, Any]) -> str:
         """Return the honest answer for ``question``.
@@ -437,6 +444,8 @@ class SessionMemory:
         ``timing`` dict; notes already on the live trace are read too.
         """
         fields = self.absorb_timing(timing)
+        if sess.turn > sess.turn_cap():
+            self.cap_violations.append(sess.turn)
         pending = sess.asked[-1] if sess.asked else {}
         qid = pending.get("qid") or ""
         text = (detail or answer or "").strip()
@@ -485,9 +494,14 @@ class SessionMemory:
         Call this when the bench ends on a wrong guess or the turn cap,
         before ``submit_guess_result(False)`` drops that identity out of
         ``posterior``. The dict is what ``export`` and ``miss_pack`` keep.
+        ``trace`` keeps the target's rank per answer and the evidence gap
+        to each guess so far.
         """
+        from .engine import trace_payload
+
         self.absorb_timing(timing)
         self.look_pins = look_pin_report(sess)
+        self.trace = trace_payload(sess, self.target)
         self.miss = miss_diagnostic(
             sess,
             target=self.target,
@@ -545,7 +559,11 @@ class SessionMemory:
             if self.look_pins:
                 miss["look_ask"] = self.look_pins["look_ask"]
                 miss["soft_cast_delta"] = self.look_pins["soft_cast_delta"]
+            if self.trace is not None:
+                miss["trace"] = self.trace
             out["miss"] = miss
+        if self.cap_violations:
+            out["cap_violations"] = list(self.cap_violations)
         return out
 
     def dumps(self) -> str:

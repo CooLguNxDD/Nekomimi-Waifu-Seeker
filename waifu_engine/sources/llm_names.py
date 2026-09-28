@@ -62,11 +62,19 @@ def _lookup(name: str, series: str, medium_hint: str | None) -> dict[str, Any] |
 
 
 def resolve(rows: list[dict[str, str]], medium_hint: str | None = None,
-            errors: list[str] | None = None) -> list[dict[str, Any]]:
-    """Real candidates for proposed ``{"name", "series"}`` rows, in proposal order."""
+            errors: list[str] | None = None,
+            stats: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Real candidates for proposed ``{"name", "series"}`` rows, in proposal order.
+
+    ``stats`` (when given) gains ``resolved`` and ``unresolved`` name lists.
+    24 Gemma calls once added 0 candidates and the log could not say whether
+    the model missed or the lookup dropped its names.
+    """
     from .. import web_search
 
     out: list[dict[str, Any]] = []
+    resolved: list[str] = []
+    unresolved: list[str] = []
     for row in rows[:RESOLVE_MAX]:
         name = row.get("name") or ""
         if not name:
@@ -78,16 +86,31 @@ def resolve(rows: list[dict[str, str]], medium_hint: str | None = None,
             web_search._note_error(note)
             if errors is not None:
                 errors.append(note)
+            unresolved.append(name)
             continue
-        if hit is not None and not any(same_character(hit["name"], o["name"]) for o in out):
+        if hit is None:
+            unresolved.append(name)
+            continue
+        resolved.append(name)
+        if not any(same_character(hit["name"], o["name"]) for o in out):
             out.append(dict(hit, via="llm_names"))
+    if stats is not None:
+        stats["resolved"] = resolved
+        stats["unresolved"] = unresolved
     return out
 
 
 def search(facts: list[str], medium_hint: str | None = None,
-           errors: list[str] | None = None) -> list[dict[str, Any]]:
-    """Propose names for ``facts`` with the local LLM, then resolve them. Blocking."""
+           errors: list[str] | None = None,
+           stats: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Propose names for ``facts`` with the local LLM, then resolve them. Blocking.
+
+    ``stats`` gains ``proposed`` (the model's names, player-fact output only)
+    plus ``resolve``'s lists, so a zero-hit run says where the names went.
+    """
     rows = query_llm.propose_characters(facts, medium_hint, PROPOSE)
+    if stats is not None:
+        stats["proposed"] = [row.get("name") or "" for row in rows or []]
     if not rows:
         return []
-    return resolve(rows, medium_hint, errors)
+    return resolve(rows, medium_hint, errors, stats)

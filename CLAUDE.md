@@ -274,6 +274,14 @@ python -m waifu_engine.web         # http://127.0.0.1:7860  (+ /nekomimi)
 python -m waifu_engine "silver hair mage" --fallback
 ```
 
+Bench post-mortems: `GET /api/nekomimi/trace/{session_id}?target=<name>`
+(`engine.trace_payload`) returns the target's rank after every answer and,
+per guess, the evidence gap to the target (`engine.evidence_breakdown` over
+`sess.contrib`). Fetch it before the 30-minute TTL. On Colab the `[waifu]`
+lines are in `/content/server.log`: `eig_calls`/`eig_qs` split `pick.eig`,
+`dup=` counts source hits already in play, and the `llm_names background`
+line lists `proposed/resolved/unresolved` names.
+
 Tests stub `laya_client.ask`, `web_search.search_by_constraints` and the
 query LLM's `urlopen`. Keep them
 offline — do not add a test that downloads weights, launches Chromium, or hits

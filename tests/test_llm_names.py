@@ -125,7 +125,7 @@ def test_background_hits_join_the_next_search_once_per_facts(monkeypatch):
     monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
     runs = []
 
-    def fake_search(facts, medium_hint=None, errors=None):
+    def fake_search(facts, medium_hint=None, errors=None, stats=None):
         runs.append(tuple(facts))
         return [_hit("Makima", "Chainsaw Man")]
 

@@ -105,13 +105,14 @@ def search_backend() -> str:
 
 
 def last_search_meta() -> dict[str, Any]:
-    """Copy of the most recent search meta (backend, state, enriched, errors, queries)."""
+    """Copy of the most recent search meta (backend, state, enriched, errors, queries, dups)."""
     return {
         "backend": _LAST_SEARCH.get("backend"),
         "search_state": _LAST_SEARCH.get("search_state"),
         "enriched": _LAST_SEARCH.get("enriched", 0),
         "errors": list(_LAST_SEARCH.get("errors") or []),
         "queries": list(_LAST_SEARCH.get("queries") or []),
+        "dups": dict(_LAST_SEARCH.get("dups") or {}),
     }
 
 
@@ -121,6 +122,7 @@ def _begin_search() -> dict[str, Any]:
     _LAST_SEARCH["enriched"] = 0
     _LAST_SEARCH["errors"] = []
     _LAST_SEARCH["queries"] = []
+    _LAST_SEARCH["dups"] = {}
     return _LAST_SEARCH
 
 

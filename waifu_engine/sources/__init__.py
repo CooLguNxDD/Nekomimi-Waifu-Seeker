@@ -163,16 +163,21 @@ class _Background:
             return False
         return True
 
-    def finish(self, key: str, hits: list[dict[str, Any]], t0: float, errors: list[str]) -> None:
-        """Park ``hits`` for ``key``, clear its pending flag and log the run."""
+    def finish(self, key: str, hits: list[dict[str, Any]], t0: float, errors: list[str],
+               extra: str = "") -> None:
+        """Park ``hits`` for ``key``, clear its pending flag and log the run.
+
+        ``extra`` is appended to the log line (the LLM-names funnel).
+        """
         with self.lock:
             self.pending.discard(key)
             if len(self.ready) >= _BG_MAX_KEYS:
                 self.ready.pop(next(iter(self.ready)))
             self.ready.setdefault(key, []).extend(hits)
         if timing._log_on():
-            timing.log.info("%s background key=%s %.0fms found=%d%s",
+            timing.log.info("%s background key=%s %.0fms found=%d%s%s",
                             self.name, key[:8], (time.perf_counter() - t0) * 1000, len(hits),
+                            f" {extra}" if extra else "",
                             f" err={errors[0][:120]}" if errors else "")
 
     def take(self, key: str) -> list[dict[str, Any]]:
@@ -245,11 +250,25 @@ def _llm_names_run(key: str, facts: list[str], medium_hint: str | None) -> None:
     """Background LLM-hypotheses job: propose names, resolve them, park the hits."""
     t0 = time.perf_counter()
     errors: list[str] = []
+    stats: dict[str, Any] = {}
     try:
-        hits = llm_names.search(facts, medium_hint, errors=errors)
+        hits = llm_names.search(facts, medium_hint, errors=errors, stats=stats)
     except Exception as exc:  # noqa: BLE001 - search should not raise; be sure
         hits, errors = [], [str(exc)]
-    _LLM_BG.finish(key, hits, t0, errors)
+    _LLM_BG.finish(key, hits, t0, errors, _funnel_note(stats))
+
+
+def _funnel_note(stats: dict[str, Any]) -> str:
+    """``proposed=12 resolved=3 unresolved=7 names=[...]`` for the log line.
+
+    The names are the model's reply to player facts, never scraped text, so
+    they are safe to log; they say whether the target was ever proposed.
+    """
+    proposed = stats.get("proposed") or []
+    unresolved = stats.get("unresolved") or []
+    names = "; ".join(n[:40] for n in proposed)[:400]
+    return (f"proposed={len(proposed)} resolved={len(stats.get('resolved') or [])} "
+            f"unresolved={len(unresolved)} names=[{names}]")
 
 
 def _llm_names_start(key: str, facts: list[str], medium_hint: str | None) -> bool:
@@ -473,6 +492,9 @@ def find_candidates(
     web_search._begin_search()
 
     hits: dict[str, int] = {}
+    # Hits per source that were already in play. "llm_bg: 0 new" alone could
+    # not tell a model that named the pool from one that named no one.
+    dups: dict[str, int] = {}
     taken_names: list[str] = []
     # Portraits for people already in the pool. Kept out of ``found`` so they
     # do not consume the new-candidate limit.
@@ -480,6 +502,8 @@ def find_candidates(
 
     def take(items: list[dict[str, Any]], source: str = "") -> None:
         """Add hits whose character is new; count them under ``source``.
+
+        Hits naming someone already in play count under ``dups`` instead.
 
         ``plain_duplicate`` matches either word order and a trailing series
         title, and keeps two different work titles of the same given name.
@@ -496,8 +520,11 @@ def find_candidates(
             if not keys or plain_duplicate(name, excluded):
                 # Already in the pool. Still hand the portrait across so a
                 # later source can fill a null image_url on the next absorb.
-                if keys and plain_duplicate(name, excluded) and cand.get("image_url"):
-                    carried.append(cand)
+                if keys and plain_duplicate(name, excluded):
+                    if source:
+                        dups[source] = dups.get(source, 0) + 1
+                    if cand.get("image_url"):
+                        carried.append(cand)
                 continue
             if plain_duplicate(name, taken_names):
                 from .portraits import donate_image
@@ -700,6 +727,9 @@ def find_candidates(
     web_search._set_state("done")
     timing.note(found=len(out),
                 hits=",".join(f"{k}:{v}" for k, v in hits.items()) or "none")
+    web_search._LAST_SEARCH["dups"] = dict(dups)
+    if dups:
+        timing.note(dup=",".join(f"{k}:{v}" for k, v in dups.items()))
     errors = web_search.last_search_meta()["errors"]
     if errors:
         timing.note(err=" | ".join(errors[:2])[:160])

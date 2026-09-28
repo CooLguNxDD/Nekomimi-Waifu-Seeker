@@ -1275,7 +1275,10 @@ def _lookahead_eig(
     Gain is H(sum w p) - sum w H(p), so a question Laya is unsure about for
     every candidate scores low even when tags make it look like a split.
     Choice questions keep ``_split_quality`` over the same weights. Returns
-    None when Laya judged fewer than two candidates.
+    None when Laya judged fewer than two candidates. ``eig_calls`` and
+    ``eig_qs`` (passes, and questions packed into them) go on the timing line:
+    a pick measured ~750 ms against ~130 ms expected, and the ``laya.eig``
+    span alone cannot say whether passes or their width cost it.
     """
     if EIG_CANDIDATES < 2 or not questions:
         return None
@@ -1288,12 +1291,15 @@ def _lookahead_eig(
     prior = _answered_trait_pack(sess)
     rows = _row_signature(prior)
     judged = 0
+    calls = packed = 0
     for cand, _w in weights:
         missing = [q for q in yesno
                    if (sess.lookahead.get((cand.id, q["id"])) or (None,))[0] != rows]
         if not missing:
             judged += 1
             continue
+        calls += 1
+        packed += len(missing)
         # The first key names the timing span ("laya.eig"); the rest follow it.
         keyed = {("eig" if i == 0 else f"eig_{i}"): q for i, q in enumerate(missing)}
         answers = laya_client.ask(
@@ -1317,6 +1323,7 @@ def _lookahead_eig(
                 sess.lookahead[(cand.id, q["id"])] = (rows, p)
                 got = True
         judged += got
+    timing.note(eig_calls=calls, eig_qs=packed)
     if judged < 2:
         return None
     sess.laya_used = True
@@ -1766,6 +1773,8 @@ def _rescore_candidates(sess: GuessSession) -> None:
     separates a same-work pair the blurb did not, without writing tags.
     Soft cast (popularity, and a fame-only series lead) is then pulled back
     inside a series-split pin cast so it cannot undo that step.
+    Every term lands in ``sess.contrib`` too, so ``evidence_breakdown`` can
+    name the answer that sank a candidate.
     """
     sess.collapse_identities()
     for question, answer in sess.evidence.values():
@@ -1773,8 +1782,17 @@ def _rescore_candidates(sess: GuessSession) -> None:
     live = sess.alive_candidates()
     if not live:
         return
+    sess.contrib.clear()
+
+    def add(c: Candidate, qid: str, likelihood: float) -> None:
+        """Add one clamped answer log-likelihood and keep it for the miss report."""
+        term = math.log(min(0.98, max(0.02, likelihood)))
+        c.logodds += term
+        sess.contrib[(c.id, qid)] = sess.contrib.get((c.id, qid), 0.0) + term
+
     for c in live:
         c.logodds = popularity_prior(c.popularity)
+        sess.contrib[(c.id, "__prior__")] = c.logodds
     for qid, (question, answer) in sess.evidence.items():
         prior = _prior_trait_pack(sess, qid)
         if is_choice(question):
@@ -1789,7 +1807,7 @@ def _rescore_candidates(sess: GuessSession) -> None:
             for c in live:
                 dist = (known.get(c.id) or sess.choice_cache.get((c.id, qid))
                         or _tag_choice(question, c))
-                c.logodds += math.log(min(0.98, max(0.02, dist.get(answer, 0.0))))
+                add(c, qid, dist.get(answer, 0.0))
             continue
         # A typed chip is a nudge, not a model vote. Laya's noul on the raw
         # words ("angel", "white dress") came back near 0 for the whole pool
@@ -1801,7 +1819,7 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 # falls, and a profile that simply lacks it stays near a half.
                 if answer != "yes":
                     p = 1.0 - p
-                c.logodds += math.log(min(0.98, max(0.02, p)))
+                add(c, qid, p)
             continue
         # Free-text clues are not a Laya vote. A noul of ~0 on "angel" or
         # "white dress" floored every candidate the earlier facts still fit.
@@ -1812,8 +1830,7 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 visual = _profile_likelihood(question, c)
                 if visual is None:
                     visual = clue_overlap_likelihood(question["clues"], c.blurb)
-                likelihood = visual if answer == "yes" else 1.0 - visual
-                c.logodds += math.log(min(0.98, max(0.02, likelihood)))
+                add(c, qid, visual if answer == "yes" else 1.0 - visual)
             continue
         missing = [c for c in live if (c.id, qid) not in sess.match_cache]
         probs = _match_probabilities(missing, question, prior)
@@ -1832,8 +1849,8 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 # A failed model call must not make noisy tags stronger evidence
                 # than the model's typically modest confidence.
                 p = min(0.6, max(0.4, _tag_match(question, c)))
-            likelihood = p if answer == "yes" else 1.0 - p
-            c.logodds += math.log(min(0.98, max(0.02, likelihood)))
+            add(c, qid, p if answer == "yes" else 1.0 - p)
+    before = {c.id: c.logodds for c in live}
     _apply_appearance_pins(sess, live)
     _apply_identity_priors(sess, live)
     # Fame is reapplied from scratch on every rescore. One look-pin step
@@ -1841,6 +1858,40 @@ def _rescore_candidates(sess: GuessSession) -> None:
     # series-lead bonus, which is how Lawrence climbed back after tail=yes.
     _dampen_split_soft_cast(sess, live)
     _note_wolf_soft_cast(sess, live)
+    for c in live:
+        sess.contrib[(c.id, "__adjust__")] = c.logodds - before[c.id]
+
+
+def evidence_breakdown(
+    sess: GuessSession, cid: str,
+    contrib: dict[tuple[str, str], float] | None = None,
+) -> list[dict[str, Any]]:
+    """Each evidence row's log-odds for candidate ``cid``, most harmful first.
+
+    Rows are what the latest rescore added (or ``contrib``, a snapshot from
+    ``guess_log``): ``__prior__`` (popularity), one row per answered
+    question, and ``__adjust__`` (pins and identity priors). They sum to the
+    candidate's log-odds. Empty for an unknown or eliminated id, since
+    rejected rows are not rescored.
+    """
+    rows = []
+    for (owner, qid), term in (sess.contrib if contrib is None else contrib).items():
+        if owner != cid:
+            continue
+        answer = (sess.evidence.get(qid) or ({}, ""))[1]
+        rows.append({"qid": qid, "answer": answer, "logodds": round(term, 4)})
+    rows.sort(key=lambda row: row["logodds"])
+    return rows
+
+
+def _note_ranking(sess: GuessSession, qid: str, answer: str) -> None:
+    """Append the full posterior after this answer to ``sess.rank_log``.
+
+    The turn payload keeps only the top five, and the misses were targets
+    that sat below that, so their fall could not be traced.
+    """
+    ranked = [(c.id, c.name, round(p, 4)) for c, p in sess.posterior()]
+    sess.rank_log.append((sess.turn, qid, answer, ranked))
 
 
 def _protagonist_answer(sess: GuessSession) -> str:
@@ -2275,6 +2326,14 @@ def _guess_payload(sess: GuessSession) -> dict[str, Any]:
     _fill_portraits([cand])
     sess.stage = "guessing"
     sess.pending_guess = cand.id
+    sess.guess_log.append({
+        "id": cand.id,
+        "name": cand.name,
+        "turn": sess.turn,
+        "probability": round(prob, 4),
+        "contrib": dict(sess.contrib),
+        "ranked": [(c.id, c.name, round(p, 4)) for c, p in ranked],
+    })
     sess.guesses_made += 1
     return {
         "session_id": sess.id,
@@ -2742,6 +2801,7 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
     # Every answer opens a new search branch. Discover and replay evidence
     # before choosing the next question or declaring a winner.
     refresh_candidates(sess)
+    _note_ranking(sess, current["qid"], answer)
 
     sess.touch()
     return _advance(sess)
@@ -2815,6 +2875,98 @@ def submit_guess_result(sess: GuessSession, correct: bool) -> dict[str, Any]:
     refresh_candidates(sess)
     sess.touch()
     return _advance(sess)
+
+
+def _target_rank(
+    ranked: list[tuple[str, str, float]], target: str,
+) -> dict[str, Any] | None:
+    """1-based rank, id and probability of ``target`` in a ranking, or None."""
+    for rank, (cid, name, prob) in enumerate(ranked, start=1):
+        if same_character(target, name):
+            return {"rank": rank, "id": cid, "name": name, "probability": prob}
+    return None
+
+
+def _evidence_gap(
+    sess: GuessSession, contrib: dict[tuple[str, str], float], target_id: str, other_id: str,
+) -> list[dict[str, Any]]:
+    """Per-row log-odds of ``target_id`` minus ``other_id``, most harmful first.
+
+    A negative row is an answer (or the prior) that favoured the other
+    candidate; the sum is how far the target trailed.
+    """
+    mine = {row["qid"]: row for row in evidence_breakdown(sess, target_id, contrib)}
+    theirs = {row["qid"]: row for row in evidence_breakdown(sess, other_id, contrib)}
+    rows = []
+    for qid in mine.keys() | theirs.keys():
+        a = mine.get(qid, {}).get("logodds", 0.0)
+        b = theirs.get(qid, {}).get("logodds", 0.0)
+        answer = (mine.get(qid) or theirs.get(qid) or {}).get("answer", "")
+        rows.append({"qid": qid, "answer": answer, "delta": round(a - b, 4)})
+    rows.sort(key=lambda row: row["delta"])
+    return rows
+
+
+def trace_payload(sess: GuessSession, target: str = "") -> dict[str, Any]:
+    """Why a round went where it did, for a bench that knows the target.
+
+    Per answer: the top three and the target's rank. Per guess: the guessed
+    candidate's evidence and, when ``target`` is in the pool, the per-answer
+    gap between them at that moment. The bench runs in a browser, so the
+    server never knows the target; this is read after the round, within
+    the session TTL.
+    """
+    target = (target or "").strip()
+    matches = [c for c in sess.candidates if target and same_character(target, c.name)]
+    turns = []
+    for turn, qid, answer, ranked in sess.rank_log:
+        row: dict[str, Any] = {
+            "turn": turn,
+            "qid": qid,
+            "answer": answer,
+            "pool": len(ranked),
+            "top": [{"name": name, "probability": prob} for _cid, name, prob in ranked[:3]],
+        }
+        if target:
+            row["target"] = _target_rank(ranked, target)
+        turns.append(row)
+    guesses = []
+    for entry in sess.guess_log:
+        contrib = entry.get("contrib") or {}
+        item: dict[str, Any] = {
+            "name": entry["name"],
+            "turn": entry["turn"],
+            "probability": entry["probability"],
+            "evidence": evidence_breakdown(sess, entry["id"], contrib),
+        }
+        where = _target_rank(entry.get("ranked") or [], target) if target else None
+        if where is not None:
+            item["target"] = where
+            if where["id"] != entry["id"]:
+                item["gap"] = _evidence_gap(sess, contrib, where["id"], entry["id"])
+        guesses.append(item)
+    out: dict[str, Any] = {
+        "session_id": sess.id,
+        "stage": sess.stage,
+        "turn": sess.turn,
+        "turn_cap": sess.turn_cap(),
+        "questions": len(sess.asked),
+        "guesses_made": sess.guesses_made,
+        "wrong_guesses": sess.wrong_guesses,
+        "turns": turns,
+        "guesses": guesses,
+    }
+    if target:
+        live = [c for c in matches if c.alive and c.id not in sess.rejected]
+        out["target"] = {
+            "name": target,
+            "in_pool": bool(matches),
+            "alive": bool(live),
+            "now": _target_rank([(c.id, c.name, round(p, 4)) for c, p in sess.posterior()],
+                                target),
+            "evidence": evidence_breakdown(sess, live[0].id) if live else [],
+        }
+    return out
 
 
 def state_payload(sess: GuessSession) -> dict[str, Any]:

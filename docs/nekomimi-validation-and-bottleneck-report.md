@@ -143,3 +143,9 @@ The LLM still never writes question text and never decides: question wording sta
 
 ### Next validation
 Rerun the same five characters on Colab (L4, Ollama Gemma, `WAIFU_QUERY_LLM=1`) and compare wins, turns to win, the `pick.eig` span and the `llm_bg` hits against the 2/5 baseline.
+
+### Evidence to collect on the rerun
+The first rerun could not say why Makima, Megumin and Tifa were missed. For each round (3 per character):
+- After the round ends, save `GET /api/nekomimi/trace/{session_id}?target=<name>`. It gives the target's rank after every answer and, for each wrong guess, which answers put that guess ahead of the target (`gap`, most harmful first).
+- Save `/content/server.log`. Its `[waifu]` lines carry `eig_calls` / `eig_qs` next to `laya.eig` and `laya.lock_wait`, `dup=` (source hits already in play), and the `llm_names background ... proposed= resolved= unresolved= names=[...]` funnel.
+- Report question turns and guesses separately. `trace.questions` counts questions; `turn_cap` bounds them.

@@ -195,6 +195,20 @@ class GuessSession:
     # time, so a lookahead never stands in for a judgment on other evidence.
     lookahead: dict[tuple[str, str], tuple[tuple[tuple[Any, ...], ...], float]] = field(
         default_factory=dict)
+    # Log-odds each evidence row added per candidate on the latest rescore,
+    # keyed by (candidate, question id); ``__prior__`` is popularity and
+    # ``__adjust__`` the pins/priors applied after the answers. A miss report
+    # read only the final posterior and could not say which answer sank the
+    # target. See ``engine.evidence_breakdown``.
+    contrib: dict[tuple[str, str], float] = field(default_factory=dict)
+    # Full ranking after each answer: (turn, qid, answer, [(id, name, p)]).
+    # A target that never led has no trace in the top-5 snapshots.
+    rank_log: list[tuple[int, str, str, list[tuple[str, str, float]]]] = field(
+        default_factory=list)
+    # One row per guess, in order: id, name, turn, probability, and copies of
+    # ``contrib`` and the ranking at that moment. A rejected guess leaves the
+    # next rescore, so its evidence exists only in this snapshot.
+    guess_log: list[dict[str, Any]] = field(default_factory=list)
 
     def turn_cap(self) -> int:
         """Question limit for this round: ``MAX_TURNS`` plus recovery turns per miss."""
