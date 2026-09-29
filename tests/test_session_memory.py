@@ -1,16 +1,19 @@
 import os
 import json
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import pytest
 from waifu_engine.nekomimi.memory import (
     SessionMemory, proposal_facts, refresh_session_memory, working_memory,
 )
 from waifu_engine.nekomimi.session import (
     GuessSession, new_session, save_session, load_session, purge_expired,
-    Candidate, SESSION_DIR,
+    Candidate,
 )
+from waifu_engine.nekomimi import session as sess_mod
 from waifu_engine.nekomimi.engine import score_candidates
-from waifu_engine.sources.cache import get_entity, save_entity, CACHE_DIR
+from waifu_engine.sources.cache import get_entity, save_entity
 import math
 
 def test_session_memory_serialization():
@@ -40,7 +43,7 @@ def test_file_system_session_save_load_purge():
     assert sess2.memory.player_details == ["test_detail"]
     
     # purge
-    path = os.path.join(SESSION_DIR, f"{sess.id}.json")
+    path = os.path.join(sess_mod.SESSION_DIR, f"{sess.id}.json")
     old_time = time.time() - 4000
     sess.updated = old_time
     save_session(sess)
@@ -49,6 +52,35 @@ def test_file_system_session_save_load_purge():
     purge_expired(now=time.time())
     
     assert load_session(sess.id) is None
+
+
+def test_session_storage_is_cwd_independent_and_rejects_traversal(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert os.path.isabs(sess_mod.SESSION_DIR)
+
+    sess = new_session()
+    path = os.path.join(sess_mod.SESSION_DIR, f"{sess.id}.json")
+    assert os.path.isfile(path)
+    assert load_session("../../outside") is None
+    sess_mod.drop_session("..\\outside")
+    with pytest.raises(ValueError, match="16 lowercase hexadecimal"):
+        save_session(GuessSession(id="../outside", created=0, updated=0))
+    assert not (tmp_path / "outside.json").exists()
+
+
+def test_concurrent_first_load_returns_one_restored_session():
+    sess = new_session("restore race")
+    with sess_mod._STORE_LOCK:
+        sess_mod._STORE.pop(sess.id)
+    barrier = threading.Barrier(8)
+
+    def restore():
+        barrier.wait()
+        return load_session(sess.id)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        restored = list(pool.map(lambda _index: restore(), range(8)))
+    assert all(item is restored[0] for item in restored)
 
 def test_entity_cache():
     cand = {"name": "Test Char", "series": "Test Series", "tags": ["test"]}

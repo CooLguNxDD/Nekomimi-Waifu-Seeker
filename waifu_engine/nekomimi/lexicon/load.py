@@ -406,7 +406,9 @@ def build_categories(doc: dict[str, Any]) -> dict[str, Any]:
         if not titles[medium]:
             raise LexiconError(f"categories.yml popular.{medium} must not be empty")
     if "hair_color" in appearance:
-        raise LexiconError("hair_color is pinned in code ahead of series_appearance, not by that flag")
+        raise LexiconError(
+            "hair_color is prepended onto series_appearance by the loader; do not flag it"
+        )
     return {
         "broad": frozenset(broad),
         "color_detail": frozenset(color_detail),
@@ -579,6 +581,60 @@ def build_coverage(doc: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     return tuple(clusters)
 
 
+def build_enrich(doc: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Return player-text templates that name a bank question and an answer.
+
+    Each row is a fixed phrase list. The engine turns a hit into soft
+    evidence. The loader rejects a second marker, a second id, and a yes/no
+    row whose stored answer is not ``yes`` (negation flips that to no later).
+    """
+    _require_keys(doc, "enrich.yml", {"templates"}, {"templates"})
+    rows = doc["templates"]
+    if not isinstance(rows, list) or not rows:
+        raise LexiconError("enrich.yml templates must be a non-empty list")
+    allowed = {"id", "qid", "answer", "kind", "markers"}
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_markers: set[str] = set()
+    for index, row in enumerate(rows):
+        where = f"enrich.yml templates[{index}]"
+        if not isinstance(row, dict):
+            raise LexiconError(f"{where} must be a mapping")
+        _require_keys(row, where, allowed, allowed)
+        slug, qid, answer, kind = row["id"], row["qid"], row["answer"], row["kind"]
+        for label, value in (("id", slug), ("qid", qid), ("answer", answer)):
+            # Bare ``yes`` is a YAML boolean. The answer has to stay the string.
+            if value is True or value is False:
+                raise LexiconError(f"{where}.{label} must be a quoted string, not a boolean")
+            if not isinstance(value, str) or not value.strip():
+                raise LexiconError(f"{where}.{label} must be a string")
+        if kind not in {"choice", "yesno"}:
+            raise LexiconError(f"{where}.kind must be choice or yesno")
+        if kind == "yesno" and answer != "yes":
+            raise LexiconError(f"{where}.answer must be yes; negation is applied when matching")
+        if slug in seen_ids:
+            raise LexiconError(f"enrich.yml has duplicate id {slug!r}")
+        seen_ids.add(slug)
+        markers = _str_list(row["markers"], f"{where}.markers", unique=True)
+        folded: list[str] = []
+        for marker in markers:
+            key = " ".join(marker.lower().split())
+            if len(key) < 3:
+                raise LexiconError(f"{where}.markers entry {marker!r} is too short")
+            if key in seen_markers:
+                raise LexiconError(f"enrich.yml repeats marker {key!r}")
+            seen_markers.add(key)
+            folded.append(key)
+        out.append({
+            "id": slug,
+            "qid": qid.strip(),
+            "answer": answer.strip(),
+            "kind": kind,
+            "markers": tuple(folded),
+        })
+    return tuple(out)
+
+
 def load_lexicon() -> dict[str, Any]:
     """Load and validate every lexicon file. Called once at import."""
     traits = build_traits(load_document("traits.yml"))
@@ -592,4 +648,5 @@ def load_lexicon() -> dict[str, Any]:
         "categories": build_categories(load_document("categories.yml")),
         "characters": characters,
         "coverage": build_coverage(load_document("coverage.yml")),
+        "enrich": build_enrich(load_document("enrich.yml")),
     }

@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-29  
 **Deployment Environment:** Google Colab (NVIDIA L4 GPU, 23 GB VRAM)  
-**Host URL:** `https://9514-136-110-17-194.ngrok-free.app/nekomimi`  
+**Host URL:** Not retained; Colab ngrok links are temporary and publicly accessible.
 **Decision Engine:** Laya (`convaiinnovations/laya` ModernBERT-large 421M decision head)  
 **Query Rewriter:** Unsloth `gemma-4-26B-A4B-it-GGUF:UD-Q3_K_M` on Ollama (~53.7 tok/s)  
 **Grounding Sources:** Playwright Chromium + AniList + Wikipedia + DuckDuckGo + Gemini Search  

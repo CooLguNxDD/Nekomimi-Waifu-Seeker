@@ -1,0 +1,51 @@
+# Auto-implement feedback only after a *bot* review requests changes.
+# Human reviews should use an explicit `@pullfrog` mention (pullfrog-triggers),
+# not this workflow.
+#
+# PR-author write gate (only_bot_prs) is enforced in pullfrog.yml from config.yml.
+# Reviewer gate is enforced here — strict Bot / *[bot] only (no substrings).
+name: Pullfrog address reviews
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+concurrency:
+  group: pullfrog-address-${{ github.repository }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  address:
+    if: |
+      github.event.review.state == 'changes_requested' &&
+      (
+        github.event.review.user.type == 'Bot' ||
+        endsWith(github.event.review.user.login, '[bot]')
+      )
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+      issues: write
+      checks: write
+      actions: read
+      statuses: write
+    uses: ./.github/workflows/pullfrog.yml
+    with:
+      name: "Address reviews #${{ github.event.pull_request.number }}"
+      feature: address_reviews
+      timeout: 60m
+      # model/effort: repo vars PULLFROG_MODEL / PULLFROG_EFFORT (see pullfrog.yml)
+      prompt: |
+        You are Pullfrog running fully locally on repo (no hosted dashboard).
+        Read `.github/pullfrog/instructions/build.md` if present.
+
+        Mode hint: AddressReviews — a bot code review requested changes on this PR.
+        Implement that review feedback and push commits to the PR branch.
+        Resolve threads you fixed when possible.
+        Do not start a new full PR review; only address existing review findings.
+        Keep the change set minimal.
+
+        Trigger event details are available in the file `.github/pullfrog/event.json`.
+        Read that file to understand the event context.
+    secrets: inherit

@@ -189,6 +189,37 @@ def test_match_cache_rejudges_after_model_or_profile_fingerprint_changes(monkeyp
     assert len(calls) == 3
 
 
+def test_stale_match_context_is_reused_for_the_replacement_call(monkeypatch):
+    """Avoid a second tokenizer/context build after discovering a stale cache entry."""
+    sess = sess_mod.new_session()
+    candidate = Candidate(id="c1", name="Mika", blurb="A pilot.")
+    sess.candidates = [candidate]
+    question = traits.QUESTIONS_BY_ID["gender_female"]
+    prior = engine._prior_trait_pack(sess, question["id"])
+    context = engine._candidate_context(candidate, question, prior, sess)
+    sess.match_cache[(candidate.id, question["id"])] = 0.8
+    sess.match_fingerprints[(candidate.id, question["id"])] = "stale"
+    built = []
+
+    def counted_context(*args, **kwargs):
+        built.append(args[0].id)
+        return context
+
+    monkeypatch.setattr(engine, "_candidate_context", counted_context)
+    monkeypatch.setattr(laya_client, "ask", lambda *_args, **_kwargs: {
+        "match": {"noul": 0.9},
+    })
+    stale = engine._invalidate_stale_judgments(
+        sess, [candidate], question, prior, choice=False,
+    )
+    probs = engine._match_probabilities(
+        [candidate], question, prior, sess, contexts=stale,
+    )
+
+    assert built == [candidate.id]
+    assert probs == {candidate.id: 0.9}
+
+
 def test_input_fingerprint_tracks_the_model_used():
     """Include model identity in the cache key even when state and question match."""
     question = {"id": "q", "instructions": "Is `candidate` human?"}

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import threading
 import time
 import uuid
@@ -488,7 +489,37 @@ class GuessSession:
 # --- store -----------------------------------------------------------
 _STORE: dict[str, GuessSession] = {}
 _STORE_LOCK = threading.Lock()
-SESSION_DIR = os.path.join("data", "sessions")
+def _default_session_dir() -> str:
+    """Place persistent sessions in the user's writable application data directory."""
+    if os.name == "nt":
+        data_root = os.getenv("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local",
+        )
+    elif sys.platform == "darwin":
+        data_root = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        data_root = os.getenv("XDG_DATA_HOME") or os.path.join(
+            os.path.expanduser("~"), ".local", "share",
+        )
+    return os.path.join(data_root, "nekomimi-waifu-seeker", "sessions")
+
+
+_SESSION_DIR_SETTING = os.getenv("WAIFU_SESSION_DIR")
+if _SESSION_DIR_SETTING and not os.path.isabs(_SESSION_DIR_SETTING):
+    _SESSION_DIR_SETTING = os.path.join(
+        os.path.dirname(_default_session_dir()), _SESSION_DIR_SETTING,
+    )
+SESSION_DIR = os.path.abspath(
+    _SESSION_DIR_SETTING or _default_session_dir()
+)
+
+
+def _session_path(session_id: str) -> str | None:
+    """Return a safe persisted path, rejecting anything outside generated IDs."""
+    if (not isinstance(session_id, str) or len(session_id) != 16
+            or any(char not in "0123456789abcdef" for char in session_id)):
+        return None
+    return os.path.join(SESSION_DIR, f"{session_id}.json")
 
 def _keyed_rows(mapping: dict[tuple[str, str], Any]) -> list[list[Any]]:
     """Encode tuple-keyed cache entries as portable JSON rows."""
@@ -629,8 +660,10 @@ def _from_json_dict(raw: dict[str, Any]) -> GuessSession:
 
 def save_session(sess: GuessSession) -> None:
     """Atomically persist one complete transition before it is returned to the caller."""
+    path = _session_path(sess.id)
+    if path is None:
+        raise ValueError("session id must be 16 lowercase hexadecimal characters")
     os.makedirs(SESSION_DIR, exist_ok=True)
-    path = os.path.join(SESSION_DIR, f"{sess.id}.json")
     temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
     d = _to_json_dict(sess)
     with _STORE_LOCK:
@@ -646,26 +679,31 @@ def save_session(sess: GuessSession) -> None:
                 os.remove(temp_path)
 
 def load_session(session_id: str) -> GuessSession | None:
+    """Load one valid session, serializing first restore to preserve object identity."""
+    path = _session_path(session_id)
+    if path is None:
+        return None
     with _STORE_LOCK:
         if session_id in _STORE:
             return _STORE[session_id]
-            
-    path = os.path.join(SESSION_DIR, f"{session_id}.json")
-    if not os.path.exists(path):
-        return None
-        
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        sess = _from_json_dict(d)
-        with _STORE_LOCK:
-            _STORE[sess.id] = sess
-        return sess
-    except Exception as e:
-        print(f"Error loading session: {e}")
-        return None
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as stream:
+                data = json.load(stream)
+            sess = _from_json_dict(data)
+            if sess.id != session_id:
+                return None
+            # Keep restore under the store lock so simultaneous first reads
+            # share this mutable object instead of forking one session.
+            _STORE[session_id] = sess
+            return sess
+        except Exception as exc:
+            print(f"Error loading session {session_id}: {exc}")
+            return None
 
 def new_session(seed: str = "") -> GuessSession:
+    """Create and persist a new session, then purge expired sessions."""
     now = time.time()
     sess = GuessSession(id=uuid.uuid4().hex[:16], created=now, updated=now, seed=seed.strip())
     save_session(sess)
@@ -673,6 +711,7 @@ def new_session(seed: str = "") -> GuessSession:
     return sess
 
 def get_session(session_id: str) -> GuessSession | None:
+    """Return a live session, removing its snapshot when its TTL has passed."""
     sess = load_session(session_id)
     if sess is None:
         return None
@@ -682,33 +721,36 @@ def get_session(session_id: str) -> GuessSession | None:
     return sess
 
 def drop_session(session_id: str) -> None:
+    """Remove a cached session and its file without allowing a concurrent restore."""
+    path = _session_path(session_id)
+    if path is None:
+        return
     with _STORE_LOCK:
         _STORE.pop(session_id, None)
-    path = os.path.join(SESSION_DIR, f"{session_id}.json")
-    if os.path.exists(path):
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 def purge_expired(now: float | None = None) -> int:
+    """Purge cached sessions by update time and files by modification time."""
     now = time.time() if now is None else now
     stale = 0
     with _STORE_LOCK:
         to_drop = [sid for sid, s in _STORE.items() if now - s.updated > SESSION_TTL_SECONDS]
         for sid in to_drop:
             _STORE.pop(sid, None)
-            
-    if os.path.exists(SESSION_DIR):
-        for f in os.listdir(SESSION_DIR):
-            if f.endswith(".json"):
-                p = os.path.join(SESSION_DIR, f)
-                try:
-                    if now - os.path.getmtime(p) > SESSION_TTL_SECONDS:
-                        os.remove(p)
-                        stale += 1
-                except OSError:
-                    pass
+        if os.path.exists(SESSION_DIR):
+            for filename in os.listdir(SESSION_DIR):
+                if filename.endswith(".json"):
+                    path = os.path.join(SESSION_DIR, filename)
+                    try:
+                        if now - os.path.getmtime(path) > SESSION_TTL_SECONDS:
+                            os.remove(path)
+                            stale += 1
+                    except OSError:
+                        pass
     return stale + len(to_drop)
 
 def active_count() -> int:

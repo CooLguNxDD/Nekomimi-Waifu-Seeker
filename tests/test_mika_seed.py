@@ -174,8 +174,16 @@ def test_wings_answer_demotes_pink_hair_without_body_wings():
     assert s.by_id("hanako").alive
 
 
-def test_seed_traits_are_asked_ahead_of_shared_school_questions():
+def test_seed_traits_are_evidence_before_the_first_question():
+    """Pink hair, halo and wings are answered by the seed, not asked again."""
     s = sess_mod.new_session(SEED)
+    engine._score_free_text(s, SEED, "clue_seed")
+    rows = {row[0]: row for row in engine._answered_trait_pack(s)["rows"]}
+    assert rows["hair_color"][1] == "pink"
+    assert rows["look_halo"][1] == "yes"
+    assert rows["look_wings"][1] == "yes"
+    assert "look_horns" not in rows
+    assert all(row[2] not in (0.0, 1.0) for row in rows.values())
     s.add_candidates([
         {"id": f"c{i}", "name": f"Student {i}", "series": "Blue Archive" if i < 4 else "Other Game",
          "medium": "game",
@@ -185,8 +193,7 @@ def test_seed_traits_are_asked_ahead_of_shared_school_questions():
     ])
     ids = [q["id"] for q in engine.candidate_questions(s)]
     for qid in ("hair_color", "look_halo", "look_wings"):
-        assert qid in ids
-        assert ids.index(qid) < ids.index("look_uniform")
+        assert qid not in ids
     s.asked.append({
         "qid": "series", "text": "Which series is your character from?", "category": "series",
         "answer": "s1", "kind": "choice",
@@ -195,10 +202,9 @@ def test_seed_traits_are_asked_ahead_of_shared_school_questions():
     })
     ids = [q["id"] for q in engine.candidate_questions(s)]
     pins = engine._pinned_question_ids(s)
-    assert ids[0] in {"hair_color", "look_halo", "look_wings"}
-    assert "look_halo" in pins and "look_wings" in pins
-    # Series lock must not force the angel kit the seed did not name.
-    assert "look_horns" not in pins
+    for qid in ("hair_color", "look_halo", "look_wings", "look_horns"):
+        assert qid not in ids
+        assert qid not in pins
 
 
 def test_initial_trait_seed_asks_for_inline_gemini(monkeypatch):

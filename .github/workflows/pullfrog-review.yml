@@ -1,0 +1,44 @@
+# Auto PR review only. Isolated concurrency so later address/trigger runs
+# cannot cancel an in-flight review (shared groups caused that on PR #139).
+name: Pullfrog PR review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened, synchronize]
+
+# Only cancel duplicate *reviews* for the same PR — never other Pullfrog features.
+concurrency:
+  group: pullfrog-review-${{ github.repository }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Draft skip and synchronize skip are config-aware in pullfrog.yml
+    # (include_drafts / on_synchronize). Do not gate them here.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+      issues: write
+      checks: write
+      actions: read
+      statuses: write
+    uses: ./.github/workflows/pullfrog.yml
+    with:
+      name: "PR review #${{ github.event.pull_request.number }}"
+      feature: pr_review
+      timeout: 60m
+      # model/effort: repo vars PULLFROG_MODEL / PULLFROG_EFFORT (see pullfrog.yml)
+      prompt: |
+        LOCAL Pullfrog PR review — investigate changed behavior and its downstream impact.
+
+        1. Call select_mode → Review (or IncrementalReview only if this is clearly a delta re-review).
+        2. Read `.github/pullfrog/instructions/review.md` and apply the supplied review_budget (default: max).
+        3. checkout_pr / get the PR diff for #${{ github.event.pull_request.number }} only.
+        4. Follow the selected budget's scan depth, including affected unchanged dependencies and consumers.
+        5. Submit a single GitHub PR review, then end the run.
+        6. Do NOT write learnings, do NOT summarize the whole CI stack, do NOT open extra issues.
+
+        Trigger event details are available in the file `.github/pullfrog/event.json`.
+        Read that file to understand the event context.
+    secrets: inherit

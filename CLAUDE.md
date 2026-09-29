@@ -40,13 +40,16 @@ Consequences, in order of how often they get forgotten:
 
 | Path | Role |
 |---|---|
+| `hf-static/index.html` | Static Hugging Face showcase. README metadata uses `sdk: static` and this `app_file`; the page links to Colab/local play and does not run the backend. |
 | `waifu_engine/nekomimi/laya_client.py` | Process-wide `Agent` singleton. `ask(state, questions)` → answers or `None`. Never raises. `preload()` (load + warm-up, run by `web.py`'s lifespan before the port opens), `status()` (read-only, served at `/healthz`). `python -m` it to bake weights. |
 | `waifu_engine/nekomimi/question_bank.json` | Question template: yes/no rows, choice rows, and `trait_block` groups |
 | `waifu_engine/nekomimi/traits.py` | Expands the JSON template, plus `ANSWER_WEIGHT` and `make_dynamic()` for mined traits |
+| `waifu_engine/nekomimi/enrich.py` | Deterministic `lexicon/enrich.yml` templates: player text → bank trait ids as soft evidence. Not a question writer and not a model |
 | `waifu_engine/nekomimi/session.py` | `Candidate`, `GuessSession`, log-odds pool, in-process store + TTL |
 | `waifu_engine/nekomimi/memory.py` | Rebuilds normalized player facts from the transcript, scored answers, and rejected identities |
 | `waifu_engine/nekomimi/context.py` | Fits Laya state to each question window and records included or omitted fact IDs |
 | `waifu_engine/nekomimi/engine.py` | The turn loop: `start`, `submit_answer`, `submit_guess_result`, `state_payload` |
+| `hf-static/index.html` | Static Hugging Face showcase. README metadata uses `sdk: static` and this `app_file`; the page links to Colab/local play and does not run the backend. |
 | `webui/` | SolidJS UI (Vite). File routes for `/` and `/nekomimi`. `npm run build` writes `waifu_engine/webui_dist`, which setuptools ships; FastAPI 503s until that bundle exists |
 | `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
 | `waifu_engine/web_search.py` | Playwright then DuckDuckGo fill. `search_characters_multiround` (one-shot) + `search_by_constraints` (guessing loop) + `mine_trait_slugs` |
@@ -59,6 +62,8 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/timing.py` | Per-request spans. `@traced` on `start`/`submit_answer`/`submit_guess_result`/`determine` logs one `[waifu]` line (slowest first) and sets `payload["timing"]`. `span()` is a no-op outside a trace |
 | `waifu_engine/decide.py` | One-shot `determine()` pipeline |
 | `waifu_engine/search.py`, `catalog.py` | Online shortlist ranking; catalog helpers remain for tooling but runtime never loads the catalog |
+| `.github/workflows/` | Local Pullfrog CI workflows (`pullfrog.yml`, `pullfrog-review.yml`, `pullfrog-triggers.yml`, `pullfrog-issues.yml`, `pullfrog-address-reviews.yml`, `pullfrog-ci-fix.yml`) |
+| `.github/pullfrog/` | Local Pullfrog agent config (`config.yml`), instruction manuals (`instructions/`), and setup guides (`ENV_SETUP.md`, `README.md`) |
 
 ## The turn contract
 
@@ -73,10 +78,17 @@ Consequences, in order of how often they get forgotten:
    order stands. Laya never picks a question id; it also answers `ready_to_guess`. The
    `medium` choice ("Where is your character from?": anime/manga, game, comic,
    movie, TV, something else) and dynamic "Which series?" compete in that
-   ranking like any other question — neither is forced first. Traits the seed
-   already named (hair colour, halo, wings, horns) are pulled in front of that
-   ranking, and the same appearance questions lead once a series is confirmed,
-   because school/uniform/teen do not separate students from one school. A medium pick is
+   ranking like any other question — neither is forced first. Player text is
+   enriched from `lexicon/enrich.yml` into `answered_traits` before the pick
+   (`enrich.enrich_hits`); those question ids are not asked again. A soft_chip
+   row alone does not settle a bank question. Later typed text may replace a
+   `soft_enrich` row (dropping its cached votes first), never a bank answer.
+   A trait the visual clue already scores is recorded `clue_covered`, no extra nats.
+   Negation stops at clause breaks (comma, period, semicolon, "but"). Unnamed
+   halo, wings and horns are not pinned when the series locks — information
+   gain ranks them with the rest of the bank. A look that splits the locked
+   cast (prosthetic, animal ears, tail, eyepatch) is still pulled forward.
+   A medium pick is
    a hard filter (`traits.MEDIUM_ACCEPTS`; movie and TV accept each other;
    "other" / "Something else" is an empty accept-set and is **not** a hard
    filter — it must not wipe known media; unknown media are never removed). Empty
@@ -319,6 +331,15 @@ Tests stub `laya_client.ask`, `web_search.search_by_constraints` and the
 query LLM's `urlopen`. Keep them
 offline — do not add a test that downloads weights, launches Chromium, or hits
 DuckDuckGo.
+
+## Pullfrog Agent CI
+
+Local Pullfrog integration (no pullfrog.com dashboard):
+- Entrypoint: Reusable `pullfrog.yml` runner via `ghcr.io/coolgunxdd/pullfrog-agent`.
+- Workflows: `pullfrog-review.yml` (automated PR review), `pullfrog-triggers.yml` (`@pullfrog` mentions), `pullfrog-issues.yml` (issue triage/planning), `pullfrog-address-reviews.yml` (bot review fixes), `pullfrog-ci-fix.yml` (CI failures on bot PRs).
+- Configuration & instructions: `.github/pullfrog/config.yml`, `.github/pullfrog/instructions/` (`build.md`, `plan.md`, `review.md`).
+- Environment & secrets setup: [`.github/pullfrog/ENV_SETUP.md`](./.github/pullfrog/ENV_SETUP.md). Grok/Antigravity setup: [`.github/grok_antigravity_setup.md`](./.github/grok_antigravity_setup.md).
+- Safety: Never push directly to `main`; all agent changes land via PR.
 
 ## Rules
 

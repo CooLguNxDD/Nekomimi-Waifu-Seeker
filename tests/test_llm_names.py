@@ -12,7 +12,7 @@ import pytest
 from waifu_engine import query_llm, sources
 from waifu_engine.nekomimi import engine, session as sess_mod
 from waifu_engine.nekomimi.session import Candidate
-from waifu_engine.sources import anilist, llm_names, wikipedia
+from waifu_engine.sources import anilist, cache, llm_names, wikipedia
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +106,20 @@ def test_resolve_keeps_real_pages_and_drops_inventions(monkeypatch):
     out = llm_names.resolve(rows, "anime")
     assert [c["name"] for c in out] == ["Makima", "YoRHa No.2 Type B"]
     assert all(c["via"] == "llm_names" and c["source"] == "anilist" for c in out)
+
+
+def test_entity_cache_separates_unicode_names_and_rejects_wrong_series(monkeypatch):
+    assert cache._make_slug("東京") != cache._make_slug("大阪")
+    cache.save_entity(_hit("Aqua", "Kingdom Hearts"))
+    assert cache.get_entity("Aqua", "KonoSuba") is None
+    assert not llm_names._matches(_hit("Aqua", "Kingdom Hearts"), "Aqua", "KonoSuba")
+
+    monkeypatch.setattr(anilist, "search_characters", lambda q, limit=10: [
+        _hit("Aqua", "KonoSuba"),
+    ])
+    monkeypatch.setattr(wikipedia, "search_characters", lambda q, limit=8: [])
+    resolved = llm_names._lookup("Aqua", "KonoSuba", None)
+    assert resolved is not None and resolved["series"] == "KonoSuba"
 
 
 def test_resolve_survives_a_failing_lookup(monkeypatch):

@@ -1,0 +1,93 @@
+# Player text → bank trait ids. Fixed phrases only.
+# This file does not name a character, write a question, or call a model.
+# A hit is soft evidence (engine scores it inside the soft band) so the
+# question is not asked again. A negated choice marker is ignored: there is
+# no "not blonde" option. A negated yes/no marker is stored as no. Negation
+# stops at a clause break (comma, period, semicolon, "but"). "Halo" naming the
+# game series ("from Halo", "Halo Infinite") is not a halo (traits.halo_is_title).
+templates:
+  - id: hair_blonde
+    qid: hair_color
+    answer: blonde
+    kind: choice
+    markers:
+      - blonde hair
+      - blond hair
+      - blonde-haired
+      - blond-haired
+      - golden hair
+  - id: hair_black
+    qid: hair_color
+    answer: black
+    kind: choice
+    markers:
+      - black hair
+      - black-haired
+  - id: hair_brown
+    qid: hair_color
+    answer: brown
+    kind: choice
+    markers:
+      - brown hair
+      - brown-haired
+  - id: hair_white
+    qid: hair_color
+    answer: white
+    kind: choice
+    markers:
+      - white hair
+      - silver hair
+      - grey hair
+      - gray hair
+  - id: hair_red
+    qid: hair_color
+    answer: red
+    kind: choice
+    markers:
+      - red hair
+      - crimson hair
+      - redhead
+  - id: hair_blue
+    qid: hair_color
+    answer: blue
+    kind: choice
+    markers:
+      - blue hair
+  - id: hair_pink
+    qid: hair_color
+    answer: pink
+    kind: choice
+    markers:
+      - pink hair
+  - id: hair_other
+    qid: hair_color
+    answer: other
+    kind: choice
+    markers:
+      - green hair
+      - green-haired
+      - purple hair
+      - violet hair
+      - purple-haired
+  - id: look_halo
+    qid: look_halo
+    answer: "yes"
+    kind: yesno
+    markers:
+      - halo
+      - halos
+  - id: look_wings
+    qid: look_wings
+    answer: "yes"
+    kind: yesno
+    markers:
+      - wings
+      - winged
+  - id: look_horns
+    qid: look_horns
+    answer: "yes"
+    kind: yesno
+    markers:
+      - horns
+      - horned
+      - horn

@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from .. import query_llm
-from ..names import same_character, same_series, series_key
+from ..names import identity_id, same_character, same_series, series_key
 from . import anilist, wikipedia
 from .cache import get_entity, save_entity
 
@@ -35,22 +35,41 @@ _MEDIA_WIKI_FIRST = {"movie", "tv", "comic"}
 
 
 def _matches(hit: dict[str, Any], name: str, series: str) -> bool:
-    """Whether a source page is the proposed character.
+    """Whether a source page matches both the proposed identity and known work.
 
     The name matching (word order, alias titles) is ``same_character``. A
     proposal whose page uses another spelling ("2B" vs "YoRHa No.2 Type B")
-    still counts when both name the same work.
+    still counts when both name the same work. A bare namesake such as Aqua
+    cannot make a page from another known series satisfy the proposal.
     """
-    if same_character(hit.get("name") or "", name):
-        return True
-    return bool(series and series_key(hit.get("series") or "")
-                and same_series(hit.get("series") or "", series))
+    hit_name = str(hit.get("name") or "")
+    hit_series = str(hit.get("series") or "")
+    requested_series = series_key(series)
+    cached_series = series_key(hit_series)
+    identity_match = bool(identity_id(hit_name)
+                          and identity_id(hit_name) == identity_id(name))
+    name_match = same_character(hit_name, name)
+    if requested_series and cached_series and not same_series(hit_series, series):
+        return False
+    if name_match:
+        if not requested_series:
+            return True
+        if cached_series:
+            return True
+        if identity_match:
+            return True
+        from ..web_search import franchise_mentioned
+
+        return franchise_mentioned(series, f"{hit_name} {hit.get('blurb') or ''}")
+    return identity_match or bool(
+        requested_series and cached_series and same_series(hit_series, series)
+    )
 
 
 def _lookup(name: str, series: str, medium_hint: str | None) -> dict[str, Any] | None:
     """The first real page matching one proposal, or None."""
     
-    cached = get_entity(name)
+    cached = get_entity(name, series)
     if cached and _matches(cached, name, series):
         return cached
         
