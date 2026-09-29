@@ -147,6 +147,13 @@ def backend() -> str:
     return str(getattr(_AGENT, "backend", "torch"))
 
 
+def tokenizer() -> Any | None:
+    """Return the loaded backend tokenizer without triggering model loading."""
+    if _AGENT is None:
+        return None
+    return getattr(_AGENT, "tok", None) or getattr(_AGENT, "tokenizer", None)
+
+
 def ask(state: Any, questions: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
     """Run one batched forward pass. Returns ``result["answers"]`` or None."""
     if not questions:

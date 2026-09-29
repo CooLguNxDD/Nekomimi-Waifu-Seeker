@@ -171,7 +171,13 @@ def test_mushy_laya_does_not_erase_the_pin(monkeypatch):
         return {"match": {"noul": 0.55, "confidence": 0.2, "action": {"act_probability": 0.4}}}
 
     monkeypatch.setattr(laya_client, "ask", _flat)
-    names, _sess = _rank(_pair(), [("species_god", "yes"), ("look_animal_ears", "yes")])
+    rows = _pair()
+    # The live AniList row says "wolf harvest deity" and carries the god tag.
+    # A profile silent on a rare trait is scored near its base rate, so a
+    # blurb as thin as "A traveler." would pay for "god: yes" against the
+    # merchant row that absorbed her tags; that trade-off is deliberate.
+    rows[0]["tags"].append("god")
+    names, _sess = _rank(rows, [("species_god", "yes"), ("look_animal_ears", "yes")])
     assert names[0] == "Holo"
 
 

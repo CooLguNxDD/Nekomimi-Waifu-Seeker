@@ -10,6 +10,7 @@ import ast
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -285,14 +286,34 @@ def test_chromium_present_uses_browser_path(tmp_path: Path, monkeypatch: pytest.
     assert not boot.chromium_present()
 
 
+def _bash_executable() -> str:
+    """Find GNU Bash because Windows' system bash.exe only launches WSL."""
+    candidates = [shutil.which("bash")]
+    if os.name == "nt":
+        git = shutil.which("git")
+        if git:
+            candidates.insert(0, str(Path(git).resolve().parents[1] / "bin" / "bash.exe"))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            version = subprocess.run(
+                [candidate, "--version"], capture_output=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if version.returncode == 0 and b"GNU bash" in version.stdout + version.stderr:
+            return candidate
+    pytest.skip("GNU Bash is required to validate the Colab shell script")
+
+
 def test_node_install_script_is_valid_bash():
     proc = subprocess.run(
-        ["bash", "-n"],
-        input=boot._NODE_INSTALL,
-        text=True,
+        [_bash_executable(), "-n"],
+        input=boot._NODE_INSTALL.replace("\r\n", "\n").encode("utf-8"),
         capture_output=True,
     )
-    assert proc.returncode == 0, proc.stderr
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
 
 
 def test_sync_repo_branch_then_sha_then_skip(tmp_path: Path):
@@ -459,6 +480,40 @@ def test_bootstrap_runs_the_four_lanes_together(tmp_path: Path, monkeypatch: pyt
     assert set(result["lanes"]) == {"ollama", "ui", "python", "laya"}
 
 
+def test_ollama_installer_installs_zstd_only_when_needed(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    def fake_run(args, *, capture=False, **kwargs):
+        calls.append((args, capture))
+        return ""
+
+    monkeypatch.setattr(boot, "_run", fake_run)
+    boot._install_ollama()
+
+    args, capture = calls[0]
+    assert args[:2] == ["bash", "-lc"]
+    assert capture is True
+    assert "if ! command -v zstd" in args[2]
+    assert "apt-get install -y -qq zstd" in args[2]
+    assert "curl --fail --show-error --silent --location https://ollama.com/install.sh | sh" in args[2]
+    assert "set -euo pipefail" in args[2]
+
+
+def test_ollama_installer_reports_upstream_diagnostics(monkeypatch: pytest.MonkeyPatch, capsys):
+    def fail_run(args, *, capture=False, **kwargs):
+        raise subprocess.CalledProcessError(
+            1, args, output="Downloading Ollama", stderr="zstd is missing",
+        )
+
+    monkeypatch.setattr(boot, "_run", fail_run)
+    with pytest.raises(RuntimeError, match="exit status 1"):
+        boot._install_ollama()
+
+    output = capsys.readouterr().out
+    assert "Downloading Ollama" in output
+    assert "zstd is missing" in output
+
+
 def test_wait_for_pull_honors_a_finished_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(boot, "STATE_PATH", str(tmp_path / "state.json"))
     boot._update_state(pull_reaped=True, pull_exit=0, pull_pid=None)
@@ -479,10 +534,10 @@ def test_dry_run_does_not_clone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_notebook_embeds_helper_and_keeps_url_order():
-    nb = json.loads((ROOT / "notebooks" / "nekomimi_colab.ipynb").read_text())
+    nb = json.loads((ROOT / "notebooks" / "nekomimi_colab.ipynb").read_text(encoding="utf-8"))
     assert nb["metadata"]["colab"]["gpuType"] == "L4"
     assert nb["metadata"]["accelerator"] == "GPU"
-    helper = (ROOT / "notebooks" / "colab_bootstrap.py").read_text()
+    helper = (ROOT / "notebooks" / "colab_bootstrap.py").read_text(encoding="utf-8")
     cells = nb["cells"]
     code = ["".join(cell["source"]) for cell in cells if cell["cell_type"] == "code"]
     blob = "\n".join(code)

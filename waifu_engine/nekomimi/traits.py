@@ -468,7 +468,16 @@ def clue_likelihood(clues: str, blurb: str, tags: list[str] | set[str] | None = 
     more than a fame prior (about 1.3 log-odds) or the popular lookalike wins.
     A profile that never describes appearance returns None so the noul stands.
     """
-    reqs = _clue_requirements(clues)
+    return clue_requirements_likelihood(_clue_requirements(clues), blurb, tags)
+
+
+def clue_requirements_likelihood(
+    requirements: list[tuple[str, bool]],
+    blurb: str,
+    tags: list[str] | set[str] | None = None,
+) -> float | None:
+    """Score only the visual requirements that still add new evidence."""
+    reqs = requirements
     if not reqs:
         return None
     have = set(tags or ())

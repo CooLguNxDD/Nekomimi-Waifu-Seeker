@@ -102,33 +102,17 @@ export function NekomimiPage() {
     setRestarting(false);
   });
 
-  /** Open a new empty-seed round. The previous trail is dropped only after the server accepts it. */
+  /** Reset back to the landing card so the player can enter an optional hint or start cleanly. */
   const beginFreshRound = () => {
-    if (restarting() || mutations.start.isPending) return;
     const previous = id();
     setConfirming(false);
-    setLeftBehind(previous);
-    setRestarting(true);
+    sessionStore.getState().clearSession();
+    transcript.reset(previous);
+    if (previous) qc.removeQueries({ queryKey: nekomimiQueryKey(previous) });
     setSeed("");
     setSulking(false);
-    transcript.blank(previous);
-    mutations.start.mutate("", {
-      onSuccess: (data) => {
-        if (!data.session_id || data.session_id === previous) {
-          transcript.reopen(previous);
-          setRestarting(false);
-          setLeftBehind(null);
-          return;
-        }
-        transcript.reset(previous);
-        if (previous) qc.removeQueries({ queryKey: nekomimiQueryKey(previous) });
-      },
-      onError: () => {
-        transcript.reopen(previous);
-        setRestarting(false);
-        setLeftBehind(null);
-      },
-    });
+    setRestarting(false);
+    setLeftBehind(null);
   };
 
   /** Ask first while a question or guess is still in play. */

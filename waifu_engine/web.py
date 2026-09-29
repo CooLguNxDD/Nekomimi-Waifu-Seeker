@@ -122,6 +122,19 @@ def nekomimi_state(session_id: str):
     return nekomimi_engine.state_payload(sess)
 
 
+@app.get("/api/nekomimi/trace/{session_id}")
+def nekomimi_trace(session_id: str, target: str = ""):
+    """Per-answer ranks and per-guess evidence for a bench post-mortem.
+
+    A browser bench knows the target and the server does not, so the bench
+    fetches this after a round (``?target=Makima``) before the session TTL.
+    """
+    sess = nekomimi_session.get_session(session_id)
+    if sess is None:
+        return {"error": "session not found or expired"}
+    return nekomimi_engine.trace_payload(sess, target[:120])
+
+
 @app.post("/api/determine")
 def api_determine(payload: dict):
     q = str(payload.get("query") or "").strip()

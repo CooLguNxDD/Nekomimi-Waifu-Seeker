@@ -44,4 +44,3 @@ jobs:
           auth_header="$(printf 'hf_user:%s' "$HF_TOKEN" | base64 -w 0)"
           git -c "http.https://huggingface.co/.extraheader=AUTHORIZATION: Basic ${auth_header}" \
             push --force huggingface HEAD:main
-

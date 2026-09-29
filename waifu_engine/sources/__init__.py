@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -18,7 +19,7 @@ from typing import Any, Callable
 from .. import timing
 from ..names import name_keys, plain_duplicate
 from ..nekomimi.lexicon import POPULAR_CATEGORIES, SEARCH_SUFFIX as _MEDIUM_SUFFIX
-from . import _http, anilist, gemini, wikipedia
+from . import _http, anilist, gemini, llm_names, wikipedia
 
 __all__ = ["anilist", "gemini", "wikipedia", "find_candidates", "normalize_name"]
 
@@ -138,6 +139,7 @@ class _Background:
         self.executor: ThreadPoolExecutor | None = None
         self.pending: set[str] = set()
         self.ready: dict[str, list[dict[str, Any]]] = {}
+        self.ready_meta: dict[str, dict[str, Any]] = {}
 
     def max_pending(self) -> int:
         """The configured cap on queued-or-running jobs (env, else default)."""
@@ -163,22 +165,35 @@ class _Background:
             return False
         return True
 
-    def finish(self, key: str, hits: list[dict[str, Any]], t0: float, errors: list[str]) -> None:
-        """Park ``hits`` for ``key``, clear its pending flag and log the run."""
+    def finish(self, key: str, hits: list[dict[str, Any]], t0: float, errors: list[str],
+               extra: str = "", metadata: dict[str, Any] | None = None) -> None:
+        """Park ``hits`` for ``key``, clear its pending flag and log the run.
+
+        ``extra`` is appended to the log line (the LLM-names funnel).
+        """
         with self.lock:
             self.pending.discard(key)
             if len(self.ready) >= _BG_MAX_KEYS:
-                self.ready.pop(next(iter(self.ready)))
+                oldest = next(iter(self.ready))
+                self.ready.pop(oldest)
+                self.ready_meta.pop(oldest, None)
             self.ready.setdefault(key, []).extend(hits)
+            if metadata:
+                self.ready_meta[key] = dict(metadata)
         if timing._log_on():
-            timing.log.info("%s background key=%s %.0fms found=%d%s",
+            timing.log.info("%s background key=%s %.0fms found=%d%s%s",
                             self.name, key[:8], (time.perf_counter() - t0) * 1000, len(hits),
+                            f" {extra}" if extra else "",
                             f" err={errors[0][:120]}" if errors else "")
 
     def take(self, key: str) -> list[dict[str, Any]]:
         """Hits a finished job left for ``key`` (consumed once)."""
+        return self.take_result(key)[0]
+
+    def take_result(self, key: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Consume finished hits and their version metadata together."""
         with self.lock:
-            return self.ready.pop(key, [])
+            return self.ready.pop(key, []), self.ready_meta.pop(key, {})
 
     def is_pending(self, key: str) -> bool:
         """Whether ``key`` has a job queued or running."""
@@ -195,6 +210,11 @@ _COVERAGE_MAX = 3
 # Gemini calls are billed.
 _DDG_BG = _Background("ddg", "WAIFU_DDG_BG_MAX_PENDING", 4)
 _GEMINI_BG = _Background("gemini", "WAIFU_GEMINI_BG_MAX_PENDING", 2)
+# LLM hypotheses: one model call plus up to ``llm_names.RESOLVE_MAX`` lookups.
+_LLM_BG = _Background("llm_names", "WAIFU_LLM_NAMES_BG_MAX_PENDING", 2)
+# Facts each session last sent for hypotheses. The same facts would propose
+# the same names again, and each resolution costs a round of lookups.
+_LLM_DONE: dict[str, tuple[tuple[str, ...], int]] = {}
 # Names kept for the DuckDuckGo fill (tests and callers use them).
 _BG_LOCK = _DDG_BG.lock
 _BG_PENDING = _DDG_BG.pending
@@ -234,6 +254,69 @@ def _gemini_run(key: str, facts: list[str], medium_hint: str | None, limit: int)
     errors: list[str] = []
     hits = gemini.search_characters(facts, medium_hint, limit, errors=errors)
     _GEMINI_BG.finish(key, hits, t0, errors)
+
+
+def _llm_names_run(key: str, facts: list[str], medium_hint: str | None,
+                   evidence_revision: int = 0, fingerprint: str = "") -> None:
+    """Background LLM-hypotheses job: propose names, resolve them, park the hits."""
+    t0 = time.perf_counter()
+    errors: list[str] = []
+    stats: dict[str, Any] = {}
+    try:
+        hits = llm_names.search(facts, medium_hint, errors=errors, stats=stats)
+    except Exception as exc:  # noqa: BLE001 - search should not raise; be sure
+        hits, errors = [], [str(exc)]
+    _LLM_BG.finish(
+        key, hits, t0, errors, _funnel_note(stats),
+        {"evidence_revision": evidence_revision, "fingerprint": fingerprint},
+    )
+
+
+def _funnel_note(stats: dict[str, Any]) -> str:
+    """``proposed=12 resolved=3 unresolved=7 names=[...]`` for the log line.
+
+    The names are the model's reply to player facts, never scraped text, so
+    they are safe to log; they say whether the target was ever proposed.
+    """
+    proposed = stats.get("proposed") or []
+    unresolved = stats.get("unresolved") or []
+    names = "; ".join(n[:40] for n in proposed)[:400]
+    return (f"proposed={len(proposed)} resolved={len(stats.get('resolved') or [])} "
+            f"unresolved={len(unresolved)} names=[{names}]")
+
+
+def _llm_names_start(key: str, facts: list[str], medium_hint: str | None,
+                     evidence_revision: int = 0) -> bool:
+    """Queue hypotheses for ``facts`` unless this session already ran those facts."""
+    clean = tuple(f for f in facts if f and f.strip())
+    if not clean or not llm_names.query_llm.names_enabled():
+        return False
+    fingerprint = hashlib.sha256("\n".join(clean).encode("utf-8")).hexdigest()
+    with _LLM_BG.lock:
+        if _LLM_DONE.get(key) == (clean, evidence_revision):
+            return False
+    if not _LLM_BG.start(key, _llm_names_run, list(clean), medium_hint,
+                         evidence_revision, fingerprint):
+        return False
+    with _LLM_BG.lock:
+        if len(_LLM_DONE) >= _BG_MAX_KEYS and key not in _LLM_DONE:
+            _LLM_DONE.pop(next(iter(_LLM_DONE)))
+        _LLM_DONE[key] = (clean, evidence_revision)
+    return True
+
+
+def take_hypothesis_candidates(key: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Consume resolved proposal leads with the evidence revision that requested them."""
+    return _LLM_BG.take_result(key)
+
+
+def background_status(key: str) -> dict[str, bool]:
+    """Report whether any candidate provider still has work for this session."""
+    return {
+        "ddg": _DDG_BG.is_pending(key),
+        "gemini": _GEMINI_BG.is_pending(key),
+        "llm_names": _LLM_BG.is_pending(key),
+    }
 
 
 def take_background(key: str) -> list[dict[str, Any]]:
@@ -385,6 +468,7 @@ def find_candidates(
     pool_size: int | None = None,
     gemini_inline: bool | None = None,
     pin: str | None = None,
+    hypothesis_facts: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Merge candidates from every source, best source first, deduped by name.
 
@@ -423,6 +507,11 @@ def find_candidates(
     A host that still answers 429 after retries is not queried again in this
     search. Further sequential calls would come back empty and only make the
     limit last longer.
+
+    ``hypothesis_facts`` (player facts only) asks the local LLM for character
+    names that fit them, on a background worker (``llm_names``). Resolved
+    hits join the next search for ``background_key``; the engine decides
+    when that is worth it, so ``None`` never calls the model.
     """
     from .. import web_search
 
@@ -434,6 +523,9 @@ def find_candidates(
     web_search._begin_search()
 
     hits: dict[str, int] = {}
+    # Hits per source that were already in play. "llm_bg: 0 new" alone could
+    # not tell a model that named the pool from one that named no one.
+    dups: dict[str, int] = {}
     taken_names: list[str] = []
     # Portraits for people already in the pool. Kept out of ``found`` so they
     # do not consume the new-candidate limit.
@@ -441,6 +533,8 @@ def find_candidates(
 
     def take(items: list[dict[str, Any]], source: str = "") -> None:
         """Add hits whose character is new; count them under ``source``.
+
+        Hits naming someone already in play count under ``dups`` instead.
 
         ``plain_duplicate`` matches either word order and a trailing series
         title, and keeps two different work titles of the same given name.
@@ -457,8 +551,11 @@ def find_candidates(
             if not keys or plain_duplicate(name, excluded):
                 # Already in the pool. Still hand the portrait across so a
                 # later source can fill a null image_url on the next absorb.
-                if keys and plain_duplicate(name, excluded) and cand.get("image_url"):
-                    carried.append(cand)
+                if keys and plain_duplicate(name, excluded):
+                    if source:
+                        dups[source] = dups.get(source, 0) + 1
+                    if cand.get("image_url"):
+                        carried.append(cand)
                 continue
             if plain_duplicate(name, taken_names):
                 from .portraits import donate_image
@@ -566,6 +663,10 @@ def find_candidates(
     if background_key:
         take(take_background(background_key), "ddg_bg")
         take(_GEMINI_BG.take(background_key), "gemini_bg")
+        take(_LLM_BG.take(background_key), "llm_bg")
+        if hypothesis_facts:
+            with timing.span("fetch.llm_names_background"):
+                _llm_names_start(background_key, hypothesis_facts, medium_hint)
 
     in_play = n_seen if pool_size is None else pool_size
     room = popular_limit() - in_play
@@ -657,6 +758,9 @@ def find_candidates(
     web_search._set_state("done")
     timing.note(found=len(out),
                 hits=",".join(f"{k}:{v}" for k, v in hits.items()) or "none")
+    web_search._LAST_SEARCH["dups"] = dict(dups)
+    if dups:
+        timing.note(dup=",".join(f"{k}:{v}" for k, v in dups.items()))
     errors = web_search.last_search_meta()["errors"]
     if errors:
         timing.note(err=" | ".join(errors[:2])[:160])

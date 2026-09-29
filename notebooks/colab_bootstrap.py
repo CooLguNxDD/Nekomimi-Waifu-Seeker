@@ -669,13 +669,40 @@ def _update_state(**kwargs: Any) -> dict[str, Any]:
 
 
 def _install_ollama() -> None:
-    """Install the Ollama binary with the upstream script.
+    """Install Ollama and show installer output when Colab setup fails.
 
-    The script apt-installs what it needs. This setup does not run its own
-    ``apt-get update`` first; that update was on the critical path and the
-    stock Colab image already has curl.
+    The current Linux bundle is zstd-compressed, but stock Colab images may
+    not have ``zstd``; install it only on that path before running upstream's
+    installer. ``pipefail`` keeps a failed download from looking successful.
     """
-    _run(["bash", "-lc", "curl -fsSL https://ollama.com/install.sh | sh"])
+    install = r"""
+set -euo pipefail
+if ! command -v zstd >/dev/null 2>&1; then
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "Ollama's Linux bundle requires zstd, and apt-get is unavailable." >&2
+    exit 1
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  if [ "$(id -u)" -eq 0 ]; then
+    apt-get update -qq
+    apt-get install -y -qq zstd
+  else
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq zstd
+  fi
+fi
+curl --fail --show-error --silent --location https://ollama.com/install.sh | sh
+"""
+    try:
+        _run(["bash", "-lc", install], capture=True)
+    except subprocess.CalledProcessError as exc:
+        detail = "\n".join(part for part in (exc.stdout, exc.stderr) if part).strip()
+        if detail:
+            print("[colab] Ollama installer diagnostics:\n" + detail, flush=True)
+        raise RuntimeError(
+            f"Ollama installation failed with exit status {exc.returncode}; "
+            "see installer diagnostics above."
+        ) from exc
 
 
 def _start_serve(url: str) -> None:

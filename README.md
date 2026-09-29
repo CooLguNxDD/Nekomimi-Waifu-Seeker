@@ -34,7 +34,7 @@ Before the first cell, add secrets in the Colab sidebar (the key icon). The note
 
 The web page is the built bundle in `waifu_engine/webui_dist`. The notebook runs `cd webui && npm ci && npm run build` (the Docker UI stage; `npm install && npm run build` is the same step from a checkout) before `python -m waifu_engine.web`. Until that bundle exists, `/nekomimi` returns 503.
 
-Laya asks the questions and makes the guesses. Ollama is only the optional query rewriter (`WAIFU_QUERY_LLM=1`). The notebook edits the cloned `query_llm.py` so that copy sends `reasoning_effort=none` when `WAIFU_QUERY_LLM_THINKING=0`. Ollama honours that field; the `chat_template_kwargs` switch in this repo is the one vLLM honours.
+Laya asks the questions and makes the guesses. Ollama is only the optional query rewriter and name proposer (`WAIFU_QUERY_LLM=1`). `query_llm.py` sends `reasoning_effort=none` to Ollama unless `WAIFU_QUERY_LLM_THINKING=1`, and the `chat_template_kwargs` switch to Qwen (the one vLLM honours). The notebook's patch cell only rewrites older checkouts that lack this.
 
 ## Nekomimi mode
 
@@ -263,10 +263,27 @@ the player's confirmed facts into better search phrases instead. It writes
 makes every decision. The model only sees what the player typed or confirmed;
 scraped pages are never sent. Any failure falls back to the templates.
 
+The same model also **proposes candidate names** when the facts are only broad
+button answers ("female, demon, red hair, adult") that no name search can
+match, or when Laya says search is stuck. Each name is looked up on
+AniList/Wikipedia and dropped if no real page matches, so profiles never come
+from the model, and Laya judges those candidates like any other. This runs on
+a background worker; hits join the next search. `WAIFU_LLM_NAMES=0` turns it
+off.
+
 Any OpenAI-compatible `/v1/chat/completions` endpoint works. The default is a
-local server hosting `Qwen/Qwen3.6-35B-A3B`:
+local Ollama server hosting Unsloth's Gemma 4 26B-A4B GGUF (what the Colab
+notebook pulls):
 
 ```bash
+ollama pull hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q3_K_M
+WAIFU_QUERY_LLM=1 python -m waifu_engine.web
+```
+
+Qwen still works; point the two env vars at it:
+
+```bash
+export WAIFU_QUERY_LLM_BASE_URL=http://localhost:8000/v1 WAIFU_QUERY_LLM_MODEL=Qwen/Qwen3.6-35B-A3B
 # GPU: vLLM
 vllm serve Qwen/Qwen3.6-35B-A3B --port 8000
 # CPU (no CUDA): a Q4 GGUF under llama.cpp. ~3B active params, ~20-24 GB RAM
@@ -277,9 +294,10 @@ WAIFU_QUERY_LLM=1 python -m waifu_engine.web
 
 **Laya keeps the game fast; the LLM is called rarely and never waited on.**
 
-- It only ever sees what the player *typed* (the seed and details). Button
-  answers already have fixed search wording, so a round played only with
-  buttons makes **zero** LLM calls.
+- Rewrites only ever see what the player *typed* (the seed and details).
+  Button answers already have fixed search wording, so they are never
+  rewritten. Name proposals see the confirmed facts, button answers included,
+  and run only while the pool is empty or flat or search is stuck.
 - It is called only when Laya says search is stuck. One fast `pool_fits` noul
   (~0.3 s) asks whether any current leader fits the facts. If one does, the
   LLM stays idle.
@@ -290,7 +308,8 @@ WAIFU_QUERY_LLM=1 python -m waifu_engine.web
 - Set `WAIFU_QUERY_LLM_WAIT=1.5` to let a turn wait up to that many seconds for
   a fast (GPU) server. The default `0` never waits.
 
-A typical round makes 0–2 LLM calls instead of one per answer. `/healthz`
+A typical round makes a few LLM calls (rewrites plus name proposals, each at
+most once per distinct set of facts) instead of one per answer. `/healthz`
 reports `query_llm.calls`, `last_ms` and `inflight`.
 
 For the unsloth GGUF on CPU, turn thinking off (it dominates latency):

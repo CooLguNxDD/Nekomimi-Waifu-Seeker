@@ -16,11 +16,11 @@ Laya never writes text; it decides. Per turn:
   search queries lead with them rather than with "female" or "anime".
 
 Search query *text* is never Laya's: templates build it, optionally with an
-OpenAI-compatible LLM rewriting the player's own typed text (``query_llm``).
-The LLM is slow and Laya is fast, so Laya gates it: the LLM is only asked when
-there is free text it has not seen and a ``pool_fits`` noul says the current
-candidates do not fit the facts. Even then it runs in the background and the
-queries are used from a later search; a turn never waits for it.
+OpenAI-compatible LLM rewriting the player's typed text (``query_llm``).
+Rewrites run in the background only for new typed text when ``pool_fits`` says
+the pool is stuck. A separate name-proposal path receives normalized player
+facts and runs without blocking when the pool is broad, facts meaningfully
+change, or the player rejects a guess; resolved leads join a later search.
 
 When Laya is unavailable the same decisions fall back to tag overlap and
 entropy heuristics, so the loop still plays (less sharply) with no model.
@@ -29,6 +29,7 @@ entropy heuristics, so the loop still plays (less sharply) with no model.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -46,6 +47,7 @@ from ..names import (
     same_series_key,
     series_key,
 )
+from . import context as laya_context
 from . import laya_client
 from .enrich import enrich_hits, soft_enrich_likelihood
 from .lexicon import BROAD_CATEGORIES as _BROAD_CATEGORIES
@@ -65,6 +67,7 @@ from .session import (
     new_session,
     popularity_prior,
 )
+from .memory import proposal_facts, refresh_session_memory, working_memory
 from .traits import (
     ANSWER_WEIGHT,
     MAX_SERIES_OPTIONS,
@@ -76,6 +79,7 @@ from .traits import (
     chip_likelihood,
     clue_likelihood,
     clue_overlap_likelihood,
+    clue_requirements_likelihood,
     clue_question,
     is_choice,
     make_dynamic,
@@ -152,13 +156,13 @@ ONLINE = os.getenv("WAIFU_ONLINE_SEARCH", "1").lower() in {"1", "true", "yes"}
 FOCUS_OPTIONS = 8
 FOCUS_TAKE = 3
 
-_SESSION_LOCKS: dict[str, threading.Lock] = {}
+_SESSION_LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 
 
-def _session_lock(sess: GuessSession) -> threading.Lock:
+def _session_lock(sess: GuessSession) -> threading.RLock:
     with _LOCKS_GUARD:
-        return _SESSION_LOCKS.setdefault(sess.id, threading.Lock())
+        return _SESSION_LOCKS.setdefault(sess.id, threading.RLock())
 
 
 # --- candidate sourcing ---------------------------------------------
@@ -362,6 +366,54 @@ def _llm_queries(sess: GuessSession, medium: str | None,
     return sess.llm_queries or None
 
 
+# A pool this flat after a few answers is not converging on anyone it holds.
+_BROAD_POOL_TURN = 3
+_BROAD_POOL_POSTERIOR = 0.25
+_LLM_NAMES_MAX_PER_SESSION = max(0, int(os.getenv("WAIFU_LLM_NAMES_MAX_PER_SESSION", "4")))
+_LLM_NAMES_COOLDOWN_TURNS = max(0, int(os.getenv("WAIFU_LLM_NAMES_COOLDOWN_TURNS", "2")))
+
+
+def _hypothesis_facts(sess: GuessSession, stuck: Any) -> list[str]:
+    """Player-origin facts to propose from, bounded by cooldown and round budget."""
+    if not query_llm.names_enabled():
+        return []
+    facts = proposal_facts(sess)
+    if not facts:
+        return []
+    fingerprint = hashlib.sha256("\n".join(facts).encode("utf-8")).hexdigest()
+    rejection_revision = max(
+        (int(row.get("revision") or 0) for row in sess.exclusion_log
+         if row.get("reason") == "wrong_guess_identity"), default=0,
+    )
+    rejected_since_proposal = rejection_revision > sess.proposal_revision
+    if fingerprint == sess.proposal_fingerprint and not rejected_since_proposal:
+        return []
+    if sess.proposal_calls >= _LLM_NAMES_MAX_PER_SESSION:
+        return []
+    if (sess.proposal_turn >= 0
+            and sess.turn - sess.proposal_turn < _LLM_NAMES_COOLDOWN_TURNS
+            and not rejected_since_proposal):
+        return []
+    ranked = sess.posterior()
+    broad = not ranked or (sess.turn >= _BROAD_POOL_TURN
+                           and ranked[0][1] < _BROAD_POOL_POSTERIOR)
+    meaningful = False
+    for fact in working_memory(sess):
+        if int(fact.get("turn") or 0) <= sess.proposal_turn:
+            continue
+        qid = str(fact.get("question_id") or "")
+        question = QUESTIONS_BY_ID.get(qid) or {}
+        meaningful |= (
+            fact.get("source") in {"seed", "player_detail"}
+            or qid == MEDIUM_QID
+            or qid.startswith("series")
+            or float(question.get("prior", 0.5)) <= 0.2
+        )
+    if not broad and not rejected_since_proposal and not meaningful and not stuck():
+        return []
+    return facts
+
+
 def refresh_candidates(sess: GuessSession, limit: int = 12, initial: bool = False) -> int:
     with timing.span("search"):
         return _refresh_candidates(sess, limit, initial)
@@ -374,9 +426,10 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
     real prose and a popularity number); DuckDuckGo fills remaining slots
     inside ``find_candidates``. Once a series is known, ``pin`` keeps that
     work in every template group, next to the rare visual traits from the seed.
-    Button-only facts stay off the name-search loops and top up from the
-    popular pool. ``find_candidates`` still name-searches a coverage cluster
-    on that path, so a prosthetic-and-blonde answer asks for Edward Elric.
+    Broad button-only facts stay off conventional name-search loops and top
+    up from the popular pool. The bounded proposal worker may use those button
+    facts as hypotheses, while ``find_candidates`` still name-searches a
+    coverage cluster, so a prosthetic-and-blonde answer can find Edward Elric.
     """
     if not ONLINE:
         return 0
@@ -415,8 +468,26 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
             rewritten = _llm_queries(sess, medium, stuck)
             if initial:
                 rewritten = None
+            hypotheses = _hypothesis_facts(sess, stuck)
+        with timing.span("search.llm_names_background"):
+            proposal_hits, proposal_meta = sources.take_hypothesis_candidates(sess.id)
+            if proposal_meta:
+                sess.proposal_pending = False
+                stale = int(proposal_meta.get("evidence_revision", -1)) != sess.evidence_revision
+                timing.note(proposal_stale=stale)
+            raws.extend(proposal_hits)
+            if hypotheses and sources._llm_names_start(
+                sess.id, hypotheses, medium, sess.evidence_revision,
+            ):
+                sess.proposal_calls += 1
+                sess.proposal_fingerprint = hashlib.sha256(
+                    "\n".join(hypotheses).encode("utf-8")
+                ).hexdigest()
+                sess.proposal_revision = sess.evidence_revision
+                sess.proposal_turn = sess.turn
+                sess.proposal_pending = True
         with timing.span("search.fetch"):
-            raws = sources.find_candidates(
+            found = sources.find_candidates(
                 terms,
                 medium_hint=medium,
                 limit=limit * 2 if initial else limit,
@@ -432,7 +503,9 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
                 pool_size=len(sess.alive_candidates()),
                 gemini_inline=_gemini_inline(sess),
                 pin=anchor or None,
+                hypothesis_facts=None,
             )
+            raws.extend(found)
     except Exception as exc:  # noqa: BLE001 - search is best effort
         sess.notes.append(f"search failed: {exc}")
         if not raws:
@@ -442,6 +515,7 @@ def _refresh_candidates(sess: GuessSession, limit: int, initial: bool) -> int:
         if added and sess.evidence:
             _rescore_candidates(sess)
     timing.note(new=added)
+    sess.proposal_pending = sources.background_status(sess.id)["llm_names"]
     return added
 
 
@@ -867,6 +941,24 @@ def _focus_split_ids(sess: GuessSession) -> list[str]:
     return _splitting_look_ids(_pin_cast(sess.alive_candidates(), franchise))
 
 
+# "Which series?" is pinned from this turn once one unoffered series holds at
+# least this much posterior. Tifa's round surfaced a Final Fantasy cluster and
+# information gain never asked; earlier, a diffuse pool gives a poor chip list.
+SERIES_PIN_TURN = 6
+_SERIES_PIN_MASS = 0.35
+
+
+def _series_pin_id(sess: GuessSession) -> str:
+    """``series`` / ``series_2`` when one franchise has gathered the mass, else ""."""
+    if sess.turn < SERIES_PIN_TURN:
+        return ""
+    groups = _series_groups(sess)
+    if not groups or len(groups) < 2 or groups[0]["weight"] < _SERIES_PIN_MASS:
+        return ""
+    asked = any(a["qid"].startswith("series") for a in sess.asked)
+    return "series_2" if asked else "series"
+
+
 def _pinned_question_ids(sess: GuessSession) -> list[str]:
     """Named looks not already enriched, plus cast-splitting questions.
 
@@ -876,7 +968,8 @@ def _pinned_question_ids(sess: GuessSession) -> list[str]:
     wings and horns too, so information gain never reached a prosthetic or
     animal ears. Unnamed kit questions stay in that ranking. A look that
     splits the leader's cast is still pinned, with or without a series chip,
-    or the wolf questions lose the race to the guess.
+    or the wolf questions lose the race to the guess. "Which series?" leads
+    once one unoffered franchise holds enough posterior mass.
     """
     evidenced = _settled_ids(sess)
     ids: list[str] = []
@@ -887,6 +980,9 @@ def _pinned_question_ids(sess: GuessSession) -> list[str]:
             return
         ids.append(qid)
 
+    series_qid = _series_pin_id(sess)
+    if series_qid:
+        add(series_qid)
     for text in _free_text(sess):
         for qid in appearance_question_ids(text):
             add(qid)
@@ -925,6 +1021,18 @@ def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
     that enrich did not record (two colours in one sentence) are still pulled
     forward. A series lock does not force the rest of the angel kit.
     """
+    pins, rest = _ranked_questions(sess)
+    return (pins + rest)[:CHOICE_WIDTH]
+
+
+def _ranked_questions(
+    sess: GuessSession,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(pins, rest)``: pinned questions in pin order, the rest by heuristic gain.
+
+    Split so ``_pick_question`` can re-rank only the unpinned questions with
+    Laya's lookahead. Pins encode measured misses and keep their priority.
+    """
     asked = sess.asked_ids()
     settled = sess.settled_categories()
     evidenced = _settled_ids(sess)
@@ -944,7 +1052,7 @@ def candidate_questions(sess: GuessSession) -> list[dict[str, Any]]:
     # Keep the seed's own order (hair, halo, wings), not the info-gain order.
     pins.sort(key=lambda q: order.index(q["id"]))
     rest = [q for q in pool if q["id"] not in pin_ids]
-    return (pins + rest)[:CHOICE_WIDTH]
+    return pins, rest
 
 
 # Round-level calls share one 512-token sequence. ``laya.common.build_sequence``
@@ -989,16 +1097,13 @@ def _noul_head_tokens(instructions: str, criteria: dict[str, str]) -> int:
 
 
 def _shared_state_room() -> int:
-    """State tokens left for ``pool_fits`` and ``ready_to_guess``.
-
-    The tighter of those two heads wins. Per-candidate ``match`` is its own
-    sequence and is not this budget.
-    """
-    heads = [
-        _noul_head_tokens(spec["instructions"], spec["criteria"])
-        for spec in (_POOL_FITS["pool_fits"], _READY_TO_GUESS["ready_to_guess"])
+    """State-token room shared by readiness and pool-fit questions."""
+    questions = [
+        {"id": key, "kind": "yesno", **spec}
+        for group in (_POOL_FITS, _READY_TO_GUESS) for key, spec in group.items()
     ]
-    return max(0, laya_client.MAX_LEN - max(heads) - 1)
+    return laya_context.state_room(
+        questions, laya_client.MAX_LEN, laya_client.HEAD_MAX_LEN, laya_client.tokenizer())
 
 
 def _prefix_by_tokens(text: str, room: int) -> str:
@@ -1052,12 +1157,21 @@ def _answered_trait_pack(sess: GuessSession) -> dict[str, Any]:
     generated prose as identity evidence.
     """
     rows: list[list[Any]] = []
+    metadata: dict[str, dict[str, Any]] = {}
     for question, answer in sess.evidence.values():
         score = _trait_score(question, answer)
         if score is None:
             continue
-        rows.append([question["id"], answer, score])
-    return {"fields": list(_TRAIT_FIELDS), "rows": rows}
+        qid = str(question["id"])
+        rows.append([qid, answer, score])
+        metadata[qid] = {
+            "fact_id": question.get("fact_id") or f"{question.get('source', 'button')}:{qid}",
+            "source": question.get("source", "button"),
+            "turn": question.get("turn", 0),
+            "category": question.get("category", ""),
+            "tags": [*(question.get("tags_true") or []), *(question.get("tags_false") or [])],
+        }
+    return {"fields": list(_TRAIT_FIELDS), "rows": rows, "_meta": metadata}
 
 
 def _trait_signature(state: dict[str, Any]) -> list[tuple[str, str, float]]:
@@ -1091,23 +1205,103 @@ def _laya_state(sess: GuessSession, candidates: list[Candidate]) -> dict[str, An
     history first. Per-candidate ``match`` carries the same rows ahead of
     that candidate's profile.
     """
+    pack = _answered_trait_pack(sess)
     facts = sess.constraints[-_LAYA_ROUND_FACTS:] or ["nothing confirmed yet"]
     history = sess.history()[-_LAYA_ROUND_HISTORY:] or [
         {"question": "none yet", "answer": "", "detail": ""},
     ]
+    question_heads = [
+        {"id": key, "kind": "yesno", **spec}
+        for group in (_POOL_FITS, _READY_TO_GUESS) for key, spec in group.items()
+    ]
+    memory_facts, choices = _working_context(sess, through_turn=sess.turn)
+    profile_question = {
+        "text": "character identity and profile fit",
+        "instructions": "Does this character fit the facts?",
+        "criteria": {},
+    }
+    protected = {}
     state = {
-        "answered_traits": _answered_trait_pack(sess),
+        "answered_traits": {"fields": pack["fields"], "rows": pack["rows"]},
         "goal": GOAL,
-        "characters": {c.name: c.profile(budget=_LAYA_ROUND_PROFILE) for c in candidates},
+        "characters": {
+            c.name: laya_context.candidate_profile(c, profile_question, memory_facts)
+            for c in candidates
+        },
         "confirmed_facts": facts,
         "answer_history": history,
         "questions_asked": sess.turn,
+        "working_facts": memory_facts,
+        "choice_context": choices,
     }
-    if _traits_surviving_window(state) != _trait_signature(state):
-        # Still truncation: readiness and pool_fits would judge without
-        # those answers. Do not raise — the turn has to keep playing.
-        timing.note(trait_window="truncated")
-    return state
+    for candidate in candidates:
+        series = f" ({candidate.series})" if candidate.series else ""
+        protected[candidate.name] = f"{candidate.name}{series} [{candidate.medium}]."
+    context = laya_context.build_bounded_context(
+        state, question_heads, max_len=laya_client.MAX_LEN,
+        head_max_len=laya_client.HEAD_MAX_LEN, tokenizer=laya_client.tokenizer(),
+        row_meta=pack.get("_meta"),
+        row_identity={qid: str(meta.get("fact_id") or qid)
+                      for qid, meta in pack.get("_meta", {}).items()},
+        working_identity={str(fact.get("id") or ""): str(fact.get("id") or "")
+                          for fact in memory_facts},
+        protected_profiles=protected,
+        state_fingerprint_context=_laya_model_fingerprint(),
+    )
+    _record_context(sess, "shared", context)
+    if context.omitted_fact_ids:
+        timing.note(trait_window="bounded", omitted=len(context.omitted_fact_ids))
+    return context.state
+
+
+def _laya_model_fingerprint() -> dict[str, Any]:
+    """Identify the model and token limits used to build a cached judgment."""
+    return {
+        "model": laya_client.MODEL_ID,
+        "subfolder": laya_client.SUBFOLDER,
+        "max_len": laya_client.MAX_LEN,
+        "head_max_len": laya_client.HEAD_MAX_LEN,
+    }
+
+
+def _working_context(
+    sess: GuessSession, *, through_turn: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ordered typed/rejection facts and series choices available by a turn."""
+    facts: list[dict[str, Any]] = []
+    choices: list[dict[str, Any]] = []
+    for fact in working_memory(sess):
+        if int(fact.get("turn") or 0) > through_turn:
+            continue
+        source = fact.get("source")
+        qid = str(fact.get("question_id") or "")
+        if source in {"seed", "player_detail", "rejection"}:
+            facts.append({
+                "id": fact["fact_id"], "value": fact["value"],
+                "polarity": fact["polarity"], "source": source,
+                "turn": fact["turn"],
+            })
+        if source == "button" and qid.startswith("series"):
+            choices.append({
+                "id": fact["fact_id"], "question_id": qid,
+                "answer": fact["answer"], "value": fact["value"],
+                "polarity": fact["polarity"], "source": source,
+                "turn": fact["turn"],
+                "offered": [option["label"] for option in fact.get("offered", [])],
+            })
+    return facts, choices
+
+
+def _record_context(
+    sess: GuessSession, role: str, context: laya_context.BoundedContext,
+) -> None:
+    """Persist the included and omitted fact IDs for the latest Laya input role."""
+    sess.context_log[role] = {
+        "turn": sess.turn,
+        "fingerprint": context.state_fingerprint,
+        "included_fact_ids": list(context.included_fact_ids),
+        "omitted_fact_ids": list(context.omitted_fact_ids),
+    }
 
 
 def _pick_question(sess: GuessSession) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -1118,15 +1312,190 @@ def _pick_question(sess: GuessSession) -> tuple[dict[str, Any], dict[str, Any] |
     was not really choosing, and the entropy ordering underneath was doing all
     the work. Expected information gain decides; Laya is spent where it is
     actually good, on judging candidates and on readiness.
+
+    That gain used to come from tag heuristics alone, which cannot see what
+    Laya knows about a thin profile. Unpinned questions are now re-ranked by
+    ``_lookahead_eig``: Laya's own match likelihoods over the top of the pool
+    (BED-LLM's prior x likelihood estimate). Pins keep their priority, and
+    without Laya the heuristic order stands. ``sess.last_eig`` records the
+    best gain for the exhausted-gain guess gate.
     """
     with timing.span("pick.rank"):
-        options = candidate_questions(sess)
-    if not options:
+        pins, rest = _ranked_questions(sess)
+    sess.last_eig = None
+    if not pins and not rest:
         return {}, None
+    if pins:
+        chosen = pins[0]
+    else:
+        shortlist = rest[:CHOICE_WIDTH]
+        chosen = shortlist[0]
+        with timing.span("pick.eig"):
+            scored = _lookahead_eig(sess, shortlist)
+        if scored is not None:
+            gains, mass = scored
+            # ``max`` keeps the first of equal gains: heuristic order breaks ties.
+            best = max(range(len(shortlist)), key=gains.__getitem__)
+            chosen = shortlist[best]
+            if mass >= _EIG_COVERAGE:
+                sess.last_eig = gains[best]
+            timing.note(eig=round(gains[best], 3))
     answers = laya_client.ask(_laya_state(sess, sess.scoring_pool()), _READY_TO_GUESS)
     if answers:
         sess.laya_used = True
-    return options[0], answers
+    return chosen, answers
+
+
+# Top-posterior candidates Laya judges before each pick: one forward pass
+# each, every shortlisted yes/no in the same call (~16 ms apiece on an L4).
+# On a CPU box each pass is closer to a second; 0 turns the lookahead off.
+EIG_CANDIDATES = int(os.getenv("WAIFU_NEKOMINI_EIG_CANDIDATES", "8"))
+# Best lookahead gain under this many bits: no shortlisted question can move
+# the top of the pool, so asking more only spends turns.
+EIG_EXHAUSTED = 0.05
+# The lookahead speaks for the pool only when its candidates hold this mass.
+_EIG_COVERAGE = 0.8
+# An exhausted gain still does not name a leader this improbable.
+_EIG_GUESS_POSTERIOR = 0.3
+
+
+def _row_signature(pack: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
+    """Hashable form of an answered-trait pack's rows."""
+    return tuple(tuple(row) for row in pack.get("rows") or [])
+
+
+def _promote_lookahead(sess: GuessSession, question: dict[str, Any]) -> None:
+    """Move still-valid lookahead judgments for ``question`` into ``match_cache``.
+
+    Valid means judged under exactly the rows ``_rescore_candidates`` will
+    pass for this question now. The picked question's scoring is then free;
+    a stale lookahead (other answers landed since) is dropped, not reused.
+    """
+    qid = question.get("id")
+    if not qid or is_choice(question) or question.get("clues") or question.get("soft_chip"):
+        return
+    prior = _prior_trait_pack(sess, qid)
+    current = _row_signature(prior)
+    for key in [k for k in sess.lookahead if k[1] == qid]:
+        rows, p = sess.lookahead.pop(key)
+        fingerprint = sess.lookahead_fingerprints.pop(key, "")
+        candidate = sess.by_id(key[0])
+        if candidate is None or rows != current or not fingerprint or key in sess.match_cache:
+            continue
+        context = _candidate_context(candidate, question, prior, sess)
+        if fingerprint == context.input_fingerprint(question):
+            sess.match_cache[key] = p
+            sess.match_fingerprints[key] = fingerprint
+
+
+def _lookahead_likelihood(
+    sess: GuessSession, question: dict[str, Any], cand: Candidate,
+    rows: tuple[tuple[Any, ...], ...],
+    context: laya_context.BoundedContext | None = None,
+) -> float:
+    """P(yes) for a question not yet asked, with the same precedence as rescoring.
+
+    Profile text first (a stated visual), then a lookahead judgment made
+    under ``rows`` (calibrated as rescoring will), then the heuristic capped
+    to [0.4, 0.6].
+    """
+    visual = _profile_likelihood(question, cand)
+    if visual is not None:
+        return visual
+    judged = sess.lookahead.get((cand.id, question["id"]))
+    fingerprint = sess.lookahead_fingerprints.get((cand.id, question["id"]))
+    if (judged is not None and judged[0] == rows
+            and (context is None or fingerprint == context.input_fingerprint(question))):
+        return _calibrated_noul(question, cand, judged[1])
+    return min(0.6, max(0.4, _tag_match(question, cand)))
+
+
+def _lookahead_eig(
+    sess: GuessSession, questions: list[dict[str, Any]],
+) -> tuple[list[float], float] | None:
+    """Laya-scored information gain per question, and the posterior mass behind it.
+
+    The top ``EIG_CANDIDATES`` by posterior are renormalised. Each one gets a
+    single Laya call carrying every yes/no it has no fresh judgment for.
+    Gain is H(sum w p) - sum w H(p), so a question Laya is unsure about for
+    every candidate scores low even when tags make it look like a split.
+    Choice questions keep ``_split_quality`` over the same weights. Returns
+    None when Laya judged fewer than two candidates. ``eig_calls`` and
+    ``eig_qs`` (passes, and questions packed into them) go on the timing line:
+    a pick measured ~750 ms against ~130 ms expected, and the ``laya.eig``
+    span alone cannot say whether passes or their width cost it.
+    """
+    if EIG_CANDIDATES < 2 or not questions:
+        return None
+    ranked = sess.posterior()[:EIG_CANDIDATES]
+    mass = sum(p for _c, p in ranked)
+    if len(ranked) < 2 or mass <= 0.0:
+        return None
+    weights = [(c, p / mass) for c, p in ranked]
+    yesno = [q for q in questions if not is_choice(q) and not q.get("clues")]
+    if not yesno:
+        return [_split_quality(question, weights) for question in questions], mass
+    prior = _answered_trait_pack(sess)
+    rows = _row_signature(prior)
+    judged = 0
+    calls = packed = 0
+    candidate_contexts: dict[str, laya_context.BoundedContext] = {}
+    for cand, _w in weights:
+        context = _candidate_context(cand, yesno[0], prior, sess, yesno)
+        candidate_contexts[cand.id] = context
+        _record_context(sess, "lookahead", context)
+        missing = []
+        for q in yesno:
+            key = (cand.id, q["id"])
+            cached = sess.lookahead.get(key)
+            valid = (cached is not None and cached[0] == rows
+                     and sess.lookahead_fingerprints.get(key) == context.input_fingerprint(q))
+            if not valid:
+                missing.append(q)
+        if not missing:
+            judged += 1
+            continue
+        calls += 1
+        packed += len(missing)
+        # The first key names the timing span ("laya.eig"); the rest follow it.
+        keyed = {("eig" if i == 0 else f"eig_{i}"): q for i, q in enumerate(missing)}
+        answers = laya_client.ask(
+            context.state,
+            {
+                key: {
+                    "type": "noul",
+                    "instructions": q["instructions"],
+                    "criteria": q.get("criteria") or noul_criteria(q["instructions"]),
+                }
+                for key, q in keyed.items()
+            },
+        )
+        got = False
+        for key, q in keyed.items():
+            try:
+                p = float(((answers or {}).get(key) or {})["noul"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(p) and 0.0 <= p <= 1.0:
+                sess.lookahead[(cand.id, q["id"])] = (rows, p)
+                sess.lookahead_fingerprints[(cand.id, q["id"])] = context.input_fingerprint(q)
+                got = True
+        judged += got
+    timing.note(eig_calls=calls, eig_qs=packed)
+    if judged < 2:
+        return None
+    sess.laya_used = True
+    gains: list[float] = []
+    for q in questions:
+        if is_choice(q) or q.get("clues"):
+            gains.append(_split_quality(q, weights))
+            continue
+        preds = [(_lookahead_likelihood(sess, q, c, rows, candidate_contexts.get(c.id)), w)
+                 for c, w in weights]
+        p_yes = sum(p * w for p, w in preds)
+        gains.append(max(0.0, _binary_entropy(p_yes)
+                         - sum(w * _binary_entropy(p) for p, w in preds)))
+    return gains, mass
 
 
 # --- evidence ---------------------------------------------------------
@@ -1167,9 +1536,72 @@ def _tag_match(question: dict[str, Any], cand: Candidate) -> float:
     return 0.5
 
 
+# How much of Laya's yes/no drift from the base rate to keep when the profile
+# never mentions the trait. Measured on real rows: "has a halo" scored
+# 0.63-0.73 on Makima/2B/Tifa (prior 0.05), so every "no" cost the target
+# about a nat while described rivals paid nothing.
+SILENT_WEIGHT = float(os.getenv("WAIFU_NEKOMINI_SILENT_WEIGHT", "0.3"))
+# A Laya choice distribution whose top option is below this is a silent
+# profile: measured <= 0.40 with no appearance text, 0.97 when it is stated.
+CHOICE_SILENT_MAX = float(os.getenv("WAIFU_NEKOMINI_CHOICE_SILENT_MAX", "0.5"))
+
+
+def _grounded(question: dict[str, Any], cand: Candidate) -> bool:
+    """Whether the profile mentions this trait at all (a tag or a whole word).
+
+    Tags are mined with the shared ``TRAIT_PATTERNS`` vocabulary, so a tag
+    covers synonyms ("android" tags ``robot``). Noisy tags are fine here:
+    they only decide whether Laya's judgment is trusted, not the answer.
+    """
+    slugs = set(question.get("tags_true") or ()) | set(question.get("tags_false") or ())
+    if slugs & set(cand.tags):
+        return True
+    blurb = (cand.blurb or "").lower()
+    return any(re.search(r"\b" + re.escape(t.replace("-", " ")) + r"\b", blurb)
+               for t in question.get("tags_true") or ())
+
+
+def _calibrated_noul(question: dict[str, Any], cand: Candidate, p: float) -> float:
+    """Laya's P(yes), pulled toward the question's base rate on a silent profile.
+
+    A profile that never mentions the trait says nothing either way, but the
+    raw noul drifted far from the prior (``hair_long`` 0.18-0.27 against 0.40)
+    and the four missed targets lost 0.4-0.6 per "no" answer to described
+    rivals. ``WAIFU_NEKOMINI_SILENT_WEIGHT=1`` restores the raw noul.
+    """
+    if _grounded(question, cand):
+        return p
+    prior = float(question.get("prior", 0.5))
+    return prior + SILENT_WEIGHT * (p - prior)
+
+
+def _silent_choice(question: dict[str, Any], cand: Candidate) -> dict[str, float]:
+    """Option distribution for a profile that does not state the trait.
+
+    Base rates from the bank's option priors (uniform when an option has
+    none), with the ``_tag_choice`` nudge for a tag or blurb hit. Laya's flat
+    answer on such a profile was biased, not uniform: Tifa's black hair got
+    0.06 with "pink" on top.
+    """
+    options = question["options"]
+    priors = [float(o.get("prior") or 0.0) for o in options.values()]
+    base = priors if all(p > 0.0 for p in priors) else [1.0] * len(priors)
+    nudge = _tag_choice(question, cand)
+    flat = 1.0 / len(options)
+    weights = {k: b * (nudge[k] / flat) for k, b in zip(options, base)}
+    total = sum(weights.values())
+    return {k: w / total for k, w in weights.items()}
+
+
 def _is_series_question(question: dict[str, Any]) -> bool:
     """Whether ``question`` is a "Which series?" question (its options carry keys)."""
     return any("series_key" in o for o in (question.get("options") or {}).values())
+
+
+# Source placeholders for "series unknown" (``Candidate.public`` hides them).
+_UNKNOWN_SERIES = {"", "Unknown", "Web result"}
+# "Another series" for a row with no series that names no listed work.
+_UNKNOWN_SERIES_OTHER = 0.6
 
 
 def _known_choice(question: dict[str, Any], cand: Candidate) -> dict[str, float] | None:
@@ -1177,8 +1609,10 @@ def _known_choice(question: dict[str, Any], cand: Candidate) -> dict[str, float]
 
     Medium question: a known medium puts most of the mass on its own option,
     a little on crossover options (movie/TV). Series question: a known series puts 0.9 on its option, or on
-    "Another series" when it is not listed. Either way no model call is
-    needed; candidates without the data go to Laya instead.
+    "Another series" when it is not listed. An unknown series goes to a
+    listed work the name or blurb names, else 0.6 on "Another series"; the
+    series question never reaches Laya. Candidates without a known medium
+    go to Laya instead.
     """
     options = list(question.get("options") or {})
     if not options:
@@ -1197,16 +1631,25 @@ def _known_choice(question: dict[str, Any], cand: Candidate) -> dict[str, float]
         dist.update({k: 0.16 / len(cross) for k in cross})
         dist.update({k: 0.04 / len(rest) for k in rest})
         return dist
+    on, off = 0.9, 0.1
     if _is_series_question(question):
-        key = series_key(cand.series)
-        if not key:
-            return None
-        hits = [k for k, o in question["options"].items()
-                if same_series_key(key, o.get("series_key", ""))][:1] or ["other"]
+        key = "" if cand.series in _UNKNOWN_SERIES else series_key(cand.series)
+        if key:
+            hits = [k for k, o in question["options"].items()
+                    if same_series_key(key, o.get("series_key", ""))][:1] or ["other"]
+        else:
+            # No series on record (a DuckDuckGo row, say). Laya guessed one
+            # from the snippet and gave Megumin 0.035 on "Another series".
+            # A listed work the page names still wins; otherwise the options
+            # are other candidates' series, so "other" is only likely.
+            text = f"{cand.name} {cand.blurb}"
+            hits = [k for k, o in question["options"].items()
+                    if o.get("fact") and web_search.franchise_mentioned(o["fact"], text)][:1]
+            if not hits:
+                hits, on, off = ["other"], _UNKNOWN_SERIES_OTHER, 1.0 - _UNKNOWN_SERIES_OTHER
     else:
         return None
     rest = [k for k in options if k not in hits]
-    on, off = 0.9, 0.1
     if not rest:
         return {k: 1.0 / len(hits) for k in hits}
     dist = {k: on / len(hits) for k in hits}
@@ -1324,6 +1767,28 @@ def _series_question(sess: GuessSession) -> dict[str, Any] | None:
     second time only after "Another series", without the series already
     offered. Needs at least two series to be worth asking.
     """
+    groups = _series_groups(sess)
+    if groups is None or len(groups) < 2:
+        return None
+    series_asked = [a for a in sess.asked if a["qid"].startswith("series")]
+    picked = [(g["key"], max(g["labels"], key=g["labels"].get))
+              for g in groups[:MAX_SERIES_OPTIONS]]
+    typed = web_search.franchise_label(" ".join(_free_text(sess)))
+    if typed:
+        key = series_key(typed)
+        if key and not any(same_series_key(key, k) for k, _label in picked):
+            picked = [(key, typed), *picked[: MAX_SERIES_OPTIONS - 1]]
+    return series_question("series" if not series_asked else "series_2", picked)
+
+
+def _series_groups(sess: GuessSession) -> list[dict[str, Any]] | None:
+    """Unoffered series groups, heaviest posterior first, or None when not askable.
+
+    None means the series question is spent: a series is confirmed, it was
+    asked twice, or the last ask was answered with a listed series. Each
+    group is ``{"key", "weight", "labels"}``; a series the player typed
+    leads with zero weight when search has not surfaced it yet.
+    """
     series_asked = [a for a in sess.asked if a["qid"].startswith("series")]
     if _confirmed_series(sess) or len(series_asked) >= 2:
         return None
@@ -1352,16 +1817,9 @@ def _series_question(sess: GuessSession) -> dict[str, Any] | None:
         if key and not any(same_series_key(key, g["key"]) for g in groups) \
                 and not any(same_series_key(key, k) for k in offered):
             groups.insert(0, {"key": key, "weight": 0.0, "labels": {typed: 1}})
-    if len(groups) < 2:
-        return None
+    # Stable sort: a typed series with no hits keeps its lead among ties.
     groups.sort(key=lambda g: g["weight"], reverse=True)
-    picked = [(g["key"], max(g["labels"], key=g["labels"].get))
-              for g in groups[:MAX_SERIES_OPTIONS]]
-    if typed:
-        key = series_key(typed)
-        if key and not any(same_series_key(key, k) for k, _label in picked):
-            picked = [(key, typed), *picked[: MAX_SERIES_OPTIONS - 1]]
-    return series_question("series" if not series_asked else "series_2", picked)
+    return groups
 
 
 def _tag_choice(question: dict[str, Any], cand: Candidate,
@@ -1385,20 +1843,71 @@ def _tag_choice(question: dict[str, Any], cand: Candidate,
 
 def _candidate_laya_state(
     cand: Candidate, question: dict[str, Any], prior: dict[str, Any] | None,
+    sess: GuessSession | None = None,
+    head_questions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """One candidate's match state: durable rows, then the profile.
+    """Bound one candidate's match state to the question and prior evidence."""
+    context = _candidate_context(cand, question, prior, sess, head_questions)
+    if sess is not None:
+        _record_context(sess, "match", context)
+    return context.state
 
-    The question being scored is omitted from ``prior``. Including its own
-    answer would leak the label into the judgment. A long profile follows
-    the rows, so the window cuts the blurb rather than the traits.
-    """
+
+def _candidate_context(
+    cand: Candidate, question: dict[str, Any], prior: dict[str, Any] | None,
+    sess: GuessSession | None, head_questions: list[dict[str, Any]] | None = None,
+) -> laya_context.BoundedContext:
+    """Build bounded candidate input without the question's own answer."""
+    pack = prior or {"fields": list(_TRAIT_FIELDS), "rows": [], "_meta": {}}
+    turn = int(question.get("turn") or (sess.turn + 1 if sess is not None else 0))
+    memory_facts: list[dict[str, Any]] = []
+    choices: list[dict[str, Any]] = []
+    if sess is not None:
+        memory_facts, all_choices = _working_context(sess, through_turn=turn - 1)
+        choices = [choice for choice in all_choices if int(choice.get("turn") or 0) < turn]
+    profile_question = dict(question)
+    if head_questions and len(head_questions) > 1:
+        profile_question["text"] = " ".join(
+            str(item.get("text") or "") for item in head_questions)
+        profile_question["instructions"] = " ".join(
+            str(item.get("instructions") or "") for item in head_questions)
+        profile_question["tags_true"] = list(dict.fromkeys(
+            tag for item in head_questions for tag in item.get("tags_true", [])))
+        profile_question["tags_false"] = list(dict.fromkeys(
+            tag for item in head_questions for tag in item.get("tags_false", [])))
+        profile_question["criteria"] = {
+            key: value for item in head_questions
+            for key, value in (item.get("criteria") or {}).items()
+        }
+    profile = laya_context.candidate_profile(cand, profile_question, memory_facts)
+    identity = f"{cand.name}{f' ({cand.series})' if cand.series else ''} [{cand.medium}]."
     state: dict[str, Any] = {
-        "answered_traits": prior or {"fields": list(_TRAIT_FIELDS), "rows": []},
-        "candidate": cand.profile(),
+        "answered_traits": {
+            "fields": list(pack.get("fields") or _TRAIT_FIELDS),
+            "rows": [list(row) for row in pack.get("rows") or []],
+        },
+        "goal": GOAL,
+        "candidate": profile,
+        "working_facts": memory_facts,
+        "choice_context": choices,
     }
     if question.get("clues"):
         state["clues"] = question["clues"]
-    return state
+    metadata = pack.get("_meta") or {}
+    row_identity = {
+        str(row[0]): str(metadata.get(str(row[0]), {}).get("fact_id") or row[0])
+        for row in pack.get("rows") or []
+    }
+    context = laya_context.build_bounded_context(
+        state, head_questions or [question], max_len=laya_client.MAX_LEN,
+        head_max_len=laya_client.HEAD_MAX_LEN, tokenizer=laya_client.tokenizer(),
+        row_meta=metadata, row_identity=row_identity,
+        working_identity={str(fact.get("id") or ""): str(fact.get("id") or "")
+                          for fact in memory_facts},
+        protected_profiles={"candidate": identity},
+        state_fingerprint_context=_laya_model_fingerprint(),
+    )
+    return context
 
 
 def _prior_trait_pack(sess: GuessSession, skip_id: str) -> dict[str, Any]:
@@ -1410,17 +1919,23 @@ def _prior_trait_pack(sess: GuessSession, skip_id: str) -> dict[str, Any]:
     """
     pack = _answered_trait_pack(sess)
     earlier: list[list[Any]] = []
+    metadata: dict[str, dict[str, Any]] = {}
     for row in pack["rows"]:
         if row[0] == skip_id:
             break
         earlier.append(row)
+        if row[0] in pack.get("_meta", {}):
+            metadata[row[0]] = pack["_meta"][row[0]]
     pack["rows"] = earlier
+    pack["_meta"] = metadata
     return pack
 
 
 def _choice_probabilities(
     pool: list[Candidate], question: dict[str, Any],
     prior: dict[str, Any] | None = None,
+    sess: GuessSession | None = None,
+    contexts: dict[str, laya_context.BoundedContext] | None = None,
 ) -> dict[str, dict[str, float]]:
     """Option probabilities per candidate, one Laya ``choice`` call each.
 
@@ -1428,12 +1943,16 @@ def _choice_probabilities(
     candidates together. Answers that do not cover every option, or carry
     non-probabilities, are dropped so the heuristic takes over. Prior trait
     rows lead each state so a wide option head cannot cut them first.
+    Stale cache entries reuse the context built during fingerprint validation.
     """
     out: dict[str, dict[str, float]] = {}
     keys = list(question["options"])
     for c in pool:
+        context = (contexts or {}).get(c.id) or _candidate_context(c, question, prior, sess)
+        if sess is not None:
+            _record_context(sess, "choice", context)
         answers = laya_client.ask(
-            _candidate_laya_state(c, question, prior),
+            context.state,
             {
                 "match": {
                     "type": "choice",
@@ -1455,12 +1974,16 @@ def _choice_probabilities(
         if total <= 0.0:
             continue
         out[c.id] = {k: p / total for k, p in dist.items()}
+        if sess is not None:
+            sess.choice_fingerprints[(c.id, question["id"])] = context.input_fingerprint(question)
     return out
 
 
 def _match_probabilities(
     pool: list[Candidate], question: dict[str, Any],
     prior: dict[str, Any] | None = None,
+    sess: GuessSession | None = None,
+    contexts: dict[str, laya_context.BoundedContext] | None = None,
 ) -> dict[str, float]:
     """P(question is true) for each candidate, one Laya call per candidate.
 
@@ -1470,14 +1993,18 @@ def _match_probabilities(
     alike). Scoring each candidate against its own state separates them cleanly
     -- and is faster, because each sequence is short. Answered traits lead
     that state so the profile tail is what a tight head cuts.
+    Stale cache entries reuse the context built during fingerprint validation.
     """
     probs: dict[str, float] = {}
     # Explicit true/false option text beats Laya's generic "yes, the statement
     # holds" -- the model is scoring against a restatement of the real claim.
     criteria = question.get("criteria") or noul_criteria(question["instructions"])
     for c in pool:
+        context = (contexts or {}).get(c.id) or _candidate_context(c, question, prior, sess)
+        if sess is not None:
+            _record_context(sess, "match", context)
         answers = laya_client.ask(
-            _candidate_laya_state(c, question, prior),
+            context.state,
             {
                 "match": {
                     "type": "noul",
@@ -1493,7 +2020,30 @@ def _match_probabilities(
             continue
         if math.isfinite(p) and 0.0 <= p <= 1.0:
             probs[c.id] = p
+            if sess is not None:
+                sess.match_fingerprints[(c.id, question["id"])] = context.input_fingerprint(question)
     return probs
+
+
+def _invalidate_stale_judgments(
+    sess: GuessSession, candidates: list[Candidate], question: dict[str, Any],
+    prior: dict[str, Any], *, choice: bool,
+) -> dict[str, laya_context.BoundedContext]:
+    """Drop stale outputs and return built contexts for replacement judgments."""
+    cache = sess.choice_cache if choice else sess.match_cache
+    fingerprints = sess.choice_fingerprints if choice else sess.match_fingerprints
+    stale_contexts: dict[str, laya_context.BoundedContext] = {}
+    for candidate in candidates:
+        key = (candidate.id, question["id"])
+        old = fingerprints.get(key)
+        if key not in cache or not old:
+            continue
+        context = _candidate_context(candidate, question, prior, sess)
+        if old != context.input_fingerprint(question):
+            cache.pop(key, None)
+            fingerprints.pop(key, None)
+            stale_contexts[candidate.id] = context
+    return stale_contexts
 
 
 def _eliminate_by_medium(sess: GuessSession, question: dict[str, Any], answer: str) -> int:
@@ -1516,6 +2066,12 @@ def _eliminate_by_medium(sess: GuessSession, question: dict[str, Any], answer: s
         if cand.medium not in MEDIUM_VALUES:
             continue  # unknown medium: never eliminated
         if cand.medium not in accepts:
+            sess.exclusion_log.append({
+                "candidate_id": cand.id, "name": cand.name, "series": cand.series,
+                "reason": "medium_contradiction", "question_id": question["id"],
+                "answer": answer, "candidate_medium": cand.medium,
+                "accepted_media": sorted(accepts), "turn": sess.turn,
+            })
             cand.alive = False
             cand.logodds = -math.inf
             dropped += 1
@@ -1530,20 +2086,93 @@ def score_candidates(sess: GuessSession, question: dict[str, Any], answer: str) 
     elif not ANSWER_WEIGHT.get(answer, 0.0):
         return
     with _session_lock(sess), timing.span("score"):
-        sess.evidence[question["id"]] = (dict(question), answer)
+        normalized = dict(question)
+        normalized.setdefault("source", "inferred_chip" if question.get("soft_chip") else "button")
+        normalized.setdefault("turn", sess.turn)
+        normalized.setdefault("fact_id", f"{normalized['source']}:{question['id']}:{sess.turn}")
+        sess.evidence[question["id"]] = (normalized, answer)
+        _promote_lookahead(sess, question)
         _rescore_candidates(sess)
 
 
-def _apply_soft(cand: Candidate, p: float, deltas: list[float]) -> None:
-    """Add clamped log ``p`` to ``cand`` and record the step in ``deltas``.
+def _candidate_answer_likelihood(
+    sess: GuessSession, question: dict[str, Any], answer: str, cand: Candidate,
+) -> float:
+    """Return a calibrated answer likelihood, allowing sourced player details more weight."""
+    qid = str(question.get("id") or "")
+    if is_choice(question):
+        dist = _known_choice(question, cand)
+        if dist is None:
+            dist = sess.choice_cache.get((cand.id, qid))
+            if dist is not None and max(dist.values(), default=0.0) < CHOICE_SILENT_MAX:
+                dist = _silent_choice(question, cand)
+        dist = dist or _tag_choice(question, cand)
+        return float(dist.get(answer, 0.0))
+    if question.get("soft_chip"):
+        probability = chip_likelihood(qid, cand.blurb, cand.tags)
+        return probability if answer == "yes" else 1.0 - probability
+    if question.get("clues"):
+        requirements = _clue_requirements(str(question["clues"]))
+        if requirements:
+            covered = _prior_visual_requirements(sess, qid)
+            remaining = [requirement for requirement in requirements
+                         if requirement not in covered]
+            if not remaining:
+                return 0.5 if answer == "yes" else 0.5
+            probability = clue_requirements_likelihood(remaining, cand.blurb, cand.tags)
+            if probability is None:
+                probability = clue_overlap_likelihood(question["clues"], cand.blurb)
+                probability = min(0.6, max(0.4, probability))
+        else:
+            probability = clue_overlap_likelihood(question["clues"], cand.blurb)
+            # Only text submitted as a seed/detail can use the wider overlap
+            # spread. Legacy and synthetic clue rows have no provenance, so
+            # keep their weak heuristic evidence inside the calibrated band.
+            if question.get("source") not in {"seed", "player_detail"}:
+                probability = min(0.6, max(0.4, probability))
+        return probability if answer == "yes" else 1.0 - probability
+    probability = _profile_likelihood(question, cand)
+    if probability is None:
+        raw = sess.match_cache.get((cand.id, qid))
+        probability = (_calibrated_noul(question, cand, raw) if raw is not None
+                       else min(0.6, max(0.4, _tag_match(question, cand))))
+    return probability if answer == "yes" else 1.0 - probability
 
-    The clamp matches hard evidence. A template that returned 0 or 1 would
-    otherwise become an infinite log-odds wipe.
-    """
-    p = min(0.98, max(0.02, p))
-    delta = math.log(p)
-    cand.logodds += delta
-    deltas.append(delta)
+
+def _prior_visual_requirements(
+    sess: GuessSession, current_qid: str,
+) -> set[tuple[str, bool]]:
+    """Visual facts already scored from buttons or earlier typed details."""
+    covered: set[tuple[str, bool]] = set()
+    for qid, (question, answer) in sess.evidence.items():
+        if qid == current_qid:
+            continue
+        # A clue-covered enrich row only suppresses duplicate enrich scoring;
+        # it is not itself evidence that the visual clue has already been scored.
+        if question.get("clue_covered"):
+            continue
+        question_id = str(question.get("id") or qid)
+        if question_id in {"look_halo", "look_wings", "look_horns"}:
+            if answer in {"yes", "no"}:
+                covered.add((question_id.removeprefix("look_"), answer == "yes"))
+        elif question_id == "hair_color" and is_choice(question):
+            options = question.get("options") or {}
+            pink_offered = any(
+                "pink" in str(key).lower() or "pink" in str(option.get("label") or "").lower()
+                or "pink" in {str(tag).lower() for tag in option.get("tags") or []}
+                for key, option in options.items() if isinstance(option, dict)
+            )
+            if pink_offered and answer in options:
+                selected = options[answer]
+                selected_pink = (
+                    "pink" in str(answer).lower()
+                    or "pink" in str(selected.get("label") or "").lower()
+                    or "pink" in {str(tag).lower() for tag in selected.get("tags") or []}
+                )
+                covered.add(("pink", selected_pink))
+        elif question.get("clues"):
+            covered.update(_clue_requirements(str(question["clues"])))
+    return covered
 
 
 def _soft_spread_note(qid: str, answer: str, deltas: list[float]) -> str:
@@ -1575,6 +2204,10 @@ def _rescore_candidates(sess: GuessSession) -> None:
     separates a same-work pair the blurb did not, without writing tags.
     Soft cast (popularity, and a fame-only series lead) is then pulled back
     inside a series-split pin cast so it cannot undo that step.
+    Every term lands in ``sess.contrib`` too, so ``evidence_breakdown`` can
+    name the answer that sank a candidate. A profile silent on a trait is
+    scored near its base rate (``_calibrated_noul``, ``_silent_choice``), not
+    by Laya's drift on text that never mentions it.
     """
     sess.collapse_identities()
     for question, answer in sess.evidence.values():
@@ -1582,8 +2215,29 @@ def _rescore_candidates(sess: GuessSession) -> None:
     live = sess.alive_candidates()
     if not live:
         return
+    sess.contrib.clear()
+
+    def add(c: Candidate, qid: str, likelihood: float) -> None:
+        """Add bounded log-likelihood evidence and keep it for the miss report."""
+        is_detail = qid.startswith("clue_")
+        is_soft_no = (answer == "no" and not qid.startswith("guess_")) # and not identity
+
+        lower_bound = 0.18 if is_soft_no else 0.02
+        upper_bound = 0.98
+        clamped_p = min(upper_bound, max(lower_bound, likelihood))
+        
+        term = math.log(clamped_p)
+        if is_detail:
+            # Typed details scale smoothly with certainty, capped at 1.35x.
+            strength = min(1.0, abs(2.0 * clamped_p - 1.0))
+            term *= 1.0 + 0.35 * strength
+            
+        c.logodds += term
+        sess.contrib[(c.id, qid)] = sess.contrib.get((c.id, qid), 0.0) + term
+
     for c in live:
         c.logodds = popularity_prior(c.popularity)
+        sess.contrib[(c.id, "__prior__")] = c.logodds
     soft_notes: list[str] = []
     for qid, (question, answer) in sess.evidence.items():
         prior = _prior_trait_pack(sess, qid)
@@ -1596,7 +2250,9 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 continue
             deltas: list[float] = []
             for c in live:
-                _apply_soft(c, soft_enrich_likelihood(question, answer, c), deltas)
+                before_soft = c.logodds
+                add(c, qid, soft_enrich_likelihood(question, answer, c))
+                deltas.append(c.logodds - before_soft)
             note = _soft_spread_note(qid, answer, deltas)
             if note:
                 soft_notes.append(note)
@@ -1604,16 +2260,19 @@ def _rescore_candidates(sess: GuessSession) -> None:
         if is_choice(question):
             # Known medium/series is data, not a judgment: no model call.
             known = {c.id: d for c in live if (d := _known_choice(question, c))}
+            stale_contexts = _invalidate_stale_judgments(
+                sess, [c for c in live if c.id not in known], question, prior, choice=True,
+            )
             missing = [c for c in live
                        if c.id not in known and (c.id, qid) not in sess.choice_cache]
-            dists = _choice_probabilities(missing, question, prior)
+            dists = _choice_probabilities(
+                missing, question, prior, sess, contexts=stale_contexts,
+            )
             if dists:
                 sess.laya_used = True
                 sess.choice_cache.update({(cid, qid): d for cid, d in dists.items()})
             for c in live:
-                dist = (known.get(c.id) or sess.choice_cache.get((c.id, qid))
-                        or _tag_choice(question, c))
-                c.logodds += math.log(min(0.98, max(0.02, dist.get(answer, 0.0))))
+                add(c, qid, _candidate_answer_likelihood(sess, question, answer, c))
             continue
         # A typed chip is a nudge, not a model vote. Laya's noul on the raw
         # words ("angel", "white dress") came back near 0 for the whole pool
@@ -1626,7 +2285,9 @@ def _rescore_candidates(sess: GuessSession) -> None:
                 # falls, and a profile that simply lacks it stays near a half.
                 if answer != "yes":
                     p = 1.0 - p
-                _apply_soft(c, p, deltas)
+                before_soft = c.logodds
+                add(c, qid, p)
+                deltas.append(c.logodds - before_soft)
             note = _soft_spread_note(qid, answer, deltas)
             if note:
                 soft_notes.append(note)
@@ -1638,34 +2299,26 @@ def _rescore_candidates(sess: GuessSession) -> None:
         if question.get("clues"):
             deltas = []
             for c in live:
-                visual = _profile_likelihood(question, c)
-                if visual is None:
-                    visual = clue_overlap_likelihood(question["clues"], c.blurb)
-                likelihood = visual if answer == "yes" else 1.0 - visual
-                _apply_soft(c, likelihood, deltas)
+                before_soft = c.logodds
+                add(c, qid, _candidate_answer_likelihood(sess, question, answer, c))
+                deltas.append(c.logodds - before_soft)
             note = _soft_spread_note(qid, answer, deltas)
             if note:
                 soft_notes.append(note)
             continue
+        stale_contexts = _invalidate_stale_judgments(
+            sess, live, question, prior, choice=False,
+        )
         missing = [c for c in live if (c.id, qid) not in sess.match_cache]
-        probs = _match_probabilities(missing, question, prior)
+        probs = _match_probabilities(
+            missing, question, prior, sess, contexts=stale_contexts,
+        )
         if probs:
             sess.laya_used = True
             sess.match_cache.update({(cid, qid): p for cid, p in probs.items()})
         for c in live:
-            # Appearance text wins over a mushy noul for a stated visual
-            # combination. The cache still holds the model score so the
-            # guess gate can see that a judgment happened.
-            visual = _profile_likelihood(question, c)
-            p = sess.match_cache.get((c.id, qid))
-            if visual is not None:
-                p = visual
-            elif p is None:
-                # A failed model call must not make noisy tags stronger evidence
-                # than the model's typically modest confidence.
-                p = min(0.6, max(0.4, _tag_match(question, c)))
-            likelihood = p if answer == "yes" else 1.0 - p
-            c.logodds += math.log(min(0.98, max(0.02, likelihood)))
+            add(c, qid, _candidate_answer_likelihood(sess, question, answer, c))
+    before = {c.id: c.logodds for c in live}
     if soft_notes:
         # Spread from soft rows only, before look pins and fame bonuses.
         timing.note(soft_delta="+".join(soft_notes[:12]))
@@ -1676,6 +2329,40 @@ def _rescore_candidates(sess: GuessSession) -> None:
     # series-lead bonus, which is how Lawrence climbed back after tail=yes.
     _dampen_split_soft_cast(sess, live)
     _note_wolf_soft_cast(sess, live)
+    for c in live:
+        sess.contrib[(c.id, "__adjust__")] = c.logodds - before[c.id]
+
+
+def evidence_breakdown(
+    sess: GuessSession, cid: str,
+    contrib: dict[tuple[str, str], float] | None = None,
+) -> list[dict[str, Any]]:
+    """Each evidence row's log-odds for candidate ``cid``, most harmful first.
+
+    Rows are what the latest rescore added (or ``contrib``, a snapshot from
+    ``guess_log``): ``__prior__`` (popularity), one row per answered
+    question, and ``__adjust__`` (pins and identity priors). They sum to the
+    candidate's log-odds. Empty for an unknown or eliminated id, since
+    rejected rows are not rescored.
+    """
+    rows = []
+    for (owner, qid), term in (sess.contrib if contrib is None else contrib).items():
+        if owner != cid:
+            continue
+        answer = (sess.evidence.get(qid) or ({}, ""))[1]
+        rows.append({"qid": qid, "answer": answer, "logodds": round(term, 4)})
+    rows.sort(key=lambda row: row["logodds"])
+    return rows
+
+
+def _note_ranking(sess: GuessSession, qid: str, answer: str) -> None:
+    """Append the full posterior after this answer to ``sess.rank_log``.
+
+    The turn payload keeps only the top five, and the misses were targets
+    that sat below that, so their fall could not be traced.
+    """
+    ranked = [(c.id, c.name, round(p, 4)) for c, p in sess.posterior()]
+    sess.rank_log.append((sess.turn, qid, answer, ranked))
 
 
 def _protagonist_answer(sess: GuessSession) -> str:
@@ -1780,9 +2467,11 @@ def _yesno_likelihood(sess: GuessSession, question: dict[str, Any], cand: Candid
     p = sess.match_cache.get((cand.id, question["id"]))
     if visual is not None:
         p = visual
-    elif p is None:
+    elif p is not None:
+        p = _calibrated_noul(question, cand, p)
+    else:
         p = min(0.6, max(0.4, _tag_match(question, cand)))
-    return p if p is not None else 0.5
+    return p
 
 
 def _lift_title_royalty(
@@ -2052,7 +2741,7 @@ def _question_payload(sess: GuessSession, question: dict[str, Any]) -> dict[str,
         "category": question["category"],
         "kind": question.get("kind", "yesno"),
         "turn": sess.turn,
-        "max_turns": MAX_TURNS,
+        "max_turns": sess.turn_cap(),
     }
     if is_choice(question):
         out["options"] = [{"key": k, "label": o["label"]} for k, o in question["options"].items()]
@@ -2110,6 +2799,14 @@ def _guess_payload(sess: GuessSession) -> dict[str, Any]:
     _fill_portraits([cand])
     sess.stage = "guessing"
     sess.pending_guess = cand.id
+    sess.guess_log.append({
+        "id": cand.id,
+        "name": cand.name,
+        "turn": sess.turn,
+        "probability": round(prob, 4),
+        "contrib": dict(sess.contrib),
+        "ranked": [(c.id, c.name, round(p, 4)) for c, p in ranked],
+    })
     sess.guesses_made += 1
     return {
         "session_id": sess.id,
@@ -2123,21 +2820,15 @@ def _guess_payload(sess: GuessSession) -> dict[str, Any]:
 
 
 def _leader_support(sess: GuessSession, leader: Candidate) -> list[float]:
-    """How well each model judgment of ``leader`` agrees with the answers given."""
+    """How calibrated cached model judgments agree with the answers given."""
     support = []
     for qid, (question, answer) in sess.evidence.items():
         if is_choice(question):
-            # Scale-free support: 0.5 when the pick ties the candidate's best
-            # other option, so the same 0.6 bar applies as for yes/no.
-            dist = sess.choice_cache.get((leader.id, qid))
-            if dist:
-                p = dist.get(answer, 0.0)
-                other = max((v for k, v in dist.items() if k != answer), default=0.0)
-                support.append(p / (p + other) if p + other > 0.0 else 0.5)
+            if (leader.id, qid) in sess.choice_cache:
+                support.append(_candidate_answer_likelihood(sess, question, answer, leader))
             continue
-        p = sess.match_cache.get((leader.id, qid))
-        if p is not None:
-            support.append(p if answer == "yes" else 1.0 - p)
+        if (leader.id, qid) in sess.match_cache:
+            support.append(_candidate_answer_likelihood(sess, question, answer, leader))
     return support
 
 
@@ -2164,17 +2855,18 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
     must not guess. Past that bar, guess when the posterior clears
     ``GUESS_CONFIDENCE``, or when the same candidate has led for
     ``LEADER_STREAK`` checks at ``LEADER_POSTERIOR`` and ``LEADER_MARGIN``
-    ahead of the runner-up, or when Laya's ready_to_guess is confident and
-    the posterior is at least ``READY_MIN_POSTERIOR``. The turn cap guesses
-    even without that support. A still-split alias identity does not commit
+    ahead of the runner-up, or when Laya's lookahead gain is exhausted
+    (``EIG_EXHAUSTED``) over most of the pool's mass, or when Laya's
+    ready_to_guess is confident and the posterior is at least
+    ``READY_MIN_POSTERIOR``. ``turn_cap`` guesses even without that support. A still-split alias identity does not commit
     before the turn cap: two high-mass spellings of one person are not a guess.
     """
     sess.collapse_identities()
-    if _alias_split_blocks_guess(sess) and sess.turn < MAX_TURNS:
+    if _alias_split_blocks_guess(sess) and sess.turn < sess.turn_cap():
         return False
     ranked = sess.posterior()
     if not ranked:
-        return sess.turn >= MAX_TURNS
+        return sess.turn >= sess.turn_cap()
     leader, top_p = ranked[0]
     second = ranked[1][1] if len(ranked) > 1 else 0.0
     # Count this check toward the stable-leader streak only when the lead is
@@ -2183,7 +2875,7 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
         sess, leader.id,
         top_p >= LEADER_POSTERIOR and top_p - second >= LEADER_MARGIN,
     )
-    if sess.turn >= MAX_TURNS:
+    if sess.turn >= sess.turn_cap():
         return True
     # The posterior is conditional on what search happened to find. A lone hit
     # has probability 1 even when it contradicts every clue. Require independent
@@ -2197,6 +2889,11 @@ def _should_guess(sess: GuessSession, laya_answers: dict[str, Any] | None) -> bo
         return True
     if (top_p >= LEADER_POSTERIOR and top_p - second >= LEADER_MARGIN
             and sess.leader_streak >= max(1, LEADER_STREAK)):
+        return True
+    # Laya's lookahead found nothing left that separates the top of the pool.
+    # More questions cannot move it; a guess (and its recovery turns) can.
+    if (sess.last_eig is not None and sess.last_eig < EIG_EXHAUSTED
+            and top_p >= _EIG_GUESS_POSTERIOR):
         return True
     if laya_answers and top_p >= READY_MIN_POSTERIOR:
         ready = laya_answers.get("ready_to_guess") or {}
@@ -2232,8 +2929,9 @@ def _recovery_question(sess: GuessSession) -> dict[str, Any] | None:
     """One unasked trait that separates a rejected guess from the new leader.
 
     After Kyoko, the next commit used to be another Soryu spelling. A trait
-    the two answer differently is asked once. Returns None when the reject
-    was not a same-work miss, and clears the one-shot flag either way.
+    the two answer differently is asked once; failing that, the question
+    that best splits the new leader's same-work cluster. Returns None when
+    the reject was not a same-work miss, and clears the one-shot flag either way.
     """
     rejected_id = sess.recovery_from
     if not rejected_id:
@@ -2260,7 +2958,9 @@ def _recovery_question(sess: GuessSession) -> dict[str, Any] | None:
         right = _predicted_pole(question, leader)
         if left and right and left != right:
             return question
-    return None
+    # No explicit-tag pole split the pair. The leader's own cluster still may:
+    # after Arue was rejected, Yunyun and Megumin differ on hair colour.
+    return _cluster_split_question(sess, leader)
 
 
 def _emit_asking(sess: GuessSession, question: dict[str, Any]) -> dict[str, Any]:
@@ -2276,6 +2976,7 @@ def _emit_asking(sess: GuessSession, question: dict[str, Any]) -> dict[str, Any]
             "tags_false": question["tags_false"],
             "prior": question["prior"],
             "kind": question.get("kind", "yesno"),
+            "turn": sess.turn,
             "criteria": question.get("criteria"),
             "options": question.get("options"),
             "answer": None,
@@ -2303,8 +3004,10 @@ def _near_twin_question(sess: GuessSession) -> dict[str, Any] | None:
     still guesses: deferring there would hide the best name we have. The same
     leader/runner pair is deferred once. Skipping every series_split question
     already in evidence would also block a different pair later in the round.
+    With no rare look left, any trait that splits the same-work cluster is
+    asked instead (``_cluster_split_question``).
     """
-    if sess.turn >= MAX_TURNS:
+    if sess.turn >= sess.turn_cap():
         return None
     ranked = sess.posterior()
     if len(ranked) < 2 or ranked[1][1] < _NEAR_TWIN_MASS:
@@ -2326,7 +3029,70 @@ def _near_twin_question(sess: GuessSession) -> dict[str, Any] | None:
         if _candidate_has_trait(question, leader) != _candidate_has_trait(question, runner):
             sess.near_twin_pairs.add(pair)
             return question
-    return None
+    question = _cluster_split_question(sess, leader)
+    if question is not None:
+        sess.near_twin_pairs.add(pair)
+    return question
+
+
+# The same-work cluster read by ``_cluster_split_question``: the leader plus
+# at most three peers. A wider cluster pulls in extras nobody believes in.
+_CLUSTER_SIZE = 4
+# Minimum split entropy, in bits, for a cluster question. 0.6 bits is about a
+# 15/85 mass split: anything thinner mostly re-asks what the leader shows.
+_CLUSTER_MIN_BITS = 0.6
+
+
+def _binary_entropy(p: float) -> float:
+    """Entropy in bits of a yes/no answer that is yes with probability ``p``."""
+    if p <= 0.0 or p >= 1.0:
+        return 0.0
+    return -p * math.log2(p) - (1.0 - p) * math.log2(1.0 - p)
+
+
+def _cluster_split_question(sess: GuessSession, leader: Candidate) -> dict[str, Any] | None:
+    """An unasked yes/no that best splits the leader's same-work cluster, or None.
+
+    Rare looks never split the KonoSuba Crimson Demons (Arue, Yunyun,
+    Megumin), so near-twin defer did not fire and all three guesses went to
+    clan peers. Any bank trait, or a slug mined from only some of their
+    blurbs, can split them. Presence comes from ``_candidate_has_trait`` and
+    the split is scored on the cluster's own renormalised posterior.
+    """
+    cluster: list[tuple[Candidate, float]] = []
+    for cand, prob in sess.posterior():
+        if cand.id == leader.id or _same_work(leader, cand):
+            cluster.append((cand, prob))
+        if len(cluster) >= _CLUSTER_SIZE:
+            break
+    if len(cluster) < 2 or cluster[0][0].id != leader.id:
+        return None
+    total = sum(p for _c, p in cluster) or 1.0
+    asked = sess.asked_ids()
+    settled = sess.settled_categories()
+    offers = [q for q in QUESTION_BANK
+              if not is_choice(q) and q["id"] not in asked and q.get("tags_true")
+              and q["category"] not in settled]
+    mined = [set(web_search.mine_trait_slugs(_mask_split_titles(f"{c.name} {c.blurb}", c)))
+             for c, _p in cluster]
+    for slug in sorted(set().union(*mined)):
+        present = sum(1 for tags in mined if slug in tags)
+        if not 0 < present < len(cluster):
+            continue
+        if slug in QUESTIONS_BY_ID or slug in _BANK_TAGS or f"dyn_{slug}" in asked:
+            continue
+        offers.append(make_dynamic(slug, slug.replace("-", " ")))
+    best: tuple[float, dict[str, Any]] | None = None
+    for question in offers:
+        has = [_candidate_has_trait(question, c) for c, _p in cluster]
+        if all(has) or not any(has):
+            continue
+        share = sum(p for (_c, p), hit in zip(cluster, has) if hit) / total
+        bits = _binary_entropy(share)
+        # Bank questions come first in ``offers``; ``>`` keeps them on a tie.
+        if bits >= _CLUSTER_MIN_BITS and (best is None or bits > best[0]):
+            best = (bits, question)
+    return best[1] if best else None
 
 
 def _unasked_leader_pin_look(sess: GuessSession) -> dict[str, Any] | None:
@@ -2348,6 +3114,7 @@ def _unasked_leader_pin_look(sess: GuessSession) -> dict[str, Any] | None:
     return None
 
 
+from .session import save_session
 def _advance(sess: GuessSession) -> dict[str, Any]:
     """Emit the next question, or a guess when the evidence is strong enough.
 
@@ -2357,7 +3124,7 @@ def _advance(sess: GuessSession) -> dict[str, Any]:
     pin path had nothing left. Alias-split still refuses the guess and keeps
     the information-gain question: those two rows are one person.
     """
-    if sess.turn < MAX_TURNS:
+    if sess.turn < sess.turn_cap():
         recovery = _recovery_question(sess)
         if recovery is not None:
             timing.note(recover=recovery["id"])
@@ -2369,8 +3136,8 @@ def _advance(sess: GuessSession) -> dict[str, Any]:
     # Collapse happens inside the guess check. The split flag is read after
     # that, so a merge that just succeeded is allowed to commit.
     should = _should_guess(sess, laya_answers)
-    blocked = bool(question) and _alias_split_blocks_guess(sess) and sess.turn < MAX_TURNS
-    if should and not blocked and sess.turn < MAX_TURNS:
+    blocked = bool(question) and _alias_split_blocks_guess(sess) and sess.turn < sess.turn_cap()
+    if should and not blocked and sess.turn < sess.turn_cap():
         pin_look = _unasked_leader_pin_look(sess)
         if pin_look is not None:
             timing.note(pin_look=pin_look["id"])
@@ -2516,7 +3283,13 @@ def _score_free_text(sess: GuessSession, text: str, qid: str) -> None:
     hits = free_text_trait_hits(text)
     visual = bool(_clue_requirements(text))
     if visual:
-        score_candidates(sess, clue_question(qid, text), "yes")
+        question = clue_question(qid, text)
+        question.update({
+            "source": "seed" if qid == "clue_seed" else "player_detail",
+            "turn": 0 if qid == "clue_seed" else sess.turn,
+            "fact_id": f"{qid}:{0 if qid == 'clue_seed' else sess.turn}",
+        })
+        score_candidates(sess, question, "yes")
     residual = visual_residual(text) if visual else text
     if hits:
         residual = chip_residual(residual)
@@ -2525,12 +3298,21 @@ def _score_free_text(sess: GuessSession, text: str, qid: str) -> None:
         # Evidence is keyed by question id. Reusing the visual clue's id
         # would replace that judgment with the leftover words.
         overlap_id = f"{qid}_rest" if visual else qid
-        score_candidates(sess, clue_question(overlap_id, residual), "yes")
+        question = clue_question(overlap_id, residual)
+        question.update({
+            "source": "seed" if qid == "clue_seed" else "player_detail",
+            "turn": 0 if qid == "clue_seed" else sess.turn,
+            "fact_id": f"{overlap_id}:{0 if qid == 'clue_seed' else sess.turn}",
+        })
+        score_candidates(sess, question, "yes")
     for trait_id, polarity in hits:
         if trait_id in sess.evidence:
             continue
         question = dict(QUESTIONS_BY_ID[trait_id])
         question["soft_chip"] = True
+        question["source"] = "inferred_chip"
+        question["turn"] = 0 if qid == "clue_seed" else sess.turn
+        question["fact_id"] = f"chip:{trait_id}:{question['turn']}"
         score_candidates(sess, question, polarity)
 
 
@@ -2540,14 +3322,24 @@ def start(seed: str = "") -> dict[str, Any]:
     if seed:
         sess.constraints.append(seed)
         _score_free_text(sess, seed, "clue_seed")
+        sess.evidence_revision += 1
+    refresh_session_memory(sess)
     refresh_candidates(sess, limit=16, initial=True)
     payload = _advance(sess)
     payload["seed"] = sess.seed
+    save_session(sess)
     return payload
 
 
 @timing.traced("answer")
 def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str, Any]:
+    """Serialize one answer transition and persist its complete resulting state."""
+    with _session_lock(sess):
+        return _submit_answer_locked(sess, answer, detail)
+
+
+def _submit_answer_locked(sess: GuessSession, answer: str, detail: str = "") -> dict[str, Any]:
+    """Apply an answer while the session lock protects replay and persistence."""
     if sess.stage != "asking" or not sess.asked:
         return {"error": "no question is pending", "session_id": sess.id, "stage": sess.stage}
     current = sess.asked[-1]
@@ -2568,6 +3360,9 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
         "tags_false": current["tags_false"],
         "prior": current["prior"],
         "kind": current.get("kind", "yesno"),
+        "source": "button",
+        "turn": sess.turn,
+        "fact_id": f"button:{current['qid']}:{sess.turn}",
     }
     if current.get("criteria"):
         question["criteria"] = current["criteria"]
@@ -2592,12 +3387,20 @@ def submit_answer(sess: GuessSession, answer: str, detail: str = "") -> dict[str
     if current["detail"]:
         _score_free_text(sess, current["detail"], f"clue_{sess.turn}")
 
+    # Proposal jobs started below must carry the revision of this settled
+    # answer, not the revision from the preceding turn.
+    sess.evidence_revision += 1
+    refresh_session_memory(sess)
+
     # Every answer opens a new search branch. Discover and replay evidence
     # before choosing the next question or declaring a winner.
     refresh_candidates(sess)
-
+    _note_ranking(sess, current["qid"], answer)
+    sess.revision += 1
     sess.touch()
-    return _advance(sess)
+    payload = _advance(sess)
+    save_session(sess)
+    return payload
 
 
 def _reject_identity(sess: GuessSession, cand: Candidate) -> None:
@@ -2610,6 +3413,12 @@ def _reject_identity(sess: GuessSession, cand: Candidate) -> None:
     iid = identity_id(cand.name)
     for other in sess.candidates:
         if other.id == cand.id or (iid and identity_id(other.name) == iid):
+            sess.exclusion_log.append({
+                "candidate_id": other.id, "name": other.name, "series": other.series,
+                "reason": "wrong_guess_identity", "guessed_id": cand.id,
+                "guessed_name": cand.name, "turn": sess.turn,
+                "revision": sess.evidence_revision + 1,
+            })
             other.alive = False
             other.logodds = -math.inf
             sess.rejected.add(other.id)
@@ -2619,10 +3428,19 @@ def _reject_identity(sess: GuessSession, cand: Candidate) -> None:
 
 @timing.traced("guess_result")
 def submit_guess_result(sess: GuessSession, correct: bool) -> dict[str, Any]:
+    """Serialize and persist a guess result, including its next pending action."""
+    with _session_lock(sess):
+        return _submit_guess_result_locked(sess, correct)
+
+
+def _submit_guess_result_locked(sess: GuessSession, correct: bool) -> dict[str, Any]:
+    """Apply a guess result while the session lock protects identity changes."""
     """Record whether the pending guess was right and continue the round.
 
     A wrong guess eliminates that whole identity, then merges whatever alias
-    rows are still live before the next question or commit.
+    rows are still live before the next question or commit. It also extends
+    ``turn_cap`` by ``RECOVERY_TURNS``: at the old fixed cap all three guesses
+    fired back to back on the same evidence (Arue, Yunyun, Funifura).
     """
     if sess.stage != "guessing" or not sess.pending_guess:
         return {"error": "no guess is pending", "session_id": sess.id, "stage": sess.stage}
@@ -2632,8 +3450,9 @@ def submit_guess_result(sess: GuessSession, correct: bool) -> dict[str, Any]:
     if correct:
         sess.stage = "done"
         sess.winner = guessed.id if guessed else None
+        sess.revision += 1
         sess.touch()
-        return {
+        payload = {
             "session_id": sess.id,
             "stage": "done",
             "correct": True,
@@ -2641,18 +3460,24 @@ def submit_guess_result(sess: GuessSession, correct: bool) -> dict[str, Any]:
             "turns": sess.turn,
             "laya": sess.laya_used,
         }
+        save_session(sess)
+        return payload
 
+    sess.wrong_guesses += 1
     if guessed:
         sess.recovery_from = guessed.id
         _reject_identity(sess, guessed)
         sess.collapse_identities()
+        sess.evidence_revision += 1
         if sess.evidence:
             _rescore_candidates(sess)
+        refresh_session_memory(sess)
 
     if sess.guesses_made >= MAX_GUESSES:
         sess.stage = "done"
+        sess.revision += 1
         sess.touch()
-        return {
+        payload = {
             "session_id": sess.id,
             "stage": "done",
             "correct": False,
@@ -2660,11 +3485,120 @@ def submit_guess_result(sess: GuessSession, correct: bool) -> dict[str, Any]:
             "top": _top_payload(sess, 5),
             "turns": sess.turn,
         }
+        save_session(sess)
+        return payload
 
     sess.stage = "asking"
     refresh_candidates(sess)
+    sess.revision += 1
     sess.touch()
-    return _advance(sess)
+    payload = _advance(sess)
+    save_session(sess)
+    return payload
+
+
+def _target_rank(
+    ranked: list[tuple[str, str, float]], target: str,
+) -> dict[str, Any] | None:
+    """1-based rank, id and probability of ``target`` in a ranking, or None."""
+    for rank, (cid, name, prob) in enumerate(ranked, start=1):
+        if same_character(target, name):
+            return {"rank": rank, "id": cid, "name": name, "probability": prob}
+    return None
+
+
+def _evidence_gap(
+    sess: GuessSession, contrib: dict[tuple[str, str], float], target_id: str, other_id: str,
+) -> list[dict[str, Any]]:
+    """Per-row log-odds of ``target_id`` minus ``other_id``, most harmful first.
+
+    A negative row is an answer (or the prior) that favoured the other
+    candidate; the sum is how far the target trailed.
+    """
+    mine = {row["qid"]: row for row in evidence_breakdown(sess, target_id, contrib)}
+    theirs = {row["qid"]: row for row in evidence_breakdown(sess, other_id, contrib)}
+    rows = []
+    for qid in mine.keys() | theirs.keys():
+        a = mine.get(qid, {}).get("logodds", 0.0)
+        b = theirs.get(qid, {}).get("logodds", 0.0)
+        answer = (mine.get(qid) or theirs.get(qid) or {}).get("answer", "")
+        rows.append({"qid": qid, "answer": answer, "delta": round(a - b, 4)})
+    rows.sort(key=lambda row: row["delta"])
+    return rows
+
+
+def trace_payload(sess: GuessSession, target: str = "") -> dict[str, Any]:
+    """Why a round went where it did, for a bench that knows the target.
+
+    Per answer: the top three and the target's rank. Per guess: the guessed
+    candidate's evidence and, when ``target`` is in the pool, the per-answer
+    gap between them at that moment. The bench runs in a browser, so the
+    server never knows the target; this is read after the round, within
+    the session TTL.
+    """
+    target = (target or "").strip()
+    matches = [c for c in sess.candidates if target and same_character(target, c.name)]
+    turns = []
+    for turn, qid, answer, ranked in sess.rank_log:
+        row: dict[str, Any] = {
+            "turn": turn,
+            "qid": qid,
+            "answer": answer,
+            "pool": len(ranked),
+            "top": [{"name": name, "probability": prob} for _cid, name, prob in ranked[:3]],
+        }
+        if target:
+            row["target"] = _target_rank(ranked, target)
+        turns.append(row)
+    guesses = []
+    for entry in sess.guess_log:
+        contrib = entry.get("contrib") or {}
+        item: dict[str, Any] = {
+            "name": entry["name"],
+            "turn": entry["turn"],
+            "probability": entry["probability"],
+            "evidence": evidence_breakdown(sess, entry["id"], contrib),
+        }
+        where = _target_rank(entry.get("ranked") or [], target) if target else None
+        if where is not None:
+            item["target"] = where
+            if where["id"] != entry["id"]:
+                item["gap"] = _evidence_gap(sess, contrib, where["id"], entry["id"])
+        guesses.append(item)
+    out: dict[str, Any] = {
+        "session_id": sess.id,
+        "stage": sess.stage,
+        "turn": sess.turn,
+        "turn_cap": sess.turn_cap(),
+        "questions": len(sess.asked),
+        "guesses_made": sess.guesses_made,
+        "wrong_guesses": sess.wrong_guesses,
+        "turns": turns,
+        "guesses": guesses,
+    }
+    if target:
+        live = [c for c in matches if c.alive and c.id not in sess.rejected]
+        out["target"] = {
+            "name": target,
+            "in_pool": bool(matches),
+            "alive": bool(live),
+            "now": _target_rank([(c.id, c.name, round(p, 4)) for c, p in sess.posterior()],
+                                target),
+            "evidence": evidence_breakdown(sess, live[0].id) if live else [],
+            "exclusions": [
+                row for row in sess.exclusion_log
+                if row.get("candidate_id") in {candidate.id for candidate in matches}
+                or (row.get("name") and same_character(target, str(row.get("name"))))
+            ],
+            "merges": [
+                row for row in sess.merge_log
+                if row.get("candidate_id") in {candidate.id for candidate in matches}
+                or row.get("keeper_id") in {candidate.id for candidate in matches}
+                or (row.get("name") and same_character(target, str(row.get("name"))))
+            ],
+        }
+    out["context"] = sess.context_log
+    return out
 
 
 def state_payload(sess: GuessSession) -> dict[str, Any]:
@@ -2698,6 +3632,7 @@ def state_payload(sess: GuessSession) -> dict[str, Any]:
         "candidates_total": len(sess.candidates),
         "top": _top_payload(sess, 8),
         "notes": sess.notes,
+        "background_pending": sources.background_status(sess.id),
     }
     if sess.stage == "asking" and sess.asked:
         current = sess.asked[-1]

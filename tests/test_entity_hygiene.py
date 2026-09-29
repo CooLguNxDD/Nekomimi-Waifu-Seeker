@@ -548,7 +548,7 @@ def test_series_lock_pins_a_splitting_look_instead_of_the_angel_kit():
 def _arm_guess(sess, leader_id: str) -> None:
     """Two strong model judgments so an early guess is otherwise allowed."""
     sess.turn = 8
-    for qid, p in (("gender_male", 0.9), ("age_adult", 0.8)):
+    for qid, p in (("gender_male", 0.99), ("age_adult", 0.99)):
         question = traits.QUESTIONS_BY_ID[qid]
         sess.evidence[qid] = (question, "yes")
         sess.match_cache[(leader_id, qid)] = p
