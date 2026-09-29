@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import time
 
@@ -122,6 +123,7 @@ def test_resolve_survives_a_failing_lookup(monkeypatch):
 
 
 def test_background_hits_join_the_next_search_once_per_facts(monkeypatch):
+    """Carry proposal revision metadata with each background result."""
     monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
     runs = []
 
@@ -135,23 +137,172 @@ def test_background_hits_join_the_next_search_once_per_facts(monkeypatch):
         if not sources._LLM_BG.is_pending("sess-llm"):
             break
         time.sleep(0.01)
-    assert [c["name"] for c in sources._LLM_BG.take("sess-llm")] == ["Makima"]
+    hits, metadata = sources.take_hypothesis_candidates("sess-llm")
+    assert [c["name"] for c in hits] == ["Makima"]
+    assert metadata == {
+        "evidence_revision": 0,
+        "fingerprint": hashlib.sha256(b"female\ndemon").hexdigest(),
+    }
     assert not sources._llm_names_start("sess-llm", ["female", "demon"], "anime")
     assert runs == [("female", "demon")]
 
 
 def test_hypotheses_skip_rejected_names_and_wait_for_a_flat_pool(monkeypatch):
+    """Avoid repeating unchanged proposals and never send a rejected identity."""
     monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
     sess = sess_mod.new_session()
-    sess.constraints = ["The character is female", "The character is not Arue"]
+    sess.seed = "female character"
+    sess.asked = [{
+        "turn": 1, "qid": "gender_female", "text": "Is your character female?",
+        "answer": "yes", "detail": None,
+    }]
+    sess.exclusion_log.append({
+        "candidate_id": "arue", "name": "Arue", "series": "KonoSuba",
+        "reason": "wrong_guess_identity", "revision": 1, "turn": 1,
+    })
     # Empty pool: ask, and never send the rejected (scraped) name.
-    assert engine._hypothesis_facts(sess, lambda: False) == ["The character is female"]
+    facts = engine._hypothesis_facts(sess, lambda: False)
+    assert facts == ["female character", "Yes: Is your character female"]
+    assert "Arue" not in "\n".join(facts)
+    sess.proposal_fingerprint = hashlib.sha256("\n".join(facts).encode()).hexdigest()
+    sess.proposal_revision = 1
+    sess.proposal_turn = 1
 
     sess.turn = 4
     sess.candidates = [Candidate(id="a", name="A", logodds=5.0),
                        Candidate(id="b", name="B", logodds=0.0)]
-    # A clear leader and search not stuck: no call.
+    # A clear leader and unchanged facts: no duplicate, even when stuck.
     assert engine._hypothesis_facts(sess, lambda: False) == []
-    assert engine._hypothesis_facts(sess, lambda: True) == ["The character is female"]
-    sess.candidates = [Candidate(id=f"c{i}", name=f"C{i}", logodds=0.0) for i in range(6)]
-    assert engine._hypothesis_facts(sess, lambda: False) == ["The character is female"]
+    assert engine._hypothesis_facts(sess, lambda: True) == []
+
+
+def test_name_proposal_cooldown_new_fact_and_per_session_cap(monkeypatch):
+    """Respect cooldown and request limits while letting a rejection retrigger search."""
+    monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
+    sess = sess_mod.new_session("pink hair")
+    first = engine.proposal_facts(sess)
+    sess.proposal_fingerprint = hashlib.sha256("\n".join(first).encode()).hexdigest()
+    sess.proposal_revision = sess.evidence_revision
+    sess.proposal_turn = 2
+    sess.proposal_calls = 1
+    sess.asked = [{
+        "turn": 3, "qid": "gender_female", "text": "Is your character female?",
+        "answer": "yes", "detail": "wears a black ribbon",
+    }]
+    sess.turn = 3
+    assert engine._hypothesis_facts(sess, lambda: False) == []  # cooldown
+    sess.turn = 4
+    updated = engine._hypothesis_facts(sess, lambda: False)
+    assert "wears a black ribbon" in updated
+
+    sess.proposal_calls = engine._LLM_NAMES_MAX_PER_SESSION
+    assert engine._hypothesis_facts(sess, lambda: True) == []
+
+    sess.proposal_calls = 1
+    sess.proposal_fingerprint = hashlib.sha256("\n".join(updated).encode()).hexdigest()
+    sess.proposal_turn = sess.turn
+    sess.proposal_revision = sess.evidence_revision
+    sess.exclusion_log.append({
+        "candidate_id": "rejected", "name": "Wrong Pick", "reason": "wrong_guess_identity",
+        "revision": sess.evidence_revision + 1,
+    })
+    assert engine._hypothesis_facts(sess, lambda: False) == updated
+
+
+def test_name_proposals_use_button_memory_and_retry_only_changed_facts(monkeypatch):
+    """Allow normalized button evidence to seed one nonblocking proposal job."""
+    monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
+    runs = []
+
+    def fake_search(facts, medium_hint=None, errors=None, stats=None):
+        runs.append(tuple(facts))
+        return []
+
+    monkeypatch.setattr(llm_names, "search", fake_search)
+    monkeypatch.setattr(engine, "ONLINE", True)
+    monkeypatch.setattr(engine.sources, "find_candidates", lambda *a, **k: [])
+    sess = sess_mod.new_session()
+    sess.asked = [{
+        "turn": 1, "qid": "gender_female", "text": "Is your character female?",
+        "answer": "yes", "detail": None,
+    }]
+    sess.turn = 1
+
+    engine.refresh_candidates(sess)  # empty pool is broad; no Laya wait is needed
+    for _ in range(200):
+        if not sources.background_status(sess.id)["llm_names"]:
+            break
+        time.sleep(0.01)
+    assert len(runs) == 1
+    assert any("female" in fact.lower() for fact in runs[0])
+
+    engine.refresh_candidates(sess)
+    assert len(runs) == 1  # unchanged normalized facts do not start another job
+
+
+def test_seed_proposal_records_the_revision_it_used(monkeypatch):
+    """Tag initial seed leads with the revision already applied to the session."""
+    monkeypatch.setenv("WAIFU_QUERY_LLM", "1")
+    monkeypatch.setattr(query_llm, "prefetch", lambda *a, **k: False)
+    monkeypatch.setattr(engine, "ONLINE", True)
+    monkeypatch.setattr(engine.sources, "find_candidates", lambda *a, **k: [])
+    monkeypatch.setattr(engine.laya_client, "ask", lambda *a, **k: None)
+    monkeypatch.setattr(engine.laya_client, "available", lambda: False)
+    monkeypatch.setattr(llm_names, "search", lambda *a, **k: [])
+
+    state = engine.start("pink hair")
+    sess = sess_mod.load_session(state["session_id"])
+    assert sess is not None
+    for _ in range(200):
+        if not sources.background_status(sess.id)["llm_names"]:
+            break
+        time.sleep(0.01)
+    _hits, metadata = sources.take_hypothesis_candidates(sess.id)
+    assert metadata["evidence_revision"] == sess.evidence_revision == 1
+
+
+def test_stale_proposal_is_rescored_and_rejected_identity_stays_excluded(monkeypatch):
+    """Rescore old leads under current evidence and keep a rejected identity excluded."""
+    monkeypatch.setenv("WAIFU_LLM_NAMES", "0")
+    monkeypatch.setattr(engine, "ONLINE", True)
+    monkeypatch.setattr(engine.sources, "find_candidates", lambda *a, **k: [])
+    sess = sess_mod.new_session()
+    sess.candidates = [Candidate(id="old-makima", name="Makima", series="Chainsaw Man")]
+    engine._reject_identity(sess, sess.candidates[0])
+    sess.evidence_revision = 4
+    question = dict(engine.QUESTIONS_BY_ID["gender_female"])
+    sess.evidence["gender_female"] = (question, "yes")
+    sess.asked = [{
+        "turn": 1, "qid": "gender_female", "text": "Is your character female?",
+        "answer": "yes", "detail": None,
+    }]
+    calls = []
+
+    def ask(state, questions):
+        calls.append((state, questions))
+        return {"match": {"noul": 0.97}}
+
+    monkeypatch.setattr(engine.laya_client, "ask", ask)
+    stale_hits = [
+        _hit("New Hero", "New Work"),
+        _hit("Makima", "Chainsaw Man").copy(),
+    ]
+    stale_hits[1]["id"] = "new-makima-url"
+    sources._LLM_BG.finish(
+        sess.id, stale_hits, time.perf_counter(), [],
+        metadata={"evidence_revision": 1, "fingerprint": "old-facts"},
+    )
+    events = []
+    monkeypatch.setattr(engine.timing, "note", lambda **fields: events.append(fields))
+
+    assert engine.refresh_candidates(sess) == 1
+    assert calls and calls[0][1]["match"]["type"] == "noul"
+    assert calls[0][1]["match"]["instructions"] == question["instructions"]
+    assert sess.by_id("x_New Hero") is not None
+    assert ("x_New Hero", "gender_female") in sess.match_cache
+    assert ("x_New Hero", "gender_female") in sess.match_fingerprints
+    assert all(c.name != "Makima" for c in sess.alive_candidates())
+    assert any(row.get("proposal_stale") is True for row in events)
+    trace = engine.trace_payload(sess, "Makima")
+    assert trace["target"]["alive"] is False
+    assert any(row["reason"] == "wrong_guess_identity" for row in trace["target"]["exclusions"])

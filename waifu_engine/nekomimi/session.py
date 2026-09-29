@@ -12,6 +12,7 @@ import os
 import threading
 import time
 import uuid
+import ast
 from dataclasses import dataclass, field
 from typing import Any
 import json
@@ -29,6 +30,7 @@ from ..names import (
 )
 
 SESSION_TTL_SECONDS = int(os.getenv("WAIFU_NEKOMINI_TTL", "1800"))
+SESSION_SCHEMA_VERSION = 2
 MAX_TURNS = int(os.getenv("WAIFU_NEKOMINI_MAX_TURNS", "20"))
 MAX_GUESSES = int(os.getenv("WAIFU_NEKOMINI_MAX_GUESSES", "3"))
 # Extra questions granted after each wrong guess. Without them every guess
@@ -152,6 +154,9 @@ class GuessSession:
     id: str
     created: float
     updated: float
+    schema_version: int = SESSION_SCHEMA_VERSION
+    revision: int = 0
+    evidence_revision: int = 0
     seed: str = ""
     turn: int = 0
     stage: str = "asking"  # asking | guessing | done
@@ -167,8 +172,10 @@ class GuessSession:
     memory: SessionMemory = field(default_factory=SessionMemory)
     evidence: dict[str, tuple[dict[str, Any], str]] = field(default_factory=dict)
     match_cache: dict[tuple[str, str], float] = field(default_factory=dict)
+    match_fingerprints: dict[tuple[str, str], str] = field(default_factory=dict)
     # Per-candidate option probabilities for multiple-choice questions.
     choice_cache: dict[tuple[str, str], dict[str, float]] = field(default_factory=dict)
+    choice_fingerprints: dict[tuple[str, str], str] = field(default_factory=dict)
     # Last good query-LLM rewrite, reused until a newer one lands.
     llm_queries: list[str] = field(default_factory=list)
     # How many consecutive guess-checks this candidate has led. A crowded
@@ -199,6 +206,7 @@ class GuessSession:
     # time, so a lookahead never stands in for a judgment on other evidence.
     lookahead: dict[tuple[str, str], tuple[tuple[tuple[Any, ...], ...], float]] = field(
         default_factory=dict)
+    lookahead_fingerprints: dict[tuple[str, str], str] = field(default_factory=dict)
     # Log-odds each evidence row added per candidate on the latest rescore,
     # keyed by (candidate, question id); ``__prior__`` is popularity and
     # ``__adjust__`` the pins/priors applied after the answers. A miss report
@@ -213,6 +221,19 @@ class GuessSession:
     # ``contrib`` and the ranking at that moment. A rejected guess leaves the
     # next rescore, so its evidence exists only in this snapshot.
     guess_log: list[dict[str, Any]] = field(default_factory=list)
+    # Hard exclusions and identity merges are kept with the trace so a stored
+    # but inactive target can be distinguished from a retrieval miss.
+    exclusion_log: list[dict[str, Any]] = field(default_factory=list)
+    merge_log: list[dict[str, Any]] = field(default_factory=list)
+    # Last bounded Laya context per role; useful for explaining omissions.
+    context_log: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Proposal state is durable for deduplication; workers themselves are
+    # process-local and are reconciled against sources on each request.
+    proposal_calls: int = 0
+    proposal_fingerprint: str = ""
+    proposal_revision: int = -1
+    proposal_turn: int = -1
+    proposal_pending: bool = False
 
     def turn_cap(self) -> int:
         """Question limit for this round: ``MAX_TURNS`` plus recovery turns per miss."""
@@ -291,6 +312,14 @@ class GuessSession:
             for other in group:
                 if other is keeper:
                     continue
+                self.merge_log.append({
+                    "candidate_id": other.id,
+                    "name": other.name,
+                    "keeper_id": keeper.id,
+                    "keeper_name": keeper.name,
+                    "reason": "same_character_identity",
+                    "turn": self.turn,
+                })
                 self._absorb_other(keeper, other)
                 other.alive = False
                 other.logodds = -math.inf
@@ -324,10 +353,21 @@ class GuessSession:
                 continue
             name = raw.get("name", "")
             if not name_keys(name):
+                self.exclusion_log.append({
+                    "candidate_id": str(raw.get("id") or ""),
+                    "name": str(name), "reason": "missing_character_name",
+                    "turn": self.turn,
+                })
                 continue
             # List, category, franchise and species pages must not enter the
             # pool, or they lead the posterior and get guessed.
             if is_non_character(name, raw.get("source_url") or "", raw.get("blurb") or ""):
+                self.exclusion_log.append({
+                    "candidate_id": str(raw.get("id") or ""),
+                    "name": str(name), "reason": "non_character_source",
+                    "source_url": str(raw.get("source_url") or ""),
+                    "turn": self.turn,
+                })
                 continue
             match = next((c for c in self.candidates if same_character(name, c.name)), None)
             if match is not None:
@@ -335,6 +375,11 @@ class GuessSession:
                 # when they are one lexicon identity, or the series fields
                 # do not name two works. Otherwise drop the hit.
                 if not _may_absorb(match, raw):
+                    self.exclusion_log.append({
+                        "candidate_id": str(raw.get("id") or ""),
+                        "name": str(name), "reason": "same_name_different_series",
+                        "matched_id": match.id, "turn": self.turn,
+                    })
                     continue
                 if match.id in self.rejected or not match.alive:
                     iid = identity_id(name)
@@ -345,8 +390,27 @@ class GuessSession:
                     )
                     if keeper is not None and _may_absorb(keeper, raw):
                         self._absorb_raw(keeper, raw)
+                        self.merge_log.append({
+                            "candidate_id": str(raw.get("id") or ""),
+                            "name": str(name), "keeper_id": keeper.id,
+                            "keeper_name": keeper.name,
+                            "reason": "live_identity_alias_absorbed", "turn": self.turn,
+                        })
+                    else:
+                        self.exclusion_log.append({
+                            "candidate_id": str(raw.get("id") or ""),
+                            "name": str(name), "reason": "previously_excluded_duplicate",
+                            "matched_id": match.id, "turn": self.turn,
+                        })
                 else:
                     self._absorb_raw(match, raw)
+                    if name and name != match.name:
+                        self.merge_log.append({
+                            "candidate_id": str(raw.get("id") or ""),
+                            "name": str(name), "keeper_id": match.id,
+                            "keeper_name": match.name, "reason": "duplicate_search_hit",
+                            "turn": self.turn,
+                        })
                 continue
             if already_seen(name, seen_names):
                 continue
@@ -426,68 +490,160 @@ _STORE: dict[str, GuessSession] = {}
 _STORE_LOCK = threading.Lock()
 SESSION_DIR = os.path.join("data", "sessions")
 
-def _to_json_dict(sess: GuessSession) -> dict:
+def _keyed_rows(mapping: dict[tuple[str, str], Any]) -> list[list[Any]]:
+    """Encode tuple-keyed cache entries as portable JSON rows."""
+    return [[key[0], key[1], value] for key, value in mapping.items()]
+
+
+def _to_json_dict(sess: GuessSession) -> dict[str, Any]:
+    """Encode every authoritative round field without discarding trace state."""
     d = dataclasses.asdict(sess)
-    d["rejected"] = list(d["rejected"])
-    d["near_twin_pairs"] = list(d["near_twin_pairs"])
-    
-    # caches with tuple keys
-    def _str_keys(obj):
-        if not isinstance(obj, dict):
-            return obj
-        return {str(k): v for k, v in obj.items()}
-        
-    d["match_cache"] = _str_keys(d["match_cache"])
-    d["choice_cache"] = _str_keys(d["choice_cache"])
-    d["lookahead"] = _str_keys(d["lookahead"])
-    d["contrib"] = _str_keys(d["contrib"])
-    
-    # rank_log might contain tuples
+    d["schema_version"] = SESSION_SCHEMA_VERSION
+    d["rejected"] = sorted(sess.rejected)
+    d["near_twin_pairs"] = [list(pair) for pair in sorted(sess.near_twin_pairs)]
+    d["evidence"] = {
+        qid: {"question": question, "answer": answer}
+        for qid, (question, answer) in sess.evidence.items()
+    }
+    d["match_cache"] = _keyed_rows(sess.match_cache)
+    d["choice_cache"] = _keyed_rows(sess.choice_cache)
+    d["match_fingerprints"] = _keyed_rows(sess.match_fingerprints)
+    d["choice_fingerprints"] = _keyed_rows(sess.choice_fingerprints)
+    d["lookahead"] = [
+        [cid, qid, [list(row) for row in value[0]], value[1]]
+        for (cid, qid), value in sess.lookahead.items()
+    ]
+    d["contrib"] = _keyed_rows(sess.contrib)
+    d["lookahead_fingerprints"] = _keyed_rows(sess.lookahead_fingerprints)
+    d["rank_log"] = [
+        [turn, qid, answer, [list(row) for row in ranked]]
+        for turn, qid, answer, ranked in sess.rank_log
+    ]
+    d["guess_log"] = []
+    for entry in sess.guess_log:
+        row = dict(entry)
+        row["contrib"] = _keyed_rows(entry.get("contrib") or {})
+        row["ranked"] = [list(item) for item in entry.get("ranked") or []]
+        d["guess_log"].append(row)
     return d
 
-def _from_json_dict(d: dict) -> GuessSession:
-    # Need to restore candidates
-    if "candidates" in d:
-        cands = []
-        for c in d["candidates"]:
-            cands.append(Candidate(**c))
-        d["candidates"] = cands
-        
-    if "memory" in d:
-        d["memory"] = SessionMemory.from_dict(d["memory"])
-        
-    d["rejected"] = set(d["rejected"])
-    d["near_twin_pairs"] = set(tuple(x) for x in d["near_twin_pairs"])
-    
-    # For tuple-keyed dicts, we would need to parse them back. 
-    # But for a simple resume, we can just clear caches or leave them empty.
-    d["match_cache"] = {}
-    d["choice_cache"] = {}
-    d["lookahead"] = {}
-    d["contrib"] = {}
-    d["rank_log"] = [] # Can clear logs on resume to avoid complex parse
-    d["guess_log"] = []
-    
-    # Drop unknown fields to avoid TypeError
+
+def _decode_keyed_rows(value: Any) -> dict[tuple[str, str], Any]:
+    """Restore current row encoding and legacy tuple-string cache keys."""
+    decoded: dict[tuple[str, str], Any] = {}
+    if isinstance(value, list):
+        for row in value:
+            if isinstance(row, list) and len(row) == 3:
+                decoded[(str(row[0]), str(row[1]))] = row[2]
+        return decoded
+    if not isinstance(value, dict):
+        return decoded
+    for key, item in value.items():
+        try:
+            pair = ast.literal_eval(key)
+        except (ValueError, SyntaxError, TypeError):
+            continue
+        if isinstance(pair, tuple) and len(pair) == 2:
+            decoded[(str(pair[0]), str(pair[1]))] = item
+    return decoded
+
+def _from_json_dict(raw: dict[str, Any]) -> GuessSession:
+    """Restore current or legacy session files while retaining round history."""
+    d = dict(raw)
+    stored_schema = int(d.get("schema_version") or 1)
+    d["candidates"] = [Candidate(**candidate) for candidate in d.get("candidates", [])]
+    d["memory"] = SessionMemory.from_dict(d.get("memory") or {})
+    d["rejected"] = set(d.get("rejected") or [])
+    d["near_twin_pairs"] = {tuple(pair) for pair in d.get("near_twin_pairs") or []}
+    evidence: dict[str, tuple[dict[str, Any], str]] = {}
+    for qid, value in (d.get("evidence") or {}).items():
+        if isinstance(value, dict):
+            question, answer = value.get("question"), value.get("answer")
+        elif isinstance(value, (list, tuple)) and len(value) == 2:
+            question, answer = value
+        else:
+            continue
+        if isinstance(question, dict) and answer is not None:
+            evidence[str(qid)] = (question, str(answer))
+    d["evidence"] = evidence
+    d["match_cache"] = _decode_keyed_rows(d.get("match_cache"))
+    d["choice_cache"] = _decode_keyed_rows(d.get("choice_cache"))
+    d["match_fingerprints"] = _decode_keyed_rows(d.get("match_fingerprints"))
+    d["choice_fingerprints"] = _decode_keyed_rows(d.get("choice_fingerprints"))
+    d["contrib"] = _decode_keyed_rows(d.get("contrib"))
+    d["lookahead_fingerprints"] = _decode_keyed_rows(d.get("lookahead_fingerprints"))
+    lookahead: dict[tuple[str, str], tuple[tuple[tuple[Any, ...], ...], float]] = {}
+    for row in d.get("lookahead") or []:
+        if isinstance(row, list) and len(row) == 4:
+            cid, qid, rows, probability = row
+            lookahead[(str(cid), str(qid))] = (tuple(tuple(item) for item in rows), float(probability))
+    if not lookahead and isinstance(d.get("lookahead"), dict):
+        # Legacy sessions used stringified tuple keys. Their inputs were not
+        # fingerprinted, so do not trust those cached judgments after upgrade.
+        lookahead = {}
+    d["lookahead"] = lookahead
+    if stored_schema < SESSION_SCHEMA_VERSION:
+        # Legacy cache entries had no record of the prompt they were judged on.
+        d["match_cache"] = {}
+        d["choice_cache"] = {}
+        d["lookahead"] = {}
+        d["match_fingerprints"] = {}
+        d["choice_fingerprints"] = {}
+        d["lookahead_fingerprints"] = {}
+    d["rank_log"] = [
+        (int(row[0]), str(row[1]), str(row[2]), [tuple(item) for item in row[3]])
+        for row in d.get("rank_log", []) if isinstance(row, list) and len(row) == 4
+    ]
+    for entry in d.get("guess_log", []):
+        if isinstance(entry, dict):
+            entry["contrib"] = _decode_keyed_rows(entry.get("contrib"))
+            entry["ranked"] = [tuple(item) for item in entry.get("ranked") or []]
+    d["guess_log"] = [entry for entry in d.get("guess_log", []) if isinstance(entry, dict)]
+    d.setdefault("schema_version", 1)
+    d.setdefault("revision", 0)
+    d.setdefault("evidence_revision", len(evidence))
+    d.setdefault("exclusion_log", [])
+    d.setdefault("merge_log", [])
+    d.setdefault("context_log", {})
+    d.setdefault("proposal_calls", 0)
+    d.setdefault("proposal_fingerprint", "")
+    d.setdefault("proposal_revision", -1)
+    d.setdefault("proposal_turn", -1)
+    was_pending = bool(d.get("proposal_pending"))
+    # A worker cannot survive a process restart. The pending question or guess
+    # remains in ``asked``/``pending_guess`` and is restored below.
+    d["proposal_pending"] = False
+    if was_pending:
+        d["proposal_fingerprint"] = ""
+        d["proposal_revision"] = -1
+        d["proposal_turn"] = -1
+        d["proposal_calls"] = max(0, int(d.get("proposal_calls") or 0) - 1)
     import inspect
-    sig = inspect.signature(GuessSession)
-    valid_keys = set(sig.parameters.keys())
-    d = {k: v for k, v in d.items() if k in valid_keys}
-    
-    return GuessSession(**d)
+    valid_keys = set(inspect.signature(GuessSession).parameters)
+    sess = GuessSession(**{key: value for key, value in d.items() if key in valid_keys})
+    sess.schema_version = SESSION_SCHEMA_VERSION
+    if stored_schema >= SESSION_SCHEMA_VERSION or sess.asked or sess.evidence:
+        from .memory import refresh_session_memory
+        refresh_session_memory(sess)
+    return sess
 
 def save_session(sess: GuessSession) -> None:
+    """Atomically persist one complete transition before it is returned to the caller."""
     os.makedirs(SESSION_DIR, exist_ok=True)
-    with _STORE_LOCK:
-        _STORE[sess.id] = sess
     path = os.path.join(SESSION_DIR, f"{sess.id}.json")
-    
-    try:
-        d = _to_json_dict(sess)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(d, f, indent=2)
-    except Exception as e:
-        print(f"Error saving session: {e}")
+    temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    d = _to_json_dict(sess)
+    with _STORE_LOCK:
+        try:
+            with open(temp_path, "w", encoding="utf-8") as stream:
+                json.dump(d, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_path, path)
+            _STORE[sess.id] = sess
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
 def load_session(session_id: str) -> GuessSession | None:
     with _STORE_LOCK:

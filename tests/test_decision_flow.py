@@ -201,6 +201,9 @@ def test_exhausted_lookahead_gain_guesses_before_the_cap(monkeypatch):
     ]
     # Turn 5: past the minimum, before the series pin would take the pick.
     _arm_guess(sess, "lead", turn=engine.MIN_QUESTIONS_BEFORE_GUESS)
+    # This test isolates the exhausted-EIG branch from silent-profile
+    # calibration; the cache values are the support signal under test.
+    monkeypatch.setattr(engine, "SILENT_WEIGHT", 1.0)
 
     def flat(state, questions):
         if "ready_to_guess" in questions:

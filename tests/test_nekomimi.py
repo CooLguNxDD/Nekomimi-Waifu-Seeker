@@ -40,6 +40,9 @@ POOL = [
 @pytest.fixture(autouse=True)
 def _offline(monkeypatch):
     """No model, no network."""
+    # Query rewrites are covered below; hypothesis resolution is covered in
+    # test_llm_names with every source stubbed.
+    monkeypatch.setenv("WAIFU_LLM_NAMES", "0")
     monkeypatch.setattr(laya_client, "ask", lambda state, questions: None)
     monkeypatch.setattr(laya_client, "available", lambda: False)
     monkeypatch.setattr(engine.web_search, "search_by_constraints", lambda *a, **k: list(POOL))
@@ -213,14 +216,19 @@ def test_loop_converges_on_the_target():
 
 
 def test_rejected_guess_never_returns():
+    """Keep a rejected identity out of future guesses and expose its trace reason."""
     state = engine.start("")
     s = sess_mod.get_session(state["session_id"])
     while state["stage"] == "asking":
         state = engine.submit_answer(s, _reply(state, "yes"))
     rejected = state["guess"]["id"]
+    rejected_name = s.by_id(rejected).name
     state = engine.submit_guess_result(s, correct=False)
     assert rejected in s.rejected
     assert all(c.id != rejected for c in s.alive_candidates())
+    trace = engine.trace_payload(s, rejected_name)
+    assert trace["target"]["alive"] is False
+    assert any(row["reason"] == "wrong_guess_identity" for row in trace["target"]["exclusions"])
     while state.get("stage") == "asking":
         state = engine.submit_answer(s, _reply(state, "no"))
     if state.get("stage") == "guessing":
@@ -683,7 +691,7 @@ def test_choice_support_gates_early_guess():
 
 def _support(s: GuessSession, leader_id: str) -> None:
     """Two model judgments that clear the early-guess support bar."""
-    for qid, p in (("gender_female", 0.9), ("age_adult", 0.8)):
+    for qid, p in (("gender_female", 0.99), ("age_adult", 0.99)):
         q = traits.QUESTIONS_BY_ID[qid]
         s.evidence[qid] = (q, "yes")
         s.match_cache[(leader_id, qid)] = p
@@ -905,7 +913,8 @@ def test_llm_sees_only_typed_text_and_never_blocks_the_turn(monkeypatch, llm):
     assert len(llm["sent"]) == 1
 
 
-def test_button_only_rounds_never_call_the_llm(monkeypatch, llm):
+def test_button_only_round_with_fit_pool_does_not_rewrite_query(monkeypatch, llm):
+    """Button answers alone do not enter the free-text query rewrite path."""
     s = _fresh_session()
     s.seed = ""
     s.asked = [{"qid": "gender_female", "text": "Is your character female?",

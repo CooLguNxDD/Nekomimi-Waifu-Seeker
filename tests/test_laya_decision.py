@@ -8,7 +8,7 @@ flattened scores, and on this checkpoint noul is the stronger primitive.
 
 import json
 
-from waifu_engine.nekomimi import engine, laya_client, session as sess_mod, traits
+from waifu_engine.nekomimi import context as laya_context, engine, laya_client, session as sess_mod, traits
 from waifu_engine.nekomimi.session import Candidate
 
 
@@ -43,6 +43,7 @@ def test_default_checkpoint_stays_typed_decisions(monkeypatch):
 
 
 def test_round_state_leads_with_answered_traits():
+    """Keep durable answer rows and profile identities inside the shared window."""
     """Profiles stay short. Trait rows lead so the window cuts them last."""
     sess = sess_mod.new_session("")
     blob = "alpha " * 200
@@ -60,8 +61,9 @@ def test_round_state_leads_with_answered_traits():
     assert state["answered_traits"]["fields"] == ["id", "answer", "score"]
     assert len(state["characters"]) == 10
     assert all(len(profile) <= engine._LAYA_ROUND_PROFILE for profile in state["characters"].values())
-    assert len(state["confirmed_facts"]) == engine._LAYA_ROUND_FACTS
-    assert len(state["answer_history"]) == engine._LAYA_ROUND_HISTORY
+    assert len(state["confirmed_facts"]) <= engine._LAYA_ROUND_FACTS
+    assert len(state["answer_history"]) <= engine._LAYA_ROUND_HISTORY
+    assert laya_context._state_size(state, laya_client.tokenizer()) <= engine._shared_state_room()
     assert len(engine._POOL_FITS["pool_fits"]["instructions"]) <= 64
 
 
@@ -70,12 +72,8 @@ def _long_ids() -> list[str]:
     return sorted((q["id"] for q in traits.QUESTION_BANK), key=lambda qid: (-len(qid), qid))
 
 
-def test_answered_traits_survive_the_english_window():
-    """Ids and scores are unchanged after the 512-token right cut.
-
-    The previous order put ten profiles first. The same rows, moved to the
-    end of that JSON, do not survive — that was the truncation miss.
-    """
+def test_large_round_context_is_bounded_and_accounts_for_every_fact():
+    """A 48-answer round fits the model window and logs its dropped fact IDs."""
     sess = sess_mod.new_session("")
     blob = "alpha " * 200
     sess.candidates = [
@@ -83,16 +81,22 @@ def test_answered_traits_survive_the_english_window():
                   medium="anime", blurb=blob)
         for i in range(10)
     ]
-    for index, qid in enumerate(_long_ids()[:20]):
-        question = dict(traits.QUESTIONS_BY_ID[qid])
+    for index in range(48):
+        qid = f"synthetic_trait_{index:02d}"
+        question = {
+            "id": qid, "text": f"Synthetic question {index}?", "category": "synthetic",
+            "kind": "yesno", "instructions": "Is `candidate` described this way?",
+            "tags_true": [f"trait_{index}"], "tags_false": [], "prior": 0.5,
+            "source": "button", "turn": index + 1, "fact_id": f"button:{qid}:{index + 1}",
+        }
         answer = "no" if index % 2 else "yes"
-        if traits.is_choice(question):
-            answer = next(iter(question["options"]))
         sess.evidence[qid] = (question, answer)
-    # Soft chip: must stay off 1.0 / 0.0, and still survive the cut.
+    # A soft chip remains a soft score and participates in the same audit.
     chip = dict(traits.QUESTIONS_BY_ID["species_angel"])
-    chip["soft_chip"] = True
+    chip.update({"soft_chip": True, "source": "inferred_chip", "turn": 49,
+                 "fact_id": "chip:species_angel:49"})
     sess.evidence["species_angel"] = (chip, "yes")
+    source_rows = engine._answered_trait_pack(sess)["rows"]
     sess.llm_queries = ["rewrite prose the model must not treat as evidence"]
     for _ in range(12):
         sess.constraints.append("soft history padding " * 30)
@@ -101,21 +105,21 @@ def test_answered_traits_survive_the_english_window():
             "answer": "yes", "detail": "typed detail " * 12,
         })
     state = engine._laya_state(sess, sess.scoring_pool())
-    full = engine._trait_signature(state)
-    assert full
-    assert ("species_angel", "yes", engine._SOFT_YES_SCORE) in full
-    assert engine._traits_surviving_window(state) == full
+    packed_rows = engine._trait_signature(state)
+    assert len(sess.evidence) == 49
+    assert packed_rows
+    assert ["species_angel", "yes", engine._SOFT_YES_SCORE] in source_rows
+    assert laya_context._state_size(state, laya_client.tokenizer()) <= engine._shared_state_room()
+    context = sess.context_log["shared"]
+    expected_ids = {f"button:synthetic_trait_{index:02d}:{index + 1}" for index in range(48)}
+    expected_ids.add("chip:species_angel:49")
+    included = set(context["included_fact_ids"])
+    omitted = set(context["omitted_fact_ids"])
+    assert included | omitted == expected_ids
+    assert included & omitted == set()
+    assert omitted
     packed = json.dumps(state["answered_traits"])
     assert "rewrite prose" not in packed
-    trailing = {
-        "goal": state["goal"],
-        "characters": state["characters"],
-        "confirmed_facts": state["confirmed_facts"],
-        "answer_history": state["answer_history"],
-        "questions_asked": state["questions_asked"],
-        "answered_traits": state["answered_traits"],
-    }
-    assert engine._traits_surviving_window(trailing) != full
 
 
 def test_ready_state_carries_match_evidence_and_match_still_scores(monkeypatch):
@@ -158,3 +162,43 @@ def test_ready_state_carries_match_evidence_and_match_still_scores(monkeypatch):
     assert stuck is True
     pool = next(item["state"] for item in seen if "pool_fits" in item["questions"])
     assert [row[0] for row in pool["answered_traits"]["rows"]] == ids
+
+
+def test_match_cache_rejudges_after_model_or_profile_fingerprint_changes(monkeypatch):
+    """Discard a judgment when either its model or bounded candidate profile changes."""
+    sess = sess_mod.new_session()
+    sess.candidates = [Candidate(id="c1", name="Mika", blurb="A pilot.")]
+    calls = []
+    monkeypatch.setattr(laya_client, "ask", lambda state, questions:
+                        calls.append(state) or {"match": {"noul": 0.9}})
+    question = traits.QUESTIONS_BY_ID["gender_female"]
+
+    engine.score_candidates(sess, question, "yes")
+    original = sess.match_fingerprints[("c1", "gender_female")]
+    assert len(calls) == 1
+
+    monkeypatch.setattr(laya_client, "MODEL_ID", "replacement-model")
+    engine._rescore_candidates(sess)
+    model_changed = sess.match_fingerprints[("c1", "gender_female")]
+    assert model_changed != original
+    assert len(calls) == 2
+
+    sess.candidates[0].blurb = "Mika is described as a woman pilot."
+    engine._rescore_candidates(sess)
+    assert sess.match_fingerprints[("c1", "gender_female")] != model_changed
+    assert len(calls) == 3
+
+
+def test_input_fingerprint_tracks_the_model_used():
+    """Include model identity in the cache key even when state and question match."""
+    question = {"id": "q", "instructions": "Is `candidate` human?"}
+    state = {"goal": "identify a character"}
+    first = laya_context.build_bounded_context(
+        state, [question], max_len=512, head_max_len=480,
+        state_fingerprint_context={"model": "first"},
+    )
+    second = laya_context.build_bounded_context(
+        state, [question], max_len=512, head_max_len=480,
+        state_fingerprint_context={"model": "second"},
+    )
+    assert first.input_fingerprint(question) != second.input_fingerprint(question)

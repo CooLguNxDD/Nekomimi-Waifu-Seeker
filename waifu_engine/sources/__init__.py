@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -138,6 +139,7 @@ class _Background:
         self.executor: ThreadPoolExecutor | None = None
         self.pending: set[str] = set()
         self.ready: dict[str, list[dict[str, Any]]] = {}
+        self.ready_meta: dict[str, dict[str, Any]] = {}
 
     def max_pending(self) -> int:
         """The configured cap on queued-or-running jobs (env, else default)."""
@@ -164,7 +166,7 @@ class _Background:
         return True
 
     def finish(self, key: str, hits: list[dict[str, Any]], t0: float, errors: list[str],
-               extra: str = "") -> None:
+               extra: str = "", metadata: dict[str, Any] | None = None) -> None:
         """Park ``hits`` for ``key``, clear its pending flag and log the run.
 
         ``extra`` is appended to the log line (the LLM-names funnel).
@@ -172,8 +174,12 @@ class _Background:
         with self.lock:
             self.pending.discard(key)
             if len(self.ready) >= _BG_MAX_KEYS:
-                self.ready.pop(next(iter(self.ready)))
+                oldest = next(iter(self.ready))
+                self.ready.pop(oldest)
+                self.ready_meta.pop(oldest, None)
             self.ready.setdefault(key, []).extend(hits)
+            if metadata:
+                self.ready_meta[key] = dict(metadata)
         if timing._log_on():
             timing.log.info("%s background key=%s %.0fms found=%d%s%s",
                             self.name, key[:8], (time.perf_counter() - t0) * 1000, len(hits),
@@ -182,8 +188,12 @@ class _Background:
 
     def take(self, key: str) -> list[dict[str, Any]]:
         """Hits a finished job left for ``key`` (consumed once)."""
+        return self.take_result(key)[0]
+
+    def take_result(self, key: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Consume finished hits and their version metadata together."""
         with self.lock:
-            return self.ready.pop(key, [])
+            return self.ready.pop(key, []), self.ready_meta.pop(key, {})
 
     def is_pending(self, key: str) -> bool:
         """Whether ``key`` has a job queued or running."""
@@ -204,7 +214,7 @@ _GEMINI_BG = _Background("gemini", "WAIFU_GEMINI_BG_MAX_PENDING", 2)
 _LLM_BG = _Background("llm_names", "WAIFU_LLM_NAMES_BG_MAX_PENDING", 2)
 # Facts each session last sent for hypotheses. The same facts would propose
 # the same names again, and each resolution costs a round of lookups.
-_LLM_DONE: dict[str, tuple[str, ...]] = {}
+_LLM_DONE: dict[str, tuple[tuple[str, ...], int]] = {}
 # Names kept for the DuckDuckGo fill (tests and callers use them).
 _BG_LOCK = _DDG_BG.lock
 _BG_PENDING = _DDG_BG.pending
@@ -246,7 +256,8 @@ def _gemini_run(key: str, facts: list[str], medium_hint: str | None, limit: int)
     _GEMINI_BG.finish(key, hits, t0, errors)
 
 
-def _llm_names_run(key: str, facts: list[str], medium_hint: str | None) -> None:
+def _llm_names_run(key: str, facts: list[str], medium_hint: str | None,
+                   evidence_revision: int = 0, fingerprint: str = "") -> None:
     """Background LLM-hypotheses job: propose names, resolve them, park the hits."""
     t0 = time.perf_counter()
     errors: list[str] = []
@@ -255,7 +266,10 @@ def _llm_names_run(key: str, facts: list[str], medium_hint: str | None) -> None:
         hits = llm_names.search(facts, medium_hint, errors=errors, stats=stats)
     except Exception as exc:  # noqa: BLE001 - search should not raise; be sure
         hits, errors = [], [str(exc)]
-    _LLM_BG.finish(key, hits, t0, errors, _funnel_note(stats))
+    _LLM_BG.finish(
+        key, hits, t0, errors, _funnel_note(stats),
+        {"evidence_revision": evidence_revision, "fingerprint": fingerprint},
+    )
 
 
 def _funnel_note(stats: dict[str, Any]) -> str:
@@ -271,21 +285,38 @@ def _funnel_note(stats: dict[str, Any]) -> str:
             f"unresolved={len(unresolved)} names=[{names}]")
 
 
-def _llm_names_start(key: str, facts: list[str], medium_hint: str | None) -> bool:
+def _llm_names_start(key: str, facts: list[str], medium_hint: str | None,
+                     evidence_revision: int = 0) -> bool:
     """Queue hypotheses for ``facts`` unless this session already ran those facts."""
     clean = tuple(f for f in facts if f and f.strip())
     if not clean or not llm_names.query_llm.names_enabled():
         return False
+    fingerprint = hashlib.sha256("\n".join(clean).encode("utf-8")).hexdigest()
     with _LLM_BG.lock:
-        if _LLM_DONE.get(key) == clean:
+        if _LLM_DONE.get(key) == (clean, evidence_revision):
             return False
-    if not _LLM_BG.start(key, _llm_names_run, list(clean), medium_hint):
+    if not _LLM_BG.start(key, _llm_names_run, list(clean), medium_hint,
+                         evidence_revision, fingerprint):
         return False
     with _LLM_BG.lock:
         if len(_LLM_DONE) >= _BG_MAX_KEYS and key not in _LLM_DONE:
             _LLM_DONE.pop(next(iter(_LLM_DONE)))
-        _LLM_DONE[key] = clean
+        _LLM_DONE[key] = (clean, evidence_revision)
     return True
+
+
+def take_hypothesis_candidates(key: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Consume resolved proposal leads with the evidence revision that requested them."""
+    return _LLM_BG.take_result(key)
+
+
+def background_status(key: str) -> dict[str, bool]:
+    """Report whether any candidate provider still has work for this session."""
+    return {
+        "ddg": _DDG_BG.is_pending(key),
+        "gemini": _GEMINI_BG.is_pending(key),
+        "llm_names": _LLM_BG.is_pending(key),
+    }
 
 
 def take_background(key: str) -> list[dict[str, Any]]:

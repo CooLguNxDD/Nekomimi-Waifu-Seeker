@@ -44,6 +44,8 @@ Consequences, in order of how often they get forgotten:
 | `waifu_engine/nekomimi/question_bank.json` | Question template: yes/no rows, choice rows, and `trait_block` groups |
 | `waifu_engine/nekomimi/traits.py` | Expands the JSON template, plus `ANSWER_WEIGHT` and `make_dynamic()` for mined traits |
 | `waifu_engine/nekomimi/session.py` | `Candidate`, `GuessSession`, log-odds pool, in-process store + TTL |
+| `waifu_engine/nekomimi/memory.py` | Rebuilds normalized player facts from the transcript, scored answers, and rejected identities |
+| `waifu_engine/nekomimi/context.py` | Fits Laya state to each question window and records included or omitted fact IDs |
 | `waifu_engine/nekomimi/engine.py` | The turn loop: `start`, `submit_answer`, `submit_guess_result`, `state_payload` |
 | `webui/` | SolidJS UI (Vite). File routes for `/` and `/nekomimi`. `npm run build` writes `waifu_engine/webui_dist`, which setuptools ships; FastAPI 503s until that bundle exists |
 | `waifu_engine/browser_search.py` | Process-wide headless Chromium. `search` / `enrich` / `available()`. Never raises. Optional extra. |
@@ -152,6 +154,17 @@ a turn). It is capped (`WAIFU_DDG_MAX_REQUESTS` generic queries within
 runs on a background worker whenever the session already has candidates; its
 hits join the next search. It runs inline only when nothing else was found.
 
+Name proposals are a separate background path. `proposal_facts()` rebuilds a
+bounded prompt from the seed, answered buttons (including the labels offered
+for an `other` choice), typed details, and the confirmed medium or series;
+rejected names and scraped profiles never enter that prompt. A proposal can
+run for an empty or flat pool, a new meaningful seed/detail/medium/series/rare
+answer, or a newly rejected identity. Unchanged facts use a turn cooldown and
+the session cap (`WAIFU_LLM_NAMES_COOLDOWN_TURNS` and
+`WAIFU_LLM_NAMES_MAX_PER_SESSION`). Results carry the evidence revision that
+requested them and are replayed against the current evidence before they affect
+the posterior.
+
 Only the player's typed text (or an LLM rewrite of it) can match names, so
 `find_candidates(specific=False)` when the facts are broad button answers:
 Playwright/Wikipedia/AniList name searches are skipped, DuckDuckGo never runs
@@ -259,6 +272,8 @@ text nodes (`{name}`), never `innerHTML`.
 | `WAIFU_QUERY_LLM_MAX_TOKENS` | `96` | Rewrite reply cap; name proposals use at least 384 |
 | `WAIFU_LLM_NAMES` | follows `WAIFU_QUERY_LLM` | `0` stops the LLM proposing candidate names |
 | `WAIFU_LLM_NAMES_BG_MAX_PENDING` | `2` | Name-proposal jobs queued or running at once |
+| `WAIFU_LLM_NAMES_MAX_PER_SESSION` | `4` | Maximum name-proposal requests in one session |
+| `WAIFU_LLM_NAMES_COOLDOWN_TURNS` | `2` | Minimum turns between proposals with unchanged evidence |
 | `WAIFU_QUERY_LLM_API_KEY` | — | Bearer key for the query endpoint; blank for local. Falls back to `OPENAI_API_KEY` only for `https://api.openai.com` |
 | `WAIFU_QUERY_LLM_TIMEOUT` | `20` | Seconds per rewrite call |
 | `WAIFU_QUERY_LLM_WAIT` | `0` | Seconds a turn may wait for the LLM (`0` = never block) |
@@ -323,11 +338,12 @@ DuckDuckGo.
    names are leads: `sources.llm_names` keeps one only if a real AniList/Wikipedia page matches it, and
    the profile comes from that page. Its input is player facts only; never send it scraped names or
    blurbs (a rejected guess's name is left out for that reason). Tests stub its HTTP; never call a real endpoint.
-7. The query LLM must never block a turn by default, and must not be called
-   per answer. Rewrites run only for new typed text, and only when Laya says
-   search is stuck. Name proposals run on a background source worker, at
-   most once per distinct set of facts per session, and only while the pool
-   is empty or flat (leader < 0.25 from turn 3) or search is stuck.
+7. The query LLM must never block a turn by default. Rewrites run only for new
+   typed text when Laya says search is stuck. Name proposals use normalized
+   player facts, including button answers and details, and run on a background
+   source worker when the pool is empty or flat, meaningful new facts arrive,
+   or an identity is rejected. Unchanged facts obey the turn cooldown and
+   per-session request cap.
 8. Gemini (`sources/gemini.py`) is a **candidate source only**: it lists
    characters, never writes question text, never makes decisions. Its reply is
    untrusted web content (parse defensively, render with `textContent`). Its
